@@ -192,7 +192,7 @@ def asa_report(asa_token: str, report_type: str, start_date: str, end_date: str,
             },
             "timeZone": "UTC",
             "returnRecordsWithNoMetrics": False,
-            "returnRowTotals": False,
+            "returnRowTotals": True,
             "returnGrandTotals": False,
         }
     elif report_type == "adgroups":
@@ -206,6 +206,7 @@ def asa_report(asa_token: str, report_type: str, start_date: str, end_date: str,
             },
             "timeZone": "UTC",
             "returnRecordsWithNoMetrics": True,
+            "returnRowTotals": True,
         }
     elif report_type == "keywords":
         path = f"/reports/campaigns/{campaign_id}/keywords"
@@ -218,6 +219,7 @@ def asa_report(asa_token: str, report_type: str, start_date: str, end_date: str,
             },
             "timeZone": "UTC",
             "returnRecordsWithNoMetrics": True,
+            "returnRowTotals": True,
         }
     elif report_type == "ads":
         path = f"/reports/campaigns/{campaign_id}/ads"
@@ -230,6 +232,7 @@ def asa_report(asa_token: str, report_type: str, start_date: str, end_date: str,
             },
             "timeZone": "UTC",
             "returnRecordsWithNoMetrics": True,
+            "returnRowTotals": True,
         }
     else:
         raise ValueError(f"Unknown report type: {report_type}")
