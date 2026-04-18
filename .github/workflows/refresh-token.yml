@@ -1,0 +1,29 @@
+name: Refresh Apple Search Ads Token
+
+on:
+  schedule:
+    # Every 30 minutes
+    - cron: "*/30 * * * *"
+  # Also allow manual trigger
+  workflow_dispatch:
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run token refresher
+        env:
+          CLIENT_ID: ${{ secrets.ASA_CLIENT_ID }}
+          TEAM_ID: ${{ secrets.ASA_TEAM_ID }}
+          KEY_ID: ${{ secrets.ASA_KEY_ID }}
+          PRIVATE_KEY_PEM: ${{ secrets.ASA_PRIVATE_KEY_PEM }}
+          SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+        run: python3 refresh_token.py
