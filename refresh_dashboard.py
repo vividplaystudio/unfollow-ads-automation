@@ -90,8 +90,11 @@ def sheets_read(google_token: str, range_: str) -> list:
 
 
 def sheets_write(google_token: str, range_: str, values: list) -> None:
-    # Clear first
-    clear_url = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{urllib.parse.quote(range_)}:clear"
+    # Parse tab name for clearing the entire tab (simpler, more reliable)
+    tab_name = range_.split("!")[0] if "!" in range_ else range_
+    clear_range = tab_name  # clear whole tab
+
+    clear_url = f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/{urllib.parse.quote(clear_range)}:clear"
     req = urllib.request.Request(
         clear_url, data=b"{}",
         headers={"Authorization": f"Bearer {google_token}", "Content-Type": "application/json"},
@@ -103,19 +106,42 @@ def sheets_write(google_token: str, range_: str, values: list) -> None:
     except urllib.error.HTTPError as e:
         print(f"Clear warning: {e.code} for {range_}")
 
-    # Write
+    if not values:
+        return
+
+    # Write to A1 — let Sheets auto-expand
+    write_range = f"{tab_name}!A1"
+
+    # Sanitize: ensure all values are JSON-safe (no None, convert to str/number)
+    clean_values = []
+    for row in values:
+        clean_row = []
+        for v in row:
+            if v is None:
+                clean_row.append("")
+            elif isinstance(v, (str, int, float, bool)):
+                clean_row.append(v)
+            else:
+                clean_row.append(str(v))
+        clean_values.append(clean_row)
+
     url = (
         f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/"
-        f"{urllib.parse.quote(range_)}?valueInputOption=USER_ENTERED"
+        f"{urllib.parse.quote(write_range)}?valueInputOption=USER_ENTERED"
     )
-    body = json.dumps({"range": range_, "values": values}).encode()
+    body = json.dumps({"range": write_range, "values": clean_values}).encode()
     req = urllib.request.Request(
         url, data=body,
         headers={"Authorization": f"Bearer {google_token}", "Content-Type": "application/json"},
         method="PUT",
     )
-    with urllib.request.urlopen(req) as resp:
-        resp.read()
+    try:
+        with urllib.request.urlopen(req) as resp:
+            resp.read()
+    except urllib.error.HTTPError as e:
+        err_body = e.read().decode()[:500]
+        print(f"Write error for {tab_name}: {e.code} — {err_body}")
+        raise
 
 
 def sheets_ensure_tab(google_token: str, tab_name: str) -> None:
@@ -724,10 +750,26 @@ def main() -> None:
     sheets_write(google_token, "Ads!A1:I500", ad_rows)
     print("  ✅ Ads")
 
-    # Write last update timestamp
-    sheets_write(google_token, "_Config!B3",
-                 [[datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")]])
-    sheets_write(google_token, "_Config!A3", [["Last Dashboard Refresh"]])
+    # Write last update timestamp to _Config!B3 without wiping the whole config tab
+    last_updated = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    update_url = (
+        f"https://sheets.googleapis.com/v4/spreadsheets/{SPREADSHEET_ID}/values/"
+        f"{urllib.parse.quote('_Config!A3:B3')}?valueInputOption=USER_ENTERED"
+    )
+    body = json.dumps({
+        "range": "_Config!A3:B3",
+        "values": [["Last Dashboard Refresh", last_updated]],
+    }).encode()
+    req = urllib.request.Request(
+        update_url, data=body,
+        headers={"Authorization": f"Bearer {google_token}", "Content-Type": "application/json"},
+        method="PUT",
+    )
+    try:
+        with urllib.request.urlopen(req) as resp:
+            resp.read()
+    except urllib.error.HTTPError as e:
+        print(f"Config update warning: {e.code}")
 
     print("\n🎉 Dashboard refreshed!")
 
