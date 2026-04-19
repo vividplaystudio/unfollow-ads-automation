@@ -216,6 +216,100 @@ def rc_get_all_customers() -> list:
     return all_customers
 
 
+def rc_fetch_customer_attrs(customer_id: str) -> dict:
+    """Fetch attribution attributes for one customer."""
+    encoded = urllib.parse.quote(customer_id, safe="")
+    url = f"https://api.revenuecat.com/v2/projects/{REVENUECAT_PROJECT_ID}/customers/{encoded}/attributes"
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {REVENUECAT_API_KEY}"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode())
+        result = {}
+        for item in data.get("items", []):
+            result[item.get("name", "")] = item.get("value", "")
+        return result
+    except Exception:
+        return {}
+
+
+def rc_fetch_customer_purchases(customer_id: str) -> float:
+    """Sum revenue in USD from all purchases for one customer."""
+    encoded = urllib.parse.quote(customer_id, safe="")
+    url = f"https://api.revenuecat.com/v2/projects/{REVENUECAT_PROJECT_ID}/customers/{encoded}/purchases?limit=100"
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {REVENUECAT_API_KEY}"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode())
+        total = 0.0
+        for p in data.get("items", []):
+            # Try multiple possible field names for amount
+            for key in ["revenue_in_usd", "amount_in_usd", "price_in_usd", "revenue", "price"]:
+                v = p.get(key)
+                if v is not None:
+                    try:
+                        total += float(v)
+                        break
+                    except (TypeError, ValueError):
+                        pass
+        return total
+    except Exception:
+        return 0.0
+
+
+def rc_fetch_customer_active(customer_id: str) -> bool:
+    """Check if customer has any active entitlement."""
+    encoded = urllib.parse.quote(customer_id, safe="")
+    url = f"https://api.revenuecat.com/v2/projects/{REVENUECAT_PROJECT_ID}/customers/{encoded}/active_entitlements"
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {REVENUECAT_API_KEY}"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode())
+        return len(data.get("items", [])) > 0
+    except Exception:
+        return False
+
+
+def rc_enrich_customers(customers: list) -> list:
+    """
+    For each customer, fetch their attributes + purchases in parallel.
+    Skip customers from before our earliest date range (March 1, 2026).
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    # Cutoff — only enrich customers from after this date to save API calls
+    cutoff_ms = int(datetime(2026, 3, 1, tzinfo=timezone.utc).timestamp() * 1000)
+
+    to_enrich = [c for c in customers if c.get("first_seen_at", 0) >= cutoff_ms]
+    print(f"  Enriching {len(to_enrich)} customers (from {len(customers)} total)...")
+
+    def enrich_one(customer):
+        cid = customer["id"]
+        attrs = rc_fetch_customer_attrs(cid)
+        customer["_attrs"] = attrs
+        # Only fetch purchases + active if ASA-attributed (saves calls)
+        if attrs.get("$mediaSource") == "Apple Search Ads":
+            customer["_revenue"] = rc_fetch_customer_purchases(cid)
+            customer["_active"] = rc_fetch_customer_active(cid)
+        else:
+            customer["_revenue"] = 0.0
+            customer["_active"] = False
+        return customer
+
+    enriched = []
+    done = 0
+    with ThreadPoolExecutor(max_workers=25) as executor:
+        futures = [executor.submit(enrich_one, c) for c in to_enrich]
+        for future in as_completed(futures):
+            enriched.append(future.result())
+            done += 1
+            if done % 100 == 0:
+                print(f"    {done}/{len(to_enrich)}")
+
+    asa_count = sum(1 for c in enriched if c.get("_attrs", {}).get("$mediaSource") == "Apple Search Ads")
+    print(f"  Enriched: {len(enriched)} total, {asa_count} ASA-attributed")
+    return enriched
+
+
 # ══════════════════════════════════════════════════════════════════
 # Data processing
 # ══════════════════════════════════════════════════════════════════
@@ -230,14 +324,8 @@ def get_country_from_campaign(name: str, countries: str) -> str:
     return ""
 
 
-def safe_get_attr(attrs: dict, key: str) -> str:
-    v = attrs.get(key)
-    if isinstance(v, dict):
-        return v.get("value", "")
-    return v or ""
-
-
 def build_revenue_index(customers: list) -> dict:
+    """Customers are expected to have been enriched with _attrs / _revenue / _active."""
     now = datetime.now(timezone.utc)
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     yesterday_start = today_start - timedelta(days=1)
@@ -261,21 +349,20 @@ def build_revenue_index(customers: list) -> dict:
             continue
         first_seen = datetime.fromtimestamp(first_seen_ms / 1000, tz=timezone.utc)
 
-        attrs = c.get("attributes", {})
-        media_source = safe_get_attr(attrs, "$mediaSource")
-        campaign = safe_get_attr(attrs, "$campaign")
-        keyword = safe_get_attr(attrs, "$keyword").lower()
-        country = safe_get_attr(attrs, "$ip_country_code")
-
+        attrs = c.get("_attrs", {})
+        media_source = attrs.get("$mediaSource", "")
         if media_source != "Apple Search Ads":
             continue
 
-        total = float(c.get("total_spent_in_usd", 0) or 0)
-        is_active = 1 if c.get("active_entitlements") else 0
+        campaign = attrs.get("$campaign", "")
+        keyword = attrs.get("$keyword", "").lower()
+        country = c.get("last_seen_country", "")
+
+        total = float(c.get("_revenue", 0) or 0)
+        is_active = 1 if c.get("_active") else 0
 
         for r, start in ranges.items():
             if r == "yesterday":
-                # yesterday is BETWEEN yesterday_start and today_start
                 if not (yesterday_start <= first_seen < today_start):
                     continue
             elif start and first_seen < start:
@@ -400,9 +487,9 @@ def main() -> None:
                     "spend": float(t.get("localSpend", {}).get("amount", 0) or 0),
                     "impressions": int(t.get("impressions", 0) or 0),
                     "taps": int(t.get("taps", 0) or 0),
-                    "installs": int(t.get("installs", 0) or 0),
+                    "installs": int(t.get("totalInstalls", 0) or 0),
                     "cpt": float(t.get("avgCPT", {}).get("amount", 0) or 0),
-                    "cpa": float(t.get("avgCPA", {}).get("amount", 0) or 0),
+                    "cpa": float(t.get("totalAvgCPI", {}).get("amount", 0) or 0),
                     "ttr": float(t.get("ttr", 0) or 0),
                 }
         except Exception as e:
@@ -429,7 +516,7 @@ def main() -> None:
                     "spend": float(t.get("localSpend", {}).get("amount", 0) or 0),
                     "impressions": int(t.get("impressions", 0) or 0),
                     "taps": int(t.get("taps", 0) or 0),
-                    "installs": int(t.get("installs", 0) or 0),
+                    "installs": int(t.get("totalInstalls", 0) or 0),
                     "cpt": float(t.get("avgCPT", {}).get("amount", 0) or 0),
                 }
 
@@ -449,7 +536,7 @@ def main() -> None:
                         "spend": float(t.get("localSpend", {}).get("amount", 0) or 0),
                         "impressions": int(t.get("impressions", 0) or 0),
                         "taps": int(t.get("taps", 0) or 0),
-                        "installs": int(t.get("installs", 0) or 0),
+                        "installs": int(t.get("totalInstalls", 0) or 0),
                     }
 
         print(f"  Keywords this range: {len(asa_keyword_data[range_name])}")
@@ -457,6 +544,7 @@ def main() -> None:
     # Fetch RevenueCat
     print("\n--- Fetching RevenueCat ---")
     customers = rc_get_all_customers()
+    customers = rc_enrich_customers(customers)
     rev_index = build_revenue_index(customers)
 
     # Build unified output
