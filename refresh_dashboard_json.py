@@ -232,40 +232,110 @@ def rc_fetch_customer_attrs(customer_id: str) -> dict:
         return {}
 
 
-def rc_fetch_customer_revenue(customer_id: str) -> float:
-    """Sum gross revenue (USD) from all subscriptions + one-time purchases."""
-    encoded = urllib.parse.quote(customer_id, safe="")
-    total = 0.0
+def detect_tier(period_ms: int) -> str:
+    """Determine sub tier from billing period duration (ms)."""
+    if period_ms <= 0:
+        return "other"
+    days = period_ms / (1000 * 86400)
+    if days < 12:
+        return "weekly"
+    if days < 200:
+        return "monthly"
+    return "yearly"
 
-    # Subscriptions (main revenue source)
-    url = f"https://api.revenuecat.com/v2/projects/{REVENUECAT_PROJECT_ID}/customers/{encoded}/subscriptions?limit=100"
+
+def rc_fetch_customer_subs_detail(customer_id: str) -> dict:
+    """
+    Fetch all subscriptions for a customer and compute:
+    - total gross revenue
+    - tier breakdown (weekly/monthly/yearly)
+    - active + canceled flags
+    - estimated renewals count
+    """
+    encoded = urllib.parse.quote(customer_id, safe="")
+    result = {
+        "revenue": 0.0,
+        "tier_counts": {"weekly": 0, "monthly": 0, "yearly": 0, "other": 0},
+        "tier_revenue": {"weekly": 0.0, "monthly": 0.0, "yearly": 0.0, "other": 0.0},
+        "active_tier": None,          # if actively paying
+        "is_active": False,           # has any active sub
+        "is_canceled": False,         # has any "will_not_renew" sub
+        "renewals": 0,                # total renewals across all subs
+        "primary_tier": None,         # most recent tier (for labeling)
+        "sub_count": 0,
+    }
+
+    # Fetch subscriptions
+    url = f"https://api.revenuecat.com/v2/projects/{REVENUECAT_PROJECT_ID}/customers/{encoded}/subscriptions?limit=50"
     req = urllib.request.Request(url, headers={"Authorization": f"Bearer {REVENUECAT_API_KEY}"})
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             data = json.loads(resp.read().decode())
-        for s in data.get("items", []):
-            rev = s.get("total_revenue_in_usd", {})
-            if isinstance(rev, dict):
-                total += float(rev.get("gross", 0) or 0)
     except Exception:
-        pass
+        return result
 
-    # One-time purchases (non-subscription)
-    url = f"https://api.revenuecat.com/v2/projects/{REVENUECAT_PROJECT_ID}/customers/{encoded}/purchases?limit=100"
+    latest_starts = 0
+    for s in data.get("items", []):
+        result["sub_count"] += 1
+        gross = 0.0
+        rev = s.get("total_revenue_in_usd") or {}
+        if isinstance(rev, dict):
+            gross = float(rev.get("gross", 0) or 0)
+        result["revenue"] += gross
+
+        period_start = s.get("current_period_starts_at") or s.get("starts_at") or 0
+        period_end = s.get("current_period_ends_at") or s.get("ends_at") or 0
+        period_ms = max(0, (period_end or 0) - (period_start or 0))
+        tier = detect_tier(period_ms)
+        result["tier_counts"][tier] = result["tier_counts"].get(tier, 0) + 1
+        result["tier_revenue"][tier] = result["tier_revenue"].get(tier, 0) + gross
+
+        starts = s.get("starts_at") or period_start
+        ends = s.get("ends_at") or period_end
+        total_ms = max(0, (ends or 0) - (starts or 0))
+        if period_ms > 0 and total_ms > 0:
+            periods = total_ms / period_ms
+            result["renewals"] += max(0, int(round(periods)) - 1)
+
+        status = s.get("status", "")
+        auto = s.get("auto_renewal_status", "")
+
+        if status == "active":
+            result["is_active"] = True
+            if (starts or 0) > latest_starts:
+                latest_starts = starts or 0
+                result["active_tier"] = tier
+
+        if auto == "will_not_renew":
+            result["is_canceled"] = True
+
+        if (starts or 0) > latest_starts and not result["active_tier"]:
+            result["primary_tier"] = tier
+
+    # If no active tier set, fall back to most recent sub's tier
+    if not result["active_tier"] and not result["primary_tier"] and result["sub_count"] > 0:
+        # Use any tier that has count > 0, prefer yearly > monthly > weekly
+        for t in ["yearly", "monthly", "weekly"]:
+            if result["tier_counts"].get(t, 0) > 0:
+                result["primary_tier"] = t
+                break
+
+    # Also fetch one-time purchases
+    url = f"https://api.revenuecat.com/v2/projects/{REVENUECAT_PROJECT_ID}/customers/{encoded}/purchases?limit=50"
     req = urllib.request.Request(url, headers={"Authorization": f"Bearer {REVENUECAT_API_KEY}"})
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             data = json.loads(resp.read().decode())
         for p in data.get("items", []):
-            rev = p.get("revenue_in_usd", p.get("total_revenue_in_usd", {}))
+            rev = p.get("revenue_in_usd") or p.get("total_revenue_in_usd") or {}
             if isinstance(rev, dict):
-                total += float(rev.get("gross", 0) or 0)
+                result["revenue"] += float(rev.get("gross", 0) or 0)
             elif isinstance(rev, (int, float)):
-                total += float(rev)
+                result["revenue"] += float(rev)
     except Exception:
         pass
 
-    return total
+    return result
 
 
 def rc_fetch_customer_active(customer_id: str) -> bool:
@@ -298,13 +368,25 @@ def rc_enrich_customers(customers: list) -> list:
         cid = customer["id"]
         attrs = rc_fetch_customer_attrs(cid)
         customer["_attrs"] = attrs
-        # Only fetch purchases + active if ASA-attributed (saves calls)
         if attrs.get("$mediaSource") == "Apple Search Ads":
-            customer["_revenue"] = rc_fetch_customer_revenue(cid)
-            customer["_active"] = rc_fetch_customer_active(cid)
+            subs = rc_fetch_customer_subs_detail(cid)
+            customer["_revenue"] = subs["revenue"]
+            customer["_active"] = subs["is_active"]
+            customer["_canceled"] = subs["is_canceled"]
+            customer["_renewals"] = subs["renewals"]
+            customer["_tier"] = subs["active_tier"] or subs["primary_tier"] or "none"
+            customer["_tier_counts"] = subs["tier_counts"]
+            customer["_tier_revenue"] = subs["tier_revenue"]
+            customer["_sub_count"] = subs["sub_count"]
         else:
             customer["_revenue"] = 0.0
             customer["_active"] = False
+            customer["_canceled"] = False
+            customer["_renewals"] = 0
+            customer["_tier"] = "none"
+            customer["_tier_counts"] = {"weekly": 0, "monthly": 0, "yearly": 0, "other": 0}
+            customer["_tier_revenue"] = {"weekly": 0.0, "monthly": 0.0, "yearly": 0.0, "other": 0.0}
+            customer["_sub_count"] = 0
         return customer
 
     enriched = []
@@ -351,9 +433,18 @@ def build_revenue_index(customers: list) -> dict:
         "all": None,
     }
 
-    by_kw = defaultdict(lambda: defaultdict(lambda: {"users": 0, "paid_subs": 0, "revenue": 0.0, "active": 0}))
-    by_camp = defaultdict(lambda: defaultdict(lambda: {"users": 0, "paid_subs": 0, "revenue": 0.0, "active": 0}))
-    by_country = defaultdict(lambda: defaultdict(lambda: {"users": 0, "paid_subs": 0, "revenue": 0.0, "active": 0}))
+    def _zero():
+        return {
+            "users": 0, "paid_subs": 0, "revenue": 0.0, "active": 0,
+            "canceled": 0, "renewals": 0,
+            "weekly_subs": 0, "monthly_subs": 0, "yearly_subs": 0,
+            "weekly_rev": 0.0, "monthly_rev": 0.0, "yearly_rev": 0.0,
+        }
+
+    by_kw = defaultdict(lambda: defaultdict(_zero))
+    by_camp = defaultdict(lambda: defaultdict(_zero))
+    by_adgroup = defaultdict(lambda: defaultdict(_zero))
+    by_country = defaultdict(lambda: defaultdict(_zero))
 
     for c in customers:
         first_seen_ms = c.get("first_seen_at")
@@ -368,11 +459,15 @@ def build_revenue_index(customers: list) -> dict:
 
         campaign = attrs.get("$campaign", "")
         keyword = attrs.get("$keyword", "").lower()
+        adgroup = attrs.get("$adGroup", "")
         country = c.get("last_seen_country", "")
 
         total = float(c.get("_revenue", 0) or 0)
         is_active = 1 if c.get("_active") else 0
-        # A "paid sub" = customer with any revenue OR currently active entitlement
+        is_canceled = 1 if c.get("_canceled") else 0
+        renewals = int(c.get("_renewals") or 0)
+        tier_counts = c.get("_tier_counts") or {}
+        tier_rev = c.get("_tier_revenue") or {}
         is_paid = 1 if (total > 0 or is_active) else 0
 
         for r, start in ranges.items():
@@ -382,21 +477,32 @@ def build_revenue_index(customers: list) -> dict:
             elif start and first_seen < start:
                 continue
 
-            by_kw[(campaign, keyword)][r]["users"] += 1
-            by_kw[(campaign, keyword)][r]["paid_subs"] += is_paid
-            by_kw[(campaign, keyword)][r]["revenue"] += total
-            by_kw[(campaign, keyword)][r]["active"] += is_active
+            buckets = [
+                by_kw[(campaign, keyword)][r],
+                by_camp[campaign][r],
+                by_adgroup[(campaign, adgroup)][r],
+                by_country[country][r],
+            ]
+            for b in buckets:
+                b["users"] += 1
+                b["paid_subs"] += is_paid
+                b["revenue"] += total
+                b["active"] += is_active
+                b["canceled"] += is_canceled
+                b["renewals"] += renewals
+                b["weekly_subs"] += tier_counts.get("weekly", 0)
+                b["monthly_subs"] += tier_counts.get("monthly", 0)
+                b["yearly_subs"] += tier_counts.get("yearly", 0)
+                b["weekly_rev"] += tier_rev.get("weekly", 0.0)
+                b["monthly_rev"] += tier_rev.get("monthly", 0.0)
+                b["yearly_rev"] += tier_rev.get("yearly", 0.0)
 
-            by_camp[campaign][r]["users"] += 1
-            by_camp[campaign][r]["paid_subs"] += is_paid
-            by_camp[campaign][r]["revenue"] += total
-            by_camp[campaign][r]["active"] += is_active
-
-            by_country[country][r]["users"] += 1
-            by_country[country][r]["paid_subs"] += is_paid
-            by_country[country][r]["revenue"] += total
-
-    return {"by_keyword": by_kw, "by_campaign": by_camp, "by_country": by_country}
+    return {
+        "by_keyword": by_kw,
+        "by_campaign": by_camp,
+        "by_adgroup": by_adgroup,
+        "by_country": by_country,
+    }
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -484,9 +590,9 @@ def main() -> None:
         "all": (datetime(2026, 3, 1).date(), today),
     }
 
-    asa_campaign_data = {r: {} for r in ranges}  # keyed by campaign_id
-    asa_keyword_data = {r: {} for r in ranges}   # keyed by (campaign_id, keyword)
-    asa_ad_data = {}  # for "all"
+    asa_campaign_data = {r: {} for r in ranges}
+    asa_keyword_data = {r: {} for r in ranges}
+    asa_ad_data = {}  # keyed by (campaign_id, ad_name), multi-range within each
 
     for range_name, (start, end) in ranges.items():
         print(f"\n--- Fetching {range_name} ({start} to {end}) ---")
@@ -537,24 +643,25 @@ def main() -> None:
                     "cpt": float(t.get("avgCPT", {}).get("amount", 0) or 0),
                 }
 
-            # Only fetch ads for "all" to save time
-            if range_name == "all":
-                ad_rows = asa_report(asa_token, "ads", start_s, end_s, campaign_id=cid)
-                for row in ad_rows:
-                    m = row.get("metadata", {})
-                    t = row.get("total", {})
-                    ad_name = m.get("adName") or m.get("name") or "—"
-                    asa_ad_data[(cid, ad_name)] = {
+            # Fetch ads for all ranges
+            ad_rows = asa_report(asa_token, "ads", start_s, end_s, campaign_id=cid)
+            for row in ad_rows:
+                m = row.get("metadata", {})
+                t = row.get("total", {})
+                ad_name = m.get("adName") or m.get("name") or "—"
+                key = (cid, ad_name)
+                if key not in asa_ad_data:
+                    asa_ad_data[key] = {
                         "name": ad_name,
                         "campaign_id": cid,
                         "campaign": meta["name"],
                         "country": get_country_from_campaign(meta["name"], meta["countries"]),
                         "cpp_id": m.get("cppId", ""),
-                        "spend": float(t.get("localSpend", {}).get("amount", 0) or 0),
-                        "impressions": int(t.get("impressions", 0) or 0),
-                        "taps": int(t.get("taps", 0) or 0),
-                        "installs": int(t.get("totalInstalls", 0) or 0),
                     }
+                asa_ad_data[key][f"spend_{range_name}"] = float(t.get("localSpend", {}).get("amount", 0) or 0)
+                asa_ad_data[key][f"impressions_{range_name}"] = int(t.get("impressions", 0) or 0)
+                asa_ad_data[key][f"taps_{range_name}"] = int(t.get("taps", 0) or 0)
+                asa_ad_data[key][f"installs_{range_name}"] = int(t.get("totalInstalls", 0) or 0)
 
         print(f"  Keywords this range: {len(asa_keyword_data[range_name])}")
 
@@ -566,6 +673,7 @@ def main() -> None:
 
     # Build unified output
     print("\nBuilding JSON...")
+    print(f"  Ads collected: {len(asa_ad_data)}")
 
     # Campaigns list
     campaigns_out = []
@@ -585,11 +693,19 @@ def main() -> None:
             row[f"taps_{r}"] = d["taps"]
             row[f"impressions_{r}"] = d["impressions"]
 
-            rev_data = rev_index["by_campaign"].get(meta["name"], {}).get(r, {"users": 0, "paid_subs": 0, "revenue": 0, "active": 0})
-            row[f"revenue_{r}"] = round(rev_data["revenue"], 2)
-            row[f"subs_{r}"] = rev_data["paid_subs"]  # Now means PAYING subs
-            row[f"asa_users_{r}"] = rev_data["users"]  # Total ASA-attributed users
-            row[f"active_{r}"] = rev_data["active"]
+            rev_data = rev_index["by_campaign"].get(meta["name"], {}).get(r) or {}
+            row[f"revenue_{r}"] = round(rev_data.get("revenue", 0), 2)
+            row[f"subs_{r}"] = rev_data.get("paid_subs", 0)
+            row[f"asa_users_{r}"] = rev_data.get("users", 0)
+            row[f"active_{r}"] = rev_data.get("active", 0)
+            row[f"canceled_{r}"] = rev_data.get("canceled", 0)
+            row[f"renewals_{r}"] = rev_data.get("renewals", 0)
+            row[f"weekly_subs_{r}"] = rev_data.get("weekly_subs", 0)
+            row[f"monthly_subs_{r}"] = rev_data.get("monthly_subs", 0)
+            row[f"yearly_subs_{r}"] = rev_data.get("yearly_subs", 0)
+            row[f"weekly_rev_{r}"] = round(rev_data.get("weekly_rev", 0), 2)
+            row[f"monthly_rev_{r}"] = round(rev_data.get("monthly_rev", 0), 2)
+            row[f"yearly_rev_{r}"] = round(rev_data.get("yearly_rev", 0), 2)
         campaigns_out.append(row)
 
     # Keywords list — merge across ranges by (campaign_id, keyword)
@@ -637,37 +753,75 @@ def main() -> None:
             row[f"impressions_{r}"] = d["impressions"]
             row[f"cpt_{r}"] = round(d.get("cpt", 0), 2)
 
-            rev_data = rev_index["by_keyword"].get((meta.get("name", ""), kw_lower), {}).get(r, {"users": 0, "paid_subs": 0, "revenue": 0})
-            row[f"revenue_{r}"] = round(rev_data["revenue"], 2)
-            row[f"subs_{r}"] = rev_data["paid_subs"]
-            row[f"asa_users_{r}"] = rev_data["users"]
+            rev_data = rev_index["by_keyword"].get((meta.get("name", ""), kw_lower), {}).get(r) or {}
+            row[f"revenue_{r}"] = round(rev_data.get("revenue", 0), 2)
+            row[f"subs_{r}"] = rev_data.get("paid_subs", 0)
+            row[f"asa_users_{r}"] = rev_data.get("users", 0)
+            row[f"active_{r}"] = rev_data.get("active", 0)
+            row[f"canceled_{r}"] = rev_data.get("canceled", 0)
+            row[f"renewals_{r}"] = rev_data.get("renewals", 0)
+            row[f"weekly_subs_{r}"] = rev_data.get("weekly_subs", 0)
+            row[f"monthly_subs_{r}"] = rev_data.get("monthly_subs", 0)
+            row[f"yearly_subs_{r}"] = rev_data.get("yearly_subs", 0)
         keywords_out.append(row)
 
-    # Ads
+    # Ads — with per-range metrics
     ads_out = []
     for ad in asa_ad_data.values():
-        ads_out.append({
+        row = {
             "name": ad["name"],
             "campaign": ad["campaign"],
+            "campaign_id": ad["campaign_id"],
             "country": ad["country"],
             "cpp_id": ad["cpp_id"],
-            "spend": round(ad["spend"], 2),
-            "installs": ad["installs"],
-            "impressions": ad["impressions"],
-            "taps": ad["taps"],
-        })
+        }
+        for r in ranges:
+            row[f"spend_{r}"] = round(ad.get(f"spend_{r}", 0), 2)
+            row[f"installs_{r}"] = ad.get(f"installs_{r}", 0)
+            row[f"impressions_{r}"] = ad.get(f"impressions_{r}", 0)
+            row[f"taps_{r}"] = ad.get(f"taps_{r}", 0)
+        ads_out.append(row)
+
+    # Ad groups
+    adgroups_out = []
+    for (camp_name, adgroup_name), _ in list(rev_index["by_adgroup"].items()):
+        if not adgroup_name:
+            continue
+        row = {
+            "ad_group": adgroup_name,
+            "campaign": camp_name,
+        }
+        for r in ranges:
+            rev_data = rev_index["by_adgroup"].get((camp_name, adgroup_name), {}).get(r) or {}
+            row[f"revenue_{r}"] = round(rev_data.get("revenue", 0), 2)
+            row[f"subs_{r}"] = rev_data.get("paid_subs", 0)
+            row[f"active_{r}"] = rev_data.get("active", 0)
+            row[f"canceled_{r}"] = rev_data.get("canceled", 0)
+            row[f"renewals_{r}"] = rev_data.get("renewals", 0)
+            row[f"weekly_subs_{r}"] = rev_data.get("weekly_subs", 0)
+            row[f"monthly_subs_{r}"] = rev_data.get("monthly_subs", 0)
+            row[f"yearly_subs_{r}"] = rev_data.get("yearly_subs", 0)
+        adgroups_out.append(row)
 
     output = {
         "last_updated": datetime.now(timezone.utc).isoformat(),
         "campaigns": campaigns_out,
         "keywords": keywords_out,
         "ads": ads_out,
+        "ad_groups": adgroups_out,
         "totals": {
             r: {
-                "spend": sum(row[f"spend_{r}"] for row in campaigns_out),
-                "revenue": sum(row[f"revenue_{r}"] for row in campaigns_out),
+                "spend": round(sum(row[f"spend_{r}"] for row in campaigns_out), 2),
+                "revenue": round(sum(row[f"revenue_{r}"] for row in campaigns_out), 2),
                 "installs": sum(row[f"installs_{r}"] for row in campaigns_out),
                 "subs": sum(row[f"subs_{r}"] for row in campaigns_out),
+                "asa_users": sum(row[f"asa_users_{r}"] for row in campaigns_out),
+                "active": sum(row[f"active_{r}"] for row in campaigns_out),
+                "canceled": sum(row[f"canceled_{r}"] for row in campaigns_out),
+                "renewals": sum(row[f"renewals_{r}"] for row in campaigns_out),
+                "weekly_subs": sum(row[f"weekly_subs_{r}"] for row in campaigns_out),
+                "monthly_subs": sum(row[f"monthly_subs_{r}"] for row in campaigns_out),
+                "yearly_subs": sum(row[f"yearly_subs_{r}"] for row in campaigns_out),
             }
             for r in ranges
         },

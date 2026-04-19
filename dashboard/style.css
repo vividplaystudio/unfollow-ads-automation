@@ -157,10 +157,23 @@ button { font: inherit; cursor: pointer; border: none; background: none; color: 
 }
 .select:focus { outline: none; border-color: var(--accent); }
 
+.filter-clear { justify-content: flex-end; }
+.btn-clear {
+  padding: 7px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 500;
+  transition: all 0.15s;
+}
+.btn-clear:hover { color: var(--danger); border-color: var(--danger); }
+
 /* ─── KPI cards ─── */
 .kpi-grid {
   display: grid;
-  grid-template-columns: repeat(6, 1fr);
+  grid-template-columns: repeat(4, 1fr);
   gap: 12px;
   margin-bottom: 24px;
 }
@@ -381,4 +394,9 @@ tbody td.muted { color: var(--text-muted); }
   .kpi-grid { grid-template-columns: repeat(2, 1fr); }
   .topbar { padding: 12px 16px; }
   .container { padding: 16px; }
+}
+
+/* Narrow sub-count columns (W/M/Y) */
+tbody td, thead th {
+  font-variant-numeric: tabular-nums;
 }

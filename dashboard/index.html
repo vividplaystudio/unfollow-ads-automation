@@ -62,6 +62,10 @@
         <option value="">All campaigns</option>
       </select>
     </div>
+    <div class="filter-group filter-clear">
+      <span class="filter-label">&nbsp;</span>
+      <button id="clearFilters" class="btn-clear">Clear filters</button>
+    </div>
   </section>
 
   <!-- KPI cards -->
@@ -96,18 +100,28 @@
       <div class="kpi-value" id="kpiCpa">$0</div>
       <div class="kpi-sub" id="kpiCpaSub">—</div>
     </div>
+    <div class="kpi-card">
+      <div class="kpi-label">Renewals</div>
+      <div class="kpi-value" id="kpiRenewals">0</div>
+      <div class="kpi-sub" id="kpiRenewalsSub">—</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-label">Canceled</div>
+      <div class="kpi-value" id="kpiCanceled">0</div>
+      <div class="kpi-sub" id="kpiCanceledSub">—</div>
+    </div>
   </section>
 
   <!-- Charts -->
   <section class="charts-grid">
     <div class="chart-card">
-      <h3>ROAS by Country</h3>
+      <h3>Spend vs Revenue by Country</h3>
       <div class="chart-wrap">
         <canvas id="chartCountry"></canvas>
       </div>
     </div>
     <div class="chart-card">
-      <h3>Top Campaigns by Spend</h3>
+      <h3>Top Campaigns (spend vs revenue)</h3>
       <div class="chart-wrap">
         <canvas id="chartCampaignSpend"></canvas>
       </div>
@@ -119,6 +133,7 @@
     <div class="tabs">
       <button class="tab active" data-tab="campaigns">Campaigns</button>
       <button class="tab" data-tab="keywords">Keywords</button>
+      <button class="tab" data-tab="adgroups">Ad Groups</button>
       <button class="tab" data-tab="ads">Ads / CPPs</button>
       <button class="tab" data-tab="winners">Winners</button>
       <button class="tab" data-tab="losers">Losers</button>

@@ -31,32 +31,28 @@ async function loadData() {
 
 function initFilters() {
   if (!STATE.data) return;
-
-  // Populate country dropdown
   const countries = new Set();
   for (const c of STATE.data.campaigns || []) {
     if (c.country) countries.add(c.country);
   }
   const countrySel = document.getElementById("countryFilter");
+  const currentCountry = countrySel.value;
   countrySel.innerHTML = '<option value="">All countries</option>';
   [...countries].sort().forEach(c => {
-    countrySel.innerHTML += `<option value="${c}">${c}</option>`;
+    countrySel.innerHTML += `<option value="${c}" ${c === currentCountry ? "selected" : ""}>${c}</option>`;
   });
 
-  // Populate campaign dropdown
   const campSel = document.getElementById("campaignFilter");
+  const currentCamp = campSel.value;
   campSel.innerHTML = '<option value="">All campaigns</option>';
   (STATE.data.campaigns || [])
     .slice()
     .sort((a, b) => a.name.localeCompare(b.name))
     .forEach(c => {
-      campSel.innerHTML += `<option value="${c.name}">${c.name}</option>`;
+      campSel.innerHTML += `<option value="${c.name}" ${c.name === currentCamp ? "selected" : ""}>${c.name}</option>`;
     });
 
-  // Last updated
-  const lu = STATE.data.last_updated
-    ? new Date(STATE.data.last_updated)
-    : null;
+  const lu = STATE.data.last_updated ? new Date(STATE.data.last_updated) : null;
   const luEl = document.getElementById("lastUpdated");
   if (lu) {
     const now = new Date();
@@ -76,7 +72,6 @@ function initFilters() {
 // ─── Helpers ───────────────────────────────────────────────────
 const fmt = {
   money: v => v == null ? "—" : "$" + Number(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }),
-  moneyShort: v => v == null ? "—" : "$" + Number(v).toLocaleString(undefined, { maximumFractionDigits: 0 }),
   num: v => v == null ? "—" : Number(v).toLocaleString(),
   pct: v => v == null || v === 0 ? "—" : (v < 100 ? v.toFixed(0) : Math.round(v)) + "%",
 };
@@ -92,7 +87,7 @@ function roasBadge(roas, spend, revenue) {
   const profit = (revenue || 0) - (spend || 0);
   if (spend < 15) return `<span class="badge badge-wait">WAIT</span>`;
   if (!revenue || revenue === 0) {
-    return `<span class="badge badge-pause">PAUSE · ${fmt.money(Math.abs(profit))} lost</span>`;
+    return `<span class="badge badge-pause">PAUSE · -${fmt.money(Math.abs(profit))}</span>`;
   }
   if (roas >= 100) return `<span class="badge badge-winner">WINNER · +${fmt.money(profit)}</span>`;
   if (roas >= 50) return `<span class="badge badge-watch">WATCH · ${fmt.money(profit)}</span>`;
@@ -107,9 +102,11 @@ function profitHtml(spend, revenue) {
   return `<span class='profit-neg'>${fmt.money(profit)}</span>`;
 }
 
-function matchesFilters(row) {
+function matchesFilters(row, includeCampaign = true) {
   if (STATE.country && row.country !== STATE.country) return false;
-  if (STATE.campaign && row.campaign !== STATE.campaign && row.name !== STATE.campaign) return false;
+  if (includeCampaign && STATE.campaign) {
+    if (row.campaign !== STATE.campaign && row.name !== STATE.campaign) return false;
+  }
   return true;
 }
 
@@ -118,25 +115,31 @@ function rangeKey() {
 }
 
 function getMetric(row, metric) {
-  // Extract spend_7d, revenue_30d, etc.
-  const key = metric + "_" + rangeKey();
-  const val = row[key];
+  const val = row[metric + "_" + rangeKey()];
   return val != null ? val : 0;
 }
 
 // ─── Render KPIs ───────────────────────────────────────────────
 function renderKPIs() {
-  const campaigns = (STATE.data?.campaigns || []).filter(matchesFilters);
+  const campaigns = (STATE.data?.campaigns || []).filter(r => matchesFilters(r, true));
 
   let spend = 0, revenue = 0, installs = 0, subs = 0;
+  let renewals = 0, canceled = 0;
+  let weekly = 0, monthly = 0, yearly = 0;
   for (const c of campaigns) {
     spend += getMetric(c, "spend");
     revenue += getMetric(c, "revenue");
     installs += getMetric(c, "installs");
     subs += getMetric(c, "subs");
+    renewals += getMetric(c, "renewals");
+    canceled += getMetric(c, "canceled");
+    weekly += getMetric(c, "weekly_subs");
+    monthly += getMetric(c, "monthly_subs");
+    yearly += getMetric(c, "yearly_subs");
   }
   const roas = spend > 0 ? revenue / spend * 100 : 0;
   const cpa = installs > 0 ? spend / installs : 0;
+  const profit = revenue - spend;
 
   document.getElementById("kpiSpend").textContent = fmt.money(spend);
   document.getElementById("kpiRevenue").textContent = fmt.money(revenue);
@@ -144,18 +147,21 @@ function renderKPIs() {
   document.getElementById("kpiSubs").textContent = fmt.num(subs);
   document.getElementById("kpiInstalls").textContent = fmt.num(installs);
   document.getElementById("kpiCpa").textContent = fmt.money(cpa);
+  document.getElementById("kpiRenewals").textContent = fmt.num(renewals);
+  document.getElementById("kpiCanceled").textContent = fmt.num(canceled);
 
-  // Profit/loss sub
-  const profit = revenue - spend;
+  // Profit sub
   const profitEl = document.getElementById("kpiRoasSub");
-  profitEl.textContent = (profit >= 0 ? "+" : "") + fmt.money(Math.abs(profit)) + " profit";
+  profitEl.textContent = (profit >= 0 ? "+" : "-") + fmt.money(Math.abs(profit)) + " profit";
   profitEl.style.color = profit >= 0 ? "var(--success)" : "var(--danger)";
 
   document.getElementById("kpiSpendSub").textContent = `${campaigns.length} campaigns`;
-  document.getElementById("kpiInstallsSub").textContent = installs > 0 ? `${(subs / installs * 100).toFixed(1)}% convert` : "—";
-  document.getElementById("kpiSubsSub").textContent = subs > 0 ? fmt.money(revenue / subs) + " per sub" : "—";
-  document.getElementById("kpiCpaSub").textContent = installs > 0 ? `${installs} installs` : "—";
-  document.getElementById("kpiRevenueSub").textContent = "—";
+  document.getElementById("kpiInstallsSub").textContent = installs > 0 ? `${(subs / installs * 100).toFixed(1)}% pay rate` : "—";
+  document.getElementById("kpiSubsSub").textContent = `W:${weekly} · M:${monthly} · Y:${yearly}`;
+  document.getElementById("kpiCpaSub").textContent = subs > 0 ? `${fmt.money(revenue / subs)} per sub` : "—";
+  document.getElementById("kpiRevenueSub").textContent = subs > 0 ? `${subs} paid subs` : "—";
+  document.getElementById("kpiRenewalsSub").textContent = subs > 0 ? `${(renewals / subs).toFixed(1)} avg per sub` : "—";
+  document.getElementById("kpiCanceledSub").textContent = subs > 0 ? `${(canceled / subs * 100).toFixed(0)}% churn` : "—";
 }
 
 // ─── Render Charts ─────────────────────────────────────────────
@@ -167,9 +173,8 @@ function destroyChart(name) {
 }
 
 function renderCharts() {
-  const campaigns = (STATE.data?.campaigns || []).filter(matchesFilters);
+  const campaigns = (STATE.data?.campaigns || []).filter(r => matchesFilters(r, true));
 
-  // Chart 1: ROAS by country
   const byCountry = {};
   for (const c of campaigns) {
     const country = c.country || "?";
@@ -177,7 +182,7 @@ function renderCharts() {
     byCountry[country].spend += getMetric(c, "spend");
     byCountry[country].revenue += getMetric(c, "revenue");
   }
-  const countries = Object.keys(byCountry).sort();
+  const countries = Object.keys(byCountry).filter(c => byCountry[c].spend > 0).sort();
   destroyChart("country");
   const ctx1 = document.getElementById("chartCountry").getContext("2d");
   STATE.charts.country = new Chart(ctx1, {
@@ -211,7 +216,6 @@ function renderCharts() {
     },
   });
 
-  // Chart 2: Top campaigns by spend
   const sorted = campaigns.slice().sort((a, b) => getMetric(b, "spend") - getMetric(a, "spend")).slice(0, 8);
   destroyChart("campaigns");
   const ctx2 = document.getElementById("chartCampaignSpend").getContext("2d");
@@ -223,7 +227,7 @@ function renderCharts() {
         {
           label: "Spend",
           data: sorted.map(c => getMetric(c, "spend")),
-          backgroundColor: "#f59e0b",
+          backgroundColor: "#fca5a5",
           borderRadius: 4,
         },
         {
@@ -252,7 +256,6 @@ function renderCharts() {
 function renderTable() {
   const head = document.getElementById("tableHead");
   const body = document.getElementById("tableBody");
-  const rk = rangeKey();
 
   let rows = [];
   let cols = [];
@@ -264,14 +267,20 @@ function renderTable() {
       { key: "spend", label: "Spend", num: true },
       { key: "revenue", label: "Revenue", num: true },
       { key: "profit", label: "Profit", num: true },
-      { key: "subs", label: "Paid Subs", num: true },
-      { key: "installs", label: "Installs", num: true },
       { key: "roas", label: "ROAS", num: true },
+      { key: "subs", label: "Paid", num: true },
+      { key: "weekly_subs", label: "W", num: true },
+      { key: "monthly_subs", label: "M", num: true },
+      { key: "yearly_subs", label: "Y", num: true },
+      { key: "renewals", label: "Renew", num: true },
+      { key: "canceled", label: "Cancel", num: true },
+      { key: "installs", label: "Installs", num: true },
       { key: "cpa", label: "CPA", num: true },
       { key: "status", label: "Status" },
     ];
+    // Campaigns tab — always show ALL campaigns (ignore campaign filter)
     rows = (STATE.data?.campaigns || [])
-      .filter(matchesFilters)
+      .filter(r => matchesFilters(r, false))
       .map(c => {
         const spend = getMetric(c, "spend");
         const revenue = getMetric(c, "revenue");
@@ -280,7 +289,15 @@ function renderTable() {
         const roas = spend > 0 ? revenue / spend * 100 : 0;
         const cpa = installs > 0 ? spend / installs : 0;
         const profit = revenue - spend;
-        return { ...c, spend, revenue, profit, installs, subs, roas, cpa, _name: c.name };
+        return {
+          ...c, spend, revenue, profit, installs, subs, roas, cpa,
+          weekly_subs: getMetric(c, "weekly_subs"),
+          monthly_subs: getMetric(c, "monthly_subs"),
+          yearly_subs: getMetric(c, "yearly_subs"),
+          renewals: getMetric(c, "renewals"),
+          canceled: getMetric(c, "canceled"),
+          _name: c.name,
+        };
       });
   } else if (STATE.tab === "keywords" || STATE.tab === "winners" || STATE.tab === "losers") {
     cols = [
@@ -291,9 +308,12 @@ function renderTable() {
       { key: "spend", label: "Spend", num: true },
       { key: "revenue", label: "Revenue", num: true },
       { key: "profit", label: "Profit", num: true },
-      { key: "subs", label: "Paid", num: true },
-      { key: "installs", label: "Installs", num: true },
       { key: "roas", label: "ROAS", num: true },
+      { key: "subs", label: "Paid", num: true },
+      { key: "weekly_subs", label: "W", num: true },
+      { key: "monthly_subs", label: "M", num: true },
+      { key: "yearly_subs", label: "Y", num: true },
+      { key: "installs", label: "Installs", num: true },
       { key: "cpa", label: "CPA", num: true },
       { key: "cpt", label: "CPT", num: true },
       { key: "ttr", label: "TTR", num: true },
@@ -301,7 +321,7 @@ function renderTable() {
       { key: "status", label: "Status" },
     ];
     rows = (STATE.data?.keywords || [])
-      .filter(matchesFilters)
+      .filter(k => matchesFilters(k, true))
       .map(k => {
         const spend = getMetric(k, "spend");
         const revenue = getMetric(k, "revenue");
@@ -315,35 +335,77 @@ function renderTable() {
         const cr = taps > 0 ? installs / taps * 100 : 0;
         const cpt = taps > 0 ? spend / taps : 0;
         const profit = revenue - spend;
-        return { ...k, spend, revenue, profit, installs, subs, taps, imp, roas, cpa, ttr, cr, cpt };
+        return {
+          ...k, spend, revenue, profit, installs, subs, taps, imp, roas, cpa, ttr, cr, cpt,
+          weekly_subs: getMetric(k, "weekly_subs"),
+          monthly_subs: getMetric(k, "monthly_subs"),
+          yearly_subs: getMetric(k, "yearly_subs"),
+        };
       });
 
-    // Filter Winners/Losers
+    // Winners/Losers thresholds adapt to range
+    const minSpend = STATE.range === "today" ? 5 : STATE.range === "yesterday" ? 10 : 15;
     if (STATE.tab === "winners") {
-      rows = rows.filter(r => r.spend >= 15 && r.roas >= 100);
+      rows = rows.filter(r => r.spend >= minSpend && r.roas >= 100);
     } else if (STATE.tab === "losers") {
-      rows = rows.filter(r => r.spend >= 15 && r.roas < 30);
+      rows = rows.filter(r => r.spend >= minSpend && (r.roas < 30 || r.revenue === 0));
     }
   } else if (STATE.tab === "ads") {
     cols = [
       { key: "name", label: "Ad / CPP" },
       { key: "campaign", label: "Campaign" },
       { key: "country", label: "Country" },
+      { key: "cpp_id", label: "CPP ID" },
       { key: "spend", label: "Spend", num: true },
       { key: "installs", label: "Installs", num: true },
       { key: "impressions", label: "Impressions", num: true },
       { key: "taps", label: "Taps", num: true },
       { key: "cpa", label: "CPA", num: true },
+      { key: "ttr", label: "TTR", num: true },
     ];
-    rows = (STATE.data?.ads || []).filter(matchesFilters);
+    rows = (STATE.data?.ads || [])
+      .filter(r => matchesFilters(r, true))
+      .map(a => {
+        const spend = getMetric(a, "spend");
+        const installs = getMetric(a, "installs");
+        const taps = getMetric(a, "taps");
+        const imp = getMetric(a, "impressions");
+        const cpa = installs > 0 ? spend / installs : 0;
+        const ttr = imp > 0 ? taps / imp * 100 : 0;
+        return { ...a, spend, installs, taps, imp, impressions: imp, cpa, ttr };
+      });
+  } else if (STATE.tab === "adgroups") {
+    cols = [
+      { key: "ad_group", label: "Ad Group" },
+      { key: "campaign", label: "Campaign" },
+      { key: "revenue", label: "Revenue", num: true },
+      { key: "subs", label: "Paid", num: true },
+      { key: "weekly_subs", label: "W", num: true },
+      { key: "monthly_subs", label: "M", num: true },
+      { key: "yearly_subs", label: "Y", num: true },
+      { key: "active", label: "Active", num: true },
+      { key: "canceled", label: "Cancel", num: true },
+      { key: "renewals", label: "Renew", num: true },
+    ];
+    rows = (STATE.data?.ad_groups || [])
+      .filter(r => matchesFilters(r, true))
+      .map(a => ({
+        ...a,
+        revenue: getMetric(a, "revenue"),
+        subs: getMetric(a, "subs"),
+        active: getMetric(a, "active"),
+        canceled: getMetric(a, "canceled"),
+        renewals: getMetric(a, "renewals"),
+        weekly_subs: getMetric(a, "weekly_subs"),
+        monthly_subs: getMetric(a, "monthly_subs"),
+        yearly_subs: getMetric(a, "yearly_subs"),
+      }));
   }
 
   // Apply search
   if (STATE.search) {
     const s = STATE.search.toLowerCase();
-    rows = rows.filter(r => {
-      return Object.values(r).some(v => String(v).toLowerCase().includes(s));
-    });
+    rows = rows.filter(r => Object.values(r).some(v => String(v).toLowerCase().includes(s)));
   }
 
   // Sort
@@ -352,9 +414,7 @@ function renderTable() {
   rows.sort((a, b) => {
     let va = a[sortCol] ?? 0;
     let vb = b[sortCol] ?? 0;
-    if (typeof va === "string" && typeof vb === "string") {
-      return va.localeCompare(vb) * dir;
-    }
+    if (typeof va === "string" && typeof vb === "string") return va.localeCompare(vb) * dir;
     return (va - vb) * dir;
   });
 
@@ -362,15 +422,17 @@ function renderTable() {
   head.innerHTML = "<tr>" + cols.map(c => {
     const isSorted = sortCol === c.key;
     const sortClass = isSorted ? `sorted${STATE.sortDir === "asc" ? "-asc" : ""}` : "";
-    return `<th class="${c.num ? "num" : ""} ${sortClass}" data-col="${c.key}">${c.label}</th>`;
+    const title = c.label === "W" ? "Weekly Subs" : c.label === "M" ? "Monthly Subs" : c.label === "Y" ? "Yearly Subs" : c.label;
+    return `<th class="${c.num ? "num" : ""} ${sortClass}" data-col="${c.key}" title="${title}">${c.label}</th>`;
   }).join("") + "</tr>";
 
   // Render body
   if (rows.length === 0) {
-    body.innerHTML = `<tr><td colspan="${cols.length}"><div class="empty-state"><div class="icon">📭</div>No data yet for this view</div></td></tr>`;
+    body.innerHTML = `<tr><td colspan="${cols.length}"><div class="empty-state"><div class="icon">📭</div>No data for this view/range</div></td></tr>`;
   } else {
     body.innerHTML = rows.map(r => {
-      return "<tr class='" + (STATE.tab === "campaigns" ? "clickable" : "") + "' data-name='" + (r.name || r.keyword || "") + "'>" + cols.map(c => {
+      const clickable = STATE.tab === "campaigns" ? "clickable" : "";
+      return `<tr class='${clickable}' data-name='${(r.name || r.keyword || "").replace(/'/g, "&#39;")}'>` + cols.map(c => {
         let val = r[c.key];
         let content, cls = c.num ? "num" : "";
         switch (c.key) {
@@ -384,11 +446,7 @@ function renderTable() {
             content = profitHtml(r.spend, r.revenue);
             break;
           case "roas":
-            if (val > 0) {
-              content = `<span class="${roasClass(val)}">${fmt.pct(val)}</span>`;
-            } else {
-              content = "<span class='muted'>—</span>";
-            }
+            content = val > 0 ? `<span class="${roasClass(val)}">${fmt.pct(val)}</span>` : "<span class='muted'>—</span>";
             break;
           case "ttr":
           case "cr":
@@ -404,19 +462,38 @@ function renderTable() {
             content = roasBadge(r.roas, r.spend, r.revenue);
             break;
           case "campaign":
-            content = val ? (val.length > 32 ? val.slice(0, 30) + "…" : val) : "<span class='muted'>—</span>";
+            content = val ? (val.length > 28 ? val.slice(0, 26) + "…" : val) : "<span class='muted'>—</span>";
             break;
           case "keyword":
             content = `<strong>${val || ""}</strong>`;
             break;
+          case "canceled":
+            content = val > 0 ? `<span class='profit-neg'>${val}</span>` : "<span class='muted'>0</span>";
+            break;
+          case "renewals":
+            content = val > 0 ? `<span class='profit-pos'>${val}</span>` : "<span class='muted'>0</span>";
+            break;
+          case "weekly_subs":
+          case "monthly_subs":
+          case "yearly_subs":
+          case "active":
+          case "subs":
+          case "installs":
+          case "taps":
+          case "impressions":
+            content = val > 0 ? fmt.num(val) : "<span class='muted'>0</span>";
+            break;
+          case "cpp_id":
+            content = val ? `<span class='muted' style='font-size:11px'>${val.slice(0, 8)}…</span>` : "<span class='muted'>—</span>";
+            break;
           default:
-            content = val != null ? (typeof val === "number" ? fmt.num(val) : String(val)) : "<span class='muted'>—</span>";
+            content = val != null && val !== "" ? (typeof val === "number" ? fmt.num(val) : String(val)) : "<span class='muted'>—</span>";
         }
         return `<td class="${cls}">${content}</td>`;
       }).join("") + "</tr>";
     }).join("");
 
-    // Row click handlers (campaigns → jump to keywords)
+    // Campaigns tab → click a row to filter keywords to that campaign
     if (STATE.tab === "campaigns") {
       body.querySelectorAll("tr.clickable").forEach(tr => {
         tr.addEventListener("click", () => {
@@ -426,6 +503,7 @@ function renderTable() {
           document.getElementById("campaignFilter").value = name;
           updateTabs();
           render();
+          window.scrollTo({ top: document.querySelector(".table-section").offsetTop - 80, behavior: "smooth" });
         });
       });
     }
@@ -435,9 +513,8 @@ function renderTable() {
   head.querySelectorAll("th").forEach(th => {
     th.addEventListener("click", () => {
       const col = th.dataset.col;
-      if (STATE.sortCol === col) {
-        STATE.sortDir = STATE.sortDir === "desc" ? "asc" : "desc";
-      } else {
+      if (STATE.sortCol === col) STATE.sortDir = STATE.sortDir === "desc" ? "asc" : "desc";
+      else {
         STATE.sortCol = col;
         STATE.sortDir = "desc";
       }
@@ -445,7 +522,6 @@ function renderTable() {
     });
   });
 
-  // Update info
   document.getElementById("tableInfo").textContent = `${rows.length} row${rows.length === 1 ? "" : "s"}`;
 }
 
@@ -455,7 +531,6 @@ function updateTabs() {
   });
 }
 
-// ─── Main render ───────────────────────────────────────────────
 function render() {
   if (!STATE.data) return;
   renderKPIs();
@@ -487,13 +562,33 @@ document.addEventListener("DOMContentLoaded", () => {
     render();
   });
 
-  // Tabs
+  // Clear filters button
+  const clearBtn = document.getElementById("clearFilters");
+  if (clearBtn) {
+    clearBtn.addEventListener("click", () => {
+      STATE.country = "";
+      STATE.campaign = "";
+      STATE.search = "";
+      document.getElementById("countryFilter").value = "";
+      document.getElementById("campaignFilter").value = "";
+      document.getElementById("searchBox").value = "";
+      render();
+    });
+  }
+
+  // Tabs — when clicking Campaigns, clear campaign filter so we see all
   document.querySelectorAll(".tab").forEach(t => {
     t.addEventListener("click", () => {
-      STATE.tab = t.dataset.tab;
+      const newTab = t.dataset.tab;
+      // If clicking Campaigns and there's a campaign filter, clear it so we see all campaigns
+      if (newTab === "campaigns" && STATE.campaign) {
+        STATE.campaign = "";
+        document.getElementById("campaignFilter").value = "";
+      }
+      STATE.tab = newTab;
       STATE.sortCol = null;
       updateTabs();
-      renderTable();
+      render();
     });
   });
 
@@ -503,9 +598,6 @@ document.addEventListener("DOMContentLoaded", () => {
     renderTable();
   });
 
-  // Initial load
   loadData();
-
-  // Auto-refresh every 5 min
   setInterval(loadData, 5 * 60 * 1000);
 });
