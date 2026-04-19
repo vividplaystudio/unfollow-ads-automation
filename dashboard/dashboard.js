@@ -13,6 +13,8 @@ const STATE = {
   search: "",
   charts: {},
   editMode: false,
+  selected: new Set(),     // set of keyword_id strings
+  busy: new Set(),         // keyword ids currently processing
 };
 
 // ─── API calls (to PHP proxy) ──────────────────────────────────
@@ -37,45 +39,50 @@ function toast(msg, type = "") {
   toast._t = setTimeout(() => el.classList.remove("show"), 3500);
 }
 
-async function pauseKeyword(k) {
-  if (!confirm(`Pause keyword "${k.keyword}" in ${k.campaign}?`)) return;
+function flashRow(kwId, type) {
+  const row = document.querySelector(`tr[data-kwid="${kwId}"]`);
+  if (!row) return;
+  row.classList.add(type === "success" ? "flash-success" : "flash-error");
+  setTimeout(() => {
+    row.classList.remove("flash-success");
+    row.classList.remove("flash-error");
+  }, 1500);
+}
+
+function updateSourceKeyword(kwId, patch) {
+  // Update the original keyword entry in STATE.data so next render reflects it
+  const k = (STATE.data?.keywords || []).find(x => String(x.keyword_id) === String(kwId));
+  if (k) Object.assign(k, patch);
+}
+
+async function setKeywordStatus(k, newStatus) {
+  const kwId = String(k.keyword_id);
+  STATE.busy.add(kwId);
   try {
     const path = `/campaigns/${k.campaign_id}/adgroups/${k.ad_group_id}/targetingkeywords/${k.keyword_id}`;
     await asaCall("PUT", path, {
       id: k.keyword_id,
       adGroupId: k.ad_group_id,
-      status: "PAUSED",
+      status: newStatus,
     });
-    toast(`Paused: ${k.keyword}`, "success");
-    k.status = "PAUSED";
-    renderTable();
+    updateSourceKeyword(kwId, { status: newStatus });
+    flashRow(kwId, "success");
+    return { ok: true };
   } catch (e) {
-    toast(`Failed: ${e.message}`, "error");
+    flashRow(kwId, "error");
+    return { ok: false, error: e.message };
+  } finally {
+    STATE.busy.delete(kwId);
   }
 }
 
-async function enableKeyword(k) {
-  try {
-    const path = `/campaigns/${k.campaign_id}/adgroups/${k.ad_group_id}/targetingkeywords/${k.keyword_id}`;
-    await asaCall("PUT", path, {
-      id: k.keyword_id,
-      adGroupId: k.ad_group_id,
-      status: "ACTIVE",
-    });
-    toast(`Enabled: ${k.keyword}`, "success");
-    k.status = "ACTIVE";
-    renderTable();
-  } catch (e) {
-    toast(`Failed: ${e.message}`, "error");
-  }
-}
-
-async function updateBid(k, newBid) {
+async function setKeywordBid(k, newBid) {
   if (!newBid || isNaN(newBid) || newBid <= 0) {
     toast("Invalid bid", "error");
-    return;
+    return { ok: false };
   }
-  if (!confirm(`Change bid for "${k.keyword}" to $${newBid}?`)) return;
+  const kwId = String(k.keyword_id);
+  STATE.busy.add(kwId);
   try {
     const path = `/campaigns/${k.campaign_id}/adgroups/${k.ad_group_id}/targetingkeywords/${k.keyword_id}`;
     await asaCall("PUT", path, {
@@ -83,12 +90,86 @@ async function updateBid(k, newBid) {
       adGroupId: k.ad_group_id,
       bidAmount: { amount: String(newBid), currency: "USD" },
     });
-    toast(`Bid updated: ${k.keyword} → $${newBid}`, "success");
-    k.bid = parseFloat(newBid);
-    renderTable();
+    updateSourceKeyword(kwId, { bid: parseFloat(newBid) });
+    flashRow(kwId, "success");
+    return { ok: true };
   } catch (e) {
-    toast(`Failed: ${e.message}`, "error");
+    flashRow(kwId, "error");
+    return { ok: false, error: e.message };
+  } finally {
+    STATE.busy.delete(kwId);
   }
+}
+
+// ─── Bulk actions ─────────────────────────────────────────────
+async function bulkAction(type) {
+  const ids = [...STATE.selected];
+  if (!ids.length) return;
+  const keywords = ids.map(id => (STATE.data?.keywords || []).find(k => String(k.keyword_id) === id)).filter(Boolean);
+
+  let label, newStatus, confirmMsg;
+  if (type === "pause") {
+    label = "Pausing";
+    newStatus = "PAUSED";
+    confirmMsg = `Pause ${keywords.length} keyword${keywords.length === 1 ? "" : "s"}?`;
+  } else if (type === "enable") {
+    label = "Enabling";
+    newStatus = "ACTIVE";
+    confirmMsg = `Enable ${keywords.length} keyword${keywords.length === 1 ? "" : "s"}?`;
+  } else {
+    return;
+  }
+
+  if (!confirm(confirmMsg)) return;
+
+  const progressToast = document.getElementById("toast");
+  progressToast.className = "toast show";
+  let done = 0, errors = 0;
+
+  // Fire requests in parallel (chunks of 5 to be gentle with API)
+  const chunkSize = 5;
+  for (let i = 0; i < keywords.length; i += chunkSize) {
+    const chunk = keywords.slice(i, i + chunkSize);
+    progressToast.textContent = `${label} ${done + 1}-${Math.min(done + chunk.length, keywords.length)} of ${keywords.length}…`;
+    const results = await Promise.all(chunk.map(k => setKeywordStatus(k, newStatus)));
+    done += chunk.length;
+    errors += results.filter(r => !r.ok).length;
+    renderTable();  // live-update table as we progress
+  }
+
+  const msg = errors === 0
+    ? `${label.slice(0, -3)}ed ${keywords.length} keyword${keywords.length === 1 ? "" : "s"}`
+    : `Done with ${errors} error${errors === 1 ? "" : "s"}`;
+  toast(msg, errors === 0 ? "success" : "error");
+
+  STATE.selected.clear();
+  renderTable();
+}
+
+async function bulkBid(multiplier) {
+  const ids = [...STATE.selected];
+  if (!ids.length) return;
+  const keywords = ids.map(id => (STATE.data?.keywords || []).find(k => String(k.keyword_id) === id)).filter(Boolean);
+  if (!confirm(`Change bid by ${multiplier > 1 ? "+" : ""}${((multiplier - 1) * 100).toFixed(0)}% for ${keywords.length} keyword${keywords.length === 1 ? "" : "s"}?`)) return;
+
+  const progressToast = document.getElementById("toast");
+  progressToast.className = "toast show";
+  let done = 0, errors = 0;
+  for (let i = 0; i < keywords.length; i += 5) {
+    const chunk = keywords.slice(i, i + 5);
+    progressToast.textContent = `Updating bids ${done + 1}-${Math.min(done + chunk.length, keywords.length)} of ${keywords.length}…`;
+    const results = await Promise.all(chunk.map(k => {
+      const newBid = Math.max(0.1, (k.bid || 1) * multiplier).toFixed(2);
+      return setKeywordBid(k, newBid);
+    }));
+    done += chunk.length;
+    errors += results.filter(r => !r.ok).length;
+    renderTable();
+  }
+  const msg = errors === 0 ? `Updated ${keywords.length} bids` : `Done with ${errors} error${errors === 1 ? "" : "s"}`;
+  toast(msg, errors === 0 ? "success" : "error");
+  STATE.selected.clear();
+  renderTable();
 }
 
 // ─── Load data ─────────────────────────────────────────────────
@@ -180,7 +261,6 @@ function profitHtml(spend, revenue) {
 }
 
 function renderActions(k) {
-  // Only show actions for keywords with valid IDs
   if (!k.keyword_id || !k.ad_group_id || !k.campaign_id) {
     return `<span class='muted' style='font-size:11px'>—</span>`;
   }
@@ -188,20 +268,32 @@ function renderActions(k) {
     return `<span class='muted' style='font-size:11px'>Enable edit mode</span>`;
   }
   const isPaused = k.status === "PAUSED";
+  const isBusy = STATE.busy.has(String(k.keyword_id));
   const bidValue = (k.bid || 0).toFixed(2);
   return `
     <div class="action-cell">
       <div class="bid-editor">
         <input type="number" step="0.01" min="0.1" value="${bidValue}"
-               data-kw-id="${k.keyword_id}" data-ag-id="${k.ad_group_id}" data-c-id="${k.campaign_id}"
-               data-action="bid" />
-        <button class="btn-action btn-save" data-action="save-bid" data-kw-id="${k.keyword_id}">Save</button>
+               data-action="bid" ${isBusy ? "disabled" : ""} />
+        <button class="btn-action btn-save" data-action="save-bid" data-kw-id="${k.keyword_id}" ${isBusy ? "disabled" : ""}>Save</button>
       </div>
       ${isPaused
-        ? `<button class="btn-action btn-enable" data-action="enable" data-kw-id="${k.keyword_id}">Enable</button>`
-        : `<button class="btn-action btn-pause" data-action="pause" data-kw-id="${k.keyword_id}">Pause</button>`}
+        ? `<button class="btn-action btn-enable" data-action="enable-one" data-kw-id="${k.keyword_id}" ${isBusy ? "disabled" : ""}>${isBusy ? "…" : "Enable"}</button>`
+        : `<button class="btn-action btn-pause" data-action="pause-one" data-kw-id="${k.keyword_id}" ${isBusy ? "disabled" : ""}>${isBusy ? "…" : "Pause"}</button>`}
     </div>
   `;
+}
+
+function renderBulkBar() {
+  const bar = document.getElementById("bulkBar");
+  if (!bar) return;
+  const count = STATE.selected.size;
+  if (count === 0 || !STATE.editMode) {
+    bar.classList.remove("show");
+    return;
+  }
+  bar.classList.add("show");
+  bar.querySelector(".bulk-count").textContent = `${count} keyword${count === 1 ? "" : "s"} selected`;
 }
 
 function findKeyword(kwId) {
@@ -406,7 +498,9 @@ function renderTable() {
         };
       });
   } else if (STATE.tab === "keywords" || STATE.tab === "winners" || STATE.tab === "losers") {
-    cols = [
+    cols = [];
+    if (STATE.editMode) cols.push({ key: "select", label: "" });
+    cols.push(
       { key: "keyword", label: "Keyword" },
       { key: "campaign", label: "Campaign" },
       { key: "country", label: "Country" },
@@ -427,8 +521,8 @@ function renderTable() {
       { key: "ttr", label: "TTR", num: true },
       { key: "cr", label: "CR", num: true },
       { key: "status", label: "Status" },
-      { key: "actions", label: "Actions" },
-    ];
+    );
+    if (STATE.editMode) cols.push({ key: "actions", label: "Actions" });
     rows = (STATE.data?.keywords || [])
       .filter(k => matchesFilters(k, true))
       .map(k => {
@@ -540,11 +634,21 @@ function renderTable() {
     body.innerHTML = `<tr><td colspan="${cols.length}"><div class="empty-state"><div class="icon">📭</div>No data for this view/range</div></td></tr>`;
   } else {
     body.innerHTML = rows.map(r => {
-      const clickable = STATE.tab === "campaigns" ? "clickable" : "";
-      return `<tr class='${clickable}' data-name='${(r.name || r.keyword || "").replace(/'/g, "&#39;")}'>` + cols.map(c => {
+      const classes = [];
+      if (STATE.tab === "campaigns") classes.push("clickable");
+      if (r.status === "PAUSED") classes.push("row-paused");
+      if (STATE.selected.has(String(r.keyword_id))) classes.push("row-selected");
+      const kwidAttr = r.keyword_id ? `data-kwid="${r.keyword_id}"` : "";
+      return `<tr class='${classes.join(" ")}' ${kwidAttr} data-name='${(r.name || r.keyword || "").replace(/'/g, "&#39;")}'>` + cols.map(c => {
         let val = r[c.key];
         let content, cls = c.num ? "num" : "";
         switch (c.key) {
+          case "select":
+            content = r.keyword_id
+              ? `<input type="checkbox" class="row-check" data-action="select" data-kw-id="${r.keyword_id}" ${STATE.selected.has(String(r.keyword_id)) ? "checked" : ""} />`
+              : "";
+            cls = "select-col";
+            break;
           case "spend":
           case "revenue":
           case "cpa":
@@ -655,6 +759,7 @@ function render() {
   renderKPIs();
   renderCharts();
   renderTable();
+  renderBulkBar();
 }
 
 // ─── Events ────────────────────────────────────────────────────
@@ -730,21 +835,77 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   }
 
-  // Event delegation for action buttons in table
-  document.getElementById("tableBody").addEventListener("click", (e) => {
-    const btn = e.target.closest("[data-action]");
-    if (!btn) return;
-    const action = btn.dataset.action;
-    const kwId = btn.dataset.kwId;
+  // Event delegation for action buttons + checkboxes in table
+  document.getElementById("tableBody").addEventListener("click", async (e) => {
+    const el = e.target.closest("[data-action]");
+    if (!el) return;
+    const action = el.dataset.action;
+
+    // Checkbox selection — don't trigger row click
+    if (action === "select") {
+      e.stopPropagation();
+      const kwId = el.dataset.kwId;
+      if (el.checked) STATE.selected.add(String(kwId));
+      else STATE.selected.delete(String(kwId));
+      renderBulkBar();
+      // Update row visual
+      const tr = el.closest("tr");
+      if (tr) tr.classList.toggle("row-selected", el.checked);
+      return;
+    }
+
+    const kwId = el.dataset.kwId;
     const k = findKeyword(kwId);
     if (!k) return;
 
-    if (action === "pause") pauseKeyword(k);
-    else if (action === "enable") enableKeyword(k);
-    else if (action === "save-bid") {
-      const input = btn.parentElement.querySelector("input[data-action='bid']");
-      if (input) updateBid(k, parseFloat(input.value));
+    if (action === "pause-one") {
+      e.stopPropagation();
+      const r = await setKeywordStatus(k, "PAUSED");
+      if (r.ok) toast(`Paused: ${k.keyword}`, "success");
+      else toast(`Failed: ${r.error}`, "error");
+      renderTable();
+    } else if (action === "enable-one") {
+      e.stopPropagation();
+      const r = await setKeywordStatus(k, "ACTIVE");
+      if (r.ok) toast(`Enabled: ${k.keyword}`, "success");
+      else toast(`Failed: ${r.error}`, "error");
+      renderTable();
+    } else if (action === "save-bid") {
+      e.stopPropagation();
+      const input = el.parentElement.querySelector("input[data-action='bid']");
+      if (input) {
+        const r = await setKeywordBid(k, parseFloat(input.value));
+        if (r.ok) toast(`Bid updated: ${k.keyword}`, "success");
+        else toast(`Failed: ${r.error}`, "error");
+        renderTable();
+      }
     }
+  });
+
+  // Bulk action bar
+  document.getElementById("bulkPauseBtn")?.addEventListener("click", () => bulkAction("pause"));
+  document.getElementById("bulkEnableBtn")?.addEventListener("click", () => bulkAction("enable"));
+  document.getElementById("bulkBidUpBtn")?.addEventListener("click", () => bulkBid(1.20));
+  document.getElementById("bulkBidDownBtn")?.addEventListener("click", () => bulkBid(0.80));
+  document.getElementById("bulkClearBtn")?.addEventListener("click", () => {
+    STATE.selected.clear();
+    renderTable();
+    renderBulkBar();
+  });
+
+  // Select all keywords currently visible
+  document.getElementById("selectAllBtn")?.addEventListener("click", () => {
+    // Find visible keyword rows
+    const visibleIds = [...document.querySelectorAll("tbody tr[data-kwid]")]
+      .map(tr => tr.dataset.kwid);
+    if (visibleIds.every(id => STATE.selected.has(id))) {
+      // All selected → deselect all
+      visibleIds.forEach(id => STATE.selected.delete(id));
+    } else {
+      visibleIds.forEach(id => STATE.selected.add(id));
+    }
+    renderTable();
+    renderBulkBar();
   });
 
   loadData();

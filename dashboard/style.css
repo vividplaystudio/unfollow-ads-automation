@@ -508,6 +508,93 @@ body.edit-on .table-section {
 .kw-status-PAUSED { background: var(--danger-soft); color: #b91c1c; }
 .kw-status-DELETED { background: var(--neutral-soft); color: var(--neutral); }
 
+/* Select-all button */
+.btn-select-all {
+  padding: 7px 12px;
+  margin-left: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+}
+.btn-select-all:hover { background: var(--surface-hover); border-color: var(--accent); }
+
+/* Bulk action bar */
+.bulk-bar {
+  display: none;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 20px;
+  background: linear-gradient(to right, #eef2ff, #fef3f2);
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+  font-weight: 500;
+}
+.bulk-bar.show { display: flex; }
+.bulk-count {
+  color: var(--accent);
+  font-weight: 600;
+}
+.bulk-actions { display: flex; gap: 8px; align-items: center; }
+.bulk-actions .btn-action {
+  padding: 6px 12px;
+  font-size: 12px;
+}
+
+/* Select column (checkbox) */
+.select-col { width: 30px; padding: 12px 8px !important; }
+.row-check {
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  border: 1.5px solid var(--border-strong);
+  border-radius: 3px;
+  cursor: pointer;
+  position: relative;
+  vertical-align: middle;
+}
+.row-check:checked {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.row-check:checked::after {
+  content: "✓";
+  position: absolute;
+  top: -1px;
+  left: 2px;
+  color: white;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+/* Row states */
+tbody tr.row-paused td {
+  opacity: 0.55;
+}
+tbody tr.row-paused td .kw-status-badge,
+tbody tr.row-paused td .badge,
+tbody tr.row-paused td .action-cell {
+  opacity: 1;  /* Keep key elements fully visible */
+}
+tbody tr.row-selected {
+  background: #eef2ff !important;
+}
+
+/* Flash animations */
+@keyframes flashSuccess {
+  0%, 100% { background: transparent; }
+  30% { background: rgba(16, 185, 129, 0.18); }
+}
+@keyframes flashError {
+  0%, 100% { background: transparent; }
+  30% { background: rgba(239, 68, 68, 0.18); }
+}
+tbody tr.flash-success { animation: flashSuccess 1.4s ease-out; }
+tbody tr.flash-error { animation: flashError 1.4s ease-out; }
+
 /* Toast */
 .toast {
   position: fixed;

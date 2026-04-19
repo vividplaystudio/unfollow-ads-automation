@@ -151,7 +151,20 @@
 
     <div class="table-toolbar">
       <input type="text" id="searchBox" class="search-box" placeholder="Search..." />
+      <button id="selectAllBtn" class="btn-select-all" title="Select / deselect all visible">Select all</button>
       <div class="table-info" id="tableInfo">—</div>
+    </div>
+
+    <!-- Bulk action bar (visible when keywords selected) -->
+    <div id="bulkBar" class="bulk-bar">
+      <span class="bulk-count">0 selected</span>
+      <div class="bulk-actions">
+        <button id="bulkPauseBtn" class="btn-action btn-pause">Pause</button>
+        <button id="bulkEnableBtn" class="btn-action btn-enable">Enable</button>
+        <button id="bulkBidUpBtn" class="btn-action">Bid +20%</button>
+        <button id="bulkBidDownBtn" class="btn-action">Bid −20%</button>
+        <button id="bulkClearBtn" class="btn-action">Clear</button>
+      </div>
     </div>
 
     <div class="table-wrap">
