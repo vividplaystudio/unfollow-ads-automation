@@ -2,10 +2,8 @@ name: Refresh Dashboard
 
 on:
   schedule:
-    # Every hour
     - cron: "15 * * * *"
   workflow_dispatch:
-  # Also run right after token refresh
   workflow_run:
     workflows: ["Refresh Apple Search Ads Token"]
     types: [completed]
@@ -21,11 +19,15 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Run dashboard refresher
+      - name: Run dashboard refresher (JSON + FTP)
         env:
           SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           REVENUECAT_API_KEY: ${{ secrets.REVENUECAT_API_KEY }}
           REVENUECAT_PROJECT_ID: ${{ secrets.REVENUECAT_PROJECT_ID }}
           ASA_ORG_ID: ${{ secrets.ASA_ORG_ID }}
-        run: python3 refresh_dashboard.py
+          FTP_HOST: ${{ secrets.FTP_HOST }}
+          FTP_USER: ${{ secrets.FTP_USER }}
+          FTP_PASS: ${{ secrets.FTP_PASS }}
+          FTP_PATH: ${{ secrets.FTP_PATH }}
+        run: python3 refresh_dashboard_json.py

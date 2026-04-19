@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Ads Dashboard — Unfollow Tracker</title>
+  <link rel="stylesheet" href="style.css" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="topbar-left">
+    <div class="brand">
+      <div class="brand-mark">UT</div>
+      <div>
+        <h1>Ads Dashboard</h1>
+        <p class="subtitle">Unfollow Tracker — Apple Search Ads</p>
+      </div>
+    </div>
+  </div>
+  <div class="topbar-right">
+    <div class="last-updated">
+      <span class="label">Last update</span>
+      <span id="lastUpdated">—</span>
+    </div>
+    <button class="btn-icon" onclick="loadData()" title="Refresh">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
+        <polyline points="23 4 23 10 17 10" />
+        <polyline points="1 20 1 14 7 14" />
+        <path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15" />
+      </svg>
+      <span>Refresh</span>
+    </button>
+  </div>
+</header>
+
+<main class="container">
+
+  <!-- Filter bar -->
+  <section class="filter-bar">
+    <div class="filter-group">
+      <span class="filter-label">Date range</span>
+      <div class="pill-group" id="dateRangePills">
+        <button class="pill" data-range="today">Today</button>
+        <button class="pill" data-range="yesterday">Yesterday</button>
+        <button class="pill active" data-range="7d">7 days</button>
+        <button class="pill" data-range="14d">14 days</button>
+        <button class="pill" data-range="30d">30 days</button>
+        <button class="pill" data-range="all">All time</button>
+      </div>
+    </div>
+    <div class="filter-group">
+      <span class="filter-label">Country</span>
+      <select id="countryFilter" class="select">
+        <option value="">All countries</option>
+      </select>
+    </div>
+    <div class="filter-group">
+      <span class="filter-label">Campaign</span>
+      <select id="campaignFilter" class="select">
+        <option value="">All campaigns</option>
+      </select>
+    </div>
+  </section>
+
+  <!-- KPI cards -->
+  <section class="kpi-grid">
+    <div class="kpi-card">
+      <div class="kpi-label">Spend</div>
+      <div class="kpi-value" id="kpiSpend">$0</div>
+      <div class="kpi-sub" id="kpiSpendSub">—</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-label">Revenue</div>
+      <div class="kpi-value" id="kpiRevenue">$0</div>
+      <div class="kpi-sub" id="kpiRevenueSub">—</div>
+    </div>
+    <div class="kpi-card kpi-highlight">
+      <div class="kpi-label">ROAS</div>
+      <div class="kpi-value" id="kpiRoas">0%</div>
+      <div class="kpi-sub" id="kpiRoasSub">—</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-label">Subscribers</div>
+      <div class="kpi-value" id="kpiSubs">0</div>
+      <div class="kpi-sub" id="kpiSubsSub">—</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-label">Installs</div>
+      <div class="kpi-value" id="kpiInstalls">0</div>
+      <div class="kpi-sub" id="kpiInstallsSub">—</div>
+    </div>
+    <div class="kpi-card">
+      <div class="kpi-label">Avg CPA</div>
+      <div class="kpi-value" id="kpiCpa">$0</div>
+      <div class="kpi-sub" id="kpiCpaSub">—</div>
+    </div>
+  </section>
+
+  <!-- Charts -->
+  <section class="charts-grid">
+    <div class="chart-card">
+      <h3>ROAS by Country</h3>
+      <div class="chart-wrap">
+        <canvas id="chartCountry"></canvas>
+      </div>
+    </div>
+    <div class="chart-card">
+      <h3>Top Campaigns by Spend</h3>
+      <div class="chart-wrap">
+        <canvas id="chartCampaignSpend"></canvas>
+      </div>
+    </div>
+  </section>
+
+  <!-- Main table area with tabs -->
+  <section class="table-section">
+    <div class="tabs">
+      <button class="tab active" data-tab="campaigns">Campaigns</button>
+      <button class="tab" data-tab="keywords">Keywords</button>
+      <button class="tab" data-tab="ads">Ads / CPPs</button>
+      <button class="tab" data-tab="winners">Winners</button>
+      <button class="tab" data-tab="losers">Losers</button>
+    </div>
+
+    <div class="table-toolbar">
+      <input type="text" id="searchBox" class="search-box" placeholder="Search..." />
+      <div class="table-info" id="tableInfo">—</div>
+    </div>
+
+    <div class="table-wrap">
+      <table id="dataTable">
+        <thead id="tableHead"></thead>
+        <tbody id="tableBody"></tbody>
+      </table>
+    </div>
+  </section>
+
+</main>
+
+<script src="dashboard.js"></script>
+</body>
+</html>

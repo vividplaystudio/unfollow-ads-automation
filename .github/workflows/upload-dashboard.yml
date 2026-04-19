@@ -1,0 +1,63 @@
+name: Upload Dashboard HTML/CSS/JS
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "dashboard/**"
+
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Upload dashboard files via FTP
+        env:
+          FTP_HOST: ${{ secrets.FTP_HOST }}
+          FTP_USER: ${{ secrets.FTP_USER }}
+          FTP_PASS: ${{ secrets.FTP_PASS }}
+          FTP_PATH: ${{ secrets.FTP_PATH }}
+        run: |
+          python3 << 'EOF'
+          import ftplib, ssl, os
+          host = os.environ["FTP_HOST"]
+          user = os.environ["FTP_USER"]
+          pw = os.environ["FTP_PASS"]
+          path = os.environ["FTP_PATH"]
+
+          ctx = ssl.create_default_context()
+          ctx.check_hostname = False
+          ctx.verify_mode = ssl.CERT_NONE
+
+          ftp = ftplib.FTP_TLS(host, timeout=60, context=ctx)
+          ftp.login(user, pw)
+          ftp.prot_p()
+
+          # Navigate / create path
+          try:
+              ftp.cwd(path)
+          except ftplib.error_perm:
+              parts = path.strip("/").split("/")
+              current = ""
+              for part in parts:
+                  current = f"{current}/{part}" if current else f"/{part}"
+                  try:
+                      ftp.cwd(current)
+                  except:
+                      try:
+                          ftp.mkd(current)
+                          ftp.cwd(current)
+                      except Exception as e:
+                          print(f"Failed to create {current}: {e}")
+
+          # Upload all files from dashboard/
+          for fname in sorted(os.listdir("dashboard")):
+              local = f"dashboard/{fname}"
+              if os.path.isfile(local):
+                  with open(local, "rb") as f:
+                      print(f"Uploading {fname}...")
+                      ftp.storbinary(f"STOR {fname}", f)
+          ftp.quit()
+          print("✅ All dashboard files uploaded")
+          EOF
