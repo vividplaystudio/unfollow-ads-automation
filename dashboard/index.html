@@ -66,13 +66,6 @@
       <span class="filter-label">&nbsp;</span>
       <button id="clearFilters" class="btn-clear">Clear filters</button>
     </div>
-    <div class="filter-group filter-clear">
-      <span class="filter-label">Actions</span>
-      <label class="edit-toggle">
-        <input type="checkbox" id="editMode" />
-        <span>Edit mode</span>
-      </label>
-    </div>
   </section>
 
   <!-- Toast notifications -->
@@ -150,20 +143,27 @@
     </div>
 
     <div class="table-toolbar">
-      <input type="text" id="searchBox" class="search-box" placeholder="Search..." />
-      <button id="selectAllBtn" class="btn-select-all" title="Select / deselect all visible">Select all</button>
-      <div class="table-info" id="tableInfo">—</div>
-    </div>
-
-    <!-- Bulk action bar (visible when keywords selected) -->
-    <div id="bulkBar" class="bulk-bar">
-      <span class="bulk-count">0 selected</span>
-      <div class="bulk-actions">
-        <button id="bulkPauseBtn" class="btn-action btn-pause">Pause</button>
-        <button id="bulkEnableBtn" class="btn-action btn-enable">Enable</button>
-        <button id="bulkBidUpBtn" class="btn-action">Bid +20%</button>
-        <button id="bulkBidDownBtn" class="btn-action">Bid −20%</button>
-        <button id="bulkClearBtn" class="btn-action">Clear</button>
+      <div class="toolbar-left">
+        <div class="actions-dropdown" id="actionsDropdown">
+          <button id="actionsBtn" class="btn-primary">Actions <span class="caret">▾</span></button>
+          <div class="actions-menu" id="actionsMenu">
+            <button data-bulk="pause" class="menu-item menu-pause">
+              <span class="dot-icon dot-paused"></span> Pause
+            </button>
+            <button data-bulk="enable" class="menu-item menu-enable">
+              <span class="dot-icon dot-running"></span> Resume
+            </button>
+            <div class="menu-divider"></div>
+            <button data-bulk="bid-up" class="menu-item">Raise bid +20%</button>
+            <button data-bulk="bid-down" class="menu-item">Lower bid −20%</button>
+            <button data-bulk="bid-custom" class="menu-item">Set custom bid…</button>
+          </div>
+        </div>
+        <span id="selectedInfo" class="selected-info"></span>
+      </div>
+      <div class="toolbar-right">
+        <input type="text" id="searchBox" class="search-box" placeholder="Search..." />
+        <div class="table-info" id="tableInfo">—</div>
       </div>
     </div>
 

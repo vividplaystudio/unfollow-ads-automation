@@ -1,5 +1,5 @@
 // ═══════════════════════════════════════════════════════════════
-// Ads Dashboard — logic
+// Ads Dashboard — clean ASA-style keyword management
 // ═══════════════════════════════════════════════════════════════
 
 const STATE = {
@@ -12,9 +12,8 @@ const STATE = {
   sortDir: "desc",
   search: "",
   charts: {},
-  editMode: false,
-  selected: new Set(),     // set of keyword_id strings
-  busy: new Set(),         // keyword ids currently processing
+  selected: new Set(),   // keyword_id (string) of selected rows
+  busy: new Set(),       // keyword ids currently processing
 };
 
 // ─── API calls (to PHP proxy) ──────────────────────────────────
@@ -46,11 +45,10 @@ function flashRow(kwId, type) {
   setTimeout(() => {
     row.classList.remove("flash-success");
     row.classList.remove("flash-error");
-  }, 1500);
+  }, 1400);
 }
 
 function updateSourceKeyword(kwId, patch) {
-  // Update the original keyword entry in STATE.data so next render reflects it
   const k = (STATE.data?.keywords || []).find(x => String(x.keyword_id) === String(kwId));
   if (k) Object.assign(k, patch);
 }
@@ -102,74 +100,83 @@ async function setKeywordBid(k, newBid) {
 }
 
 // ─── Bulk actions ─────────────────────────────────────────────
-async function bulkAction(type) {
-  const ids = [...STATE.selected];
-  if (!ids.length) return;
-  const keywords = ids.map(id => (STATE.data?.keywords || []).find(k => String(k.keyword_id) === id)).filter(Boolean);
-
-  let label, newStatus, confirmMsg;
-  if (type === "pause") {
-    label = "Pausing";
-    newStatus = "PAUSED";
-    confirmMsg = `Pause ${keywords.length} keyword${keywords.length === 1 ? "" : "s"}?`;
-  } else if (type === "enable") {
-    label = "Enabling";
-    newStatus = "ACTIVE";
-    confirmMsg = `Enable ${keywords.length} keyword${keywords.length === 1 ? "" : "s"}?`;
-  } else {
-    return;
-  }
-
-  if (!confirm(confirmMsg)) return;
-
-  const progressToast = document.getElementById("toast");
-  progressToast.className = "toast show";
-  let done = 0, errors = 0;
-
-  // Fire requests in parallel (chunks of 5 to be gentle with API)
-  const chunkSize = 5;
-  for (let i = 0; i < keywords.length; i += chunkSize) {
-    const chunk = keywords.slice(i, i + chunkSize);
-    progressToast.textContent = `${label} ${done + 1}-${Math.min(done + chunk.length, keywords.length)} of ${keywords.length}…`;
-    const results = await Promise.all(chunk.map(k => setKeywordStatus(k, newStatus)));
-    done += chunk.length;
-    errors += results.filter(r => !r.ok).length;
-    renderTable();  // live-update table as we progress
-  }
-
-  const msg = errors === 0
-    ? `${label.slice(0, -3)}ed ${keywords.length} keyword${keywords.length === 1 ? "" : "s"}`
-    : `Done with ${errors} error${errors === 1 ? "" : "s"}`;
-  toast(msg, errors === 0 ? "success" : "error");
-
-  STATE.selected.clear();
-  renderTable();
+function getSelectedKeywords() {
+  return [...STATE.selected]
+    .map(id => (STATE.data?.keywords || []).find(k => String(k.keyword_id) === id))
+    .filter(Boolean);
 }
 
-async function bulkBid(multiplier) {
-  const ids = [...STATE.selected];
-  if (!ids.length) return;
-  const keywords = ids.map(id => (STATE.data?.keywords || []).find(k => String(k.keyword_id) === id)).filter(Boolean);
-  if (!confirm(`Change bid by ${multiplier > 1 ? "+" : ""}${((multiplier - 1) * 100).toFixed(0)}% for ${keywords.length} keyword${keywords.length === 1 ? "" : "s"}?`)) return;
+async function bulkStatusChange(newStatus, label) {
+  const keywords = getSelectedKeywords();
+  if (!keywords.length) return;
+  if (!confirm(`${label} ${keywords.length} keyword${keywords.length === 1 ? "" : "s"}?`)) return;
 
   const progressToast = document.getElementById("toast");
   progressToast.className = "toast show";
   let done = 0, errors = 0;
   for (let i = 0; i < keywords.length; i += 5) {
     const chunk = keywords.slice(i, i + 5);
-    progressToast.textContent = `Updating bids ${done + 1}-${Math.min(done + chunk.length, keywords.length)} of ${keywords.length}…`;
+    progressToast.textContent = `${label} ${done + 1}–${Math.min(done + chunk.length, keywords.length)} of ${keywords.length}…`;
+    const results = await Promise.all(chunk.map(k => setKeywordStatus(k, newStatus)));
+    done += chunk.length;
+    errors += results.filter(r => !r.ok).length;
+    renderTable();
+  }
+  toast(errors === 0 ? `Done — ${label}d ${keywords.length}` : `${errors} errors`, errors === 0 ? "success" : "error");
+  STATE.selected.clear();
+  renderTable();
+  renderBulkInfo();
+}
+
+async function bulkBidMultiply(mult) {
+  const keywords = getSelectedKeywords();
+  if (!keywords.length) return;
+  const pct = ((mult - 1) * 100).toFixed(0);
+  if (!confirm(`Change bids by ${mult > 1 ? "+" : ""}${pct}% for ${keywords.length} keyword${keywords.length === 1 ? "" : "s"}?`)) return;
+
+  const progressToast = document.getElementById("toast");
+  progressToast.className = "toast show";
+  let done = 0, errors = 0;
+  for (let i = 0; i < keywords.length; i += 5) {
+    const chunk = keywords.slice(i, i + 5);
+    progressToast.textContent = `Updating bids ${done + 1}–${Math.min(done + chunk.length, keywords.length)} of ${keywords.length}…`;
     const results = await Promise.all(chunk.map(k => {
-      const newBid = Math.max(0.1, (k.bid || 1) * multiplier).toFixed(2);
+      const newBid = Math.max(0.1, (k.bid || 1) * mult).toFixed(2);
       return setKeywordBid(k, newBid);
     }));
     done += chunk.length;
     errors += results.filter(r => !r.ok).length;
     renderTable();
   }
-  const msg = errors === 0 ? `Updated ${keywords.length} bids` : `Done with ${errors} error${errors === 1 ? "" : "s"}`;
-  toast(msg, errors === 0 ? "success" : "error");
+  toast(errors === 0 ? `Updated ${keywords.length} bids` : `${errors} errors`, errors === 0 ? "success" : "error");
   STATE.selected.clear();
   renderTable();
+  renderBulkInfo();
+}
+
+async function bulkBidCustom() {
+  const keywords = getSelectedKeywords();
+  if (!keywords.length) return;
+  const answer = prompt(`Set bid for ${keywords.length} keyword${keywords.length === 1 ? "" : "s"}\n\nEnter new bid amount (USD):`, "3.00");
+  if (!answer) return;
+  const bid = parseFloat(answer);
+  if (!bid || bid <= 0) { toast("Invalid bid", "error"); return; }
+
+  const progressToast = document.getElementById("toast");
+  progressToast.className = "toast show";
+  let done = 0, errors = 0;
+  for (let i = 0; i < keywords.length; i += 5) {
+    const chunk = keywords.slice(i, i + 5);
+    progressToast.textContent = `Setting bid to $${bid.toFixed(2)} — ${done + 1}–${Math.min(done + chunk.length, keywords.length)} of ${keywords.length}…`;
+    const results = await Promise.all(chunk.map(k => setKeywordBid(k, bid.toFixed(2))));
+    done += chunk.length;
+    errors += results.filter(r => !r.ok).length;
+    renderTable();
+  }
+  toast(errors === 0 ? `Set bid to $${bid.toFixed(2)} for ${keywords.length}` : `${errors} errors`, errors === 0 ? "success" : "error");
+  STATE.selected.clear();
+  renderTable();
+  renderBulkInfo();
 }
 
 // ─── Load data ─────────────────────────────────────────────────
@@ -260,46 +267,6 @@ function profitHtml(spend, revenue) {
   return `<span class='profit-neg'>${fmt.money(profit)}</span>`;
 }
 
-function renderActions(k) {
-  if (!k.keyword_id || !k.ad_group_id || !k.campaign_id) {
-    return `<span class='muted' style='font-size:11px'>—</span>`;
-  }
-  if (!STATE.editMode) {
-    return `<span class='muted' style='font-size:11px'>Enable edit mode</span>`;
-  }
-  const isPaused = k.status === "PAUSED";
-  const isBusy = STATE.busy.has(String(k.keyword_id));
-  const bidValue = (k.bid || 0).toFixed(2);
-  return `
-    <div class="action-cell">
-      <div class="bid-editor">
-        <input type="number" step="0.01" min="0.1" value="${bidValue}"
-               data-action="bid" ${isBusy ? "disabled" : ""} />
-        <button class="btn-action btn-save" data-action="save-bid" data-kw-id="${k.keyword_id}" ${isBusy ? "disabled" : ""}>Save</button>
-      </div>
-      ${isPaused
-        ? `<button class="btn-action btn-enable" data-action="enable-one" data-kw-id="${k.keyword_id}" ${isBusy ? "disabled" : ""}>${isBusy ? "…" : "Enable"}</button>`
-        : `<button class="btn-action btn-pause" data-action="pause-one" data-kw-id="${k.keyword_id}" ${isBusy ? "disabled" : ""}>${isBusy ? "…" : "Pause"}</button>`}
-    </div>
-  `;
-}
-
-function renderBulkBar() {
-  const bar = document.getElementById("bulkBar");
-  if (!bar) return;
-  const count = STATE.selected.size;
-  if (count === 0 || !STATE.editMode) {
-    bar.classList.remove("show");
-    return;
-  }
-  bar.classList.add("show");
-  bar.querySelector(".bulk-count").textContent = `${count} keyword${count === 1 ? "" : "s"} selected`;
-}
-
-function findKeyword(kwId) {
-  return (STATE.data?.keywords || []).find(k => String(k.keyword_id) === String(kwId));
-}
-
 function matchesFilters(row, includeCampaign = true) {
   if (STATE.country && row.country !== STATE.country) return false;
   if (includeCampaign && STATE.campaign) {
@@ -308,19 +275,20 @@ function matchesFilters(row, includeCampaign = true) {
   return true;
 }
 
-function rangeKey() {
-  return STATE.range;
-}
+function rangeKey() { return STATE.range; }
 
 function getMetric(row, metric) {
   const val = row[metric + "_" + rangeKey()];
   return val != null ? val : 0;
 }
 
+function findKeyword(kwId) {
+  return (STATE.data?.keywords || []).find(k => String(k.keyword_id) === String(kwId));
+}
+
 // ─── Render KPIs ───────────────────────────────────────────────
 function renderKPIs() {
   const campaigns = (STATE.data?.campaigns || []).filter(r => matchesFilters(r, true));
-
   let spend = 0, revenue = 0, installs = 0, subs = 0;
   let renewals = 0, canceled = 0;
   let weekly = 0, monthly = 0, yearly = 0;
@@ -348,7 +316,6 @@ function renderKPIs() {
   document.getElementById("kpiRenewals").textContent = fmt.num(renewals);
   document.getElementById("kpiCanceled").textContent = fmt.num(canceled);
 
-  // Profit sub
   const profitEl = document.getElementById("kpiRoasSub");
   profitEl.textContent = (profit >= 0 ? "+" : "-") + fmt.money(Math.abs(profit)) + " profit";
   profitEl.style.color = profit >= 0 ? "var(--success)" : "var(--danger)";
@@ -362,7 +329,7 @@ function renderKPIs() {
   document.getElementById("kpiCanceledSub").textContent = subs > 0 ? `${(canceled / subs * 100).toFixed(0)}% churn` : "—";
 }
 
-// ─── Render Charts ─────────────────────────────────────────────
+// ─── Charts ────────────────────────────────────────────────────
 function destroyChart(name) {
   if (STATE.charts[name]) {
     STATE.charts[name].destroy();
@@ -388,29 +355,14 @@ function renderCharts() {
     data: {
       labels: countries,
       datasets: [
-        {
-          label: "Spend",
-          data: countries.map(c => byCountry[c].spend),
-          backgroundColor: "#c7d2fe",
-          borderRadius: 4,
-        },
-        {
-          label: "Revenue",
-          data: countries.map(c => byCountry[c].revenue),
-          backgroundColor: "#4f46e5",
-          borderRadius: 4,
-        },
+        { label: "Spend", data: countries.map(c => byCountry[c].spend), backgroundColor: "#c7d2fe", borderRadius: 4 },
+        { label: "Revenue", data: countries.map(c => byCountry[c].revenue), backgroundColor: "#4f46e5", borderRadius: 4 },
       ],
     },
     options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      plugins: {
-        legend: { position: "bottom", labels: { usePointStyle: true, padding: 14, font: { size: 12 } } },
-      },
-      scales: {
-        y: { beginAtZero: true, ticks: { callback: v => "$" + v } },
-      },
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { position: "bottom", labels: { usePointStyle: true, padding: 14, font: { size: 12 } } } },
+      scales: { y: { beginAtZero: true, ticks: { callback: v => "$" + v } } },
     },
   });
 
@@ -422,41 +374,26 @@ function renderCharts() {
     data: {
       labels: sorted.map(c => c.name.length > 28 ? c.name.slice(0, 26) + "…" : c.name),
       datasets: [
-        {
-          label: "Spend",
-          data: sorted.map(c => getMetric(c, "spend")),
-          backgroundColor: "#fca5a5",
-          borderRadius: 4,
-        },
-        {
-          label: "Revenue",
-          data: sorted.map(c => getMetric(c, "revenue")),
-          backgroundColor: "#10b981",
-          borderRadius: 4,
-        },
+        { label: "Spend", data: sorted.map(c => getMetric(c, "spend")), backgroundColor: "#fca5a5", borderRadius: 4 },
+        { label: "Revenue", data: sorted.map(c => getMetric(c, "revenue")), backgroundColor: "#10b981", borderRadius: 4 },
       ],
     },
     options: {
-      indexAxis: "y",
-      responsive: true,
-      maintainAspectRatio: false,
-      plugins: {
-        legend: { position: "bottom", labels: { usePointStyle: true, padding: 14, font: { size: 12 } } },
-      },
-      scales: {
-        x: { beginAtZero: true, ticks: { callback: v => "$" + v } },
-      },
+      indexAxis: "y", responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { position: "bottom", labels: { usePointStyle: true, padding: 14, font: { size: 12 } } } },
+      scales: { x: { beginAtZero: true, ticks: { callback: v => "$" + v } } },
     },
   });
 }
 
-// ─── Render Table ──────────────────────────────────────────────
+// ─── Table ─────────────────────────────────────────────────────
 function renderTable() {
   const head = document.getElementById("tableHead");
   const body = document.getElementById("tableBody");
 
   let rows = [];
   let cols = [];
+  const isKwTab = STATE.tab === "keywords" || STATE.tab === "winners" || STATE.tab === "losers";
 
   if (STATE.tab === "campaigns") {
     cols = [
@@ -476,7 +413,6 @@ function renderTable() {
       { key: "cpa", label: "CPA", num: true },
       { key: "status", label: "Status" },
     ];
-    // Campaigns tab — always show ALL campaigns (ignore campaign filter)
     rows = (STATE.data?.campaigns || [])
       .filter(r => matchesFilters(r, false))
       .map(c => {
@@ -497,15 +433,14 @@ function renderTable() {
           _name: c.name,
         };
       });
-  } else if (STATE.tab === "keywords" || STATE.tab === "winners" || STATE.tab === "losers") {
-    cols = [];
-    if (STATE.editMode) cols.push({ key: "select", label: "" });
-    cols.push(
+  } else if (isKwTab) {
+    cols = [
+      { key: "select", label: "" },
+      { key: "kw_state", label: "State" },
       { key: "keyword", label: "Keyword" },
       { key: "campaign", label: "Campaign" },
       { key: "country", label: "Country" },
       { key: "match", label: "Match" },
-      { key: "kw_state", label: "State" },
       { key: "bid", label: "Bid", num: true },
       { key: "spend", label: "Spend", num: true },
       { key: "revenue", label: "Revenue", num: true },
@@ -521,8 +456,7 @@ function renderTable() {
       { key: "ttr", label: "TTR", num: true },
       { key: "cr", label: "CR", num: true },
       { key: "status", label: "Status" },
-    );
-    if (STATE.editMode) cols.push({ key: "actions", label: "Actions" });
+    ];
     rows = (STATE.data?.keywords || [])
       .filter(k => matchesFilters(k, true))
       .map(k => {
@@ -546,7 +480,6 @@ function renderTable() {
         };
       });
 
-    // Winners/Losers thresholds adapt to range
     const minSpend = STATE.range === "today" ? 5 : STATE.range === "yesterday" ? 10 : 15;
     if (STATE.tab === "winners") {
       rows = rows.filter(r => r.spend >= minSpend && r.roas >= 100);
@@ -605,13 +538,11 @@ function renderTable() {
       }));
   }
 
-  // Apply search
   if (STATE.search) {
     const s = STATE.search.toLowerCase();
     rows = rows.filter(r => Object.values(r).some(v => String(v).toLowerCase().includes(s)));
   }
 
-  // Sort
   const sortCol = STATE.sortCol || "spend";
   const dir = STATE.sortDir === "asc" ? 1 : -1;
   rows.sort((a, b) => {
@@ -621,15 +552,21 @@ function renderTable() {
     return (va - vb) * dir;
   });
 
-  // Render headers
+  // Headers — with header checkbox for keyword tabs
   head.innerHTML = "<tr>" + cols.map(c => {
+    if (c.key === "select") {
+      // Select-all checkbox — checked if all visible are selected
+      const visibleIds = rows.filter(r => r.keyword_id).map(r => String(r.keyword_id));
+      const allSelected = visibleIds.length > 0 && visibleIds.every(id => STATE.selected.has(id));
+      return `<th class="select-col"><input type="checkbox" class="row-check" id="selectAllCheck" ${allSelected ? "checked" : ""} /></th>`;
+    }
     const isSorted = sortCol === c.key;
     const sortClass = isSorted ? `sorted${STATE.sortDir === "asc" ? "-asc" : ""}` : "";
     const title = c.label === "W" ? "Weekly Subs" : c.label === "M" ? "Monthly Subs" : c.label === "Y" ? "Yearly Subs" : c.label;
     return `<th class="${c.num ? "num" : ""} ${sortClass}" data-col="${c.key}" title="${title}">${c.label}</th>`;
   }).join("") + "</tr>";
 
-  // Render body
+  // Body
   if (rows.length === 0) {
     body.innerHTML = `<tr><td colspan="${cols.length}"><div class="empty-state"><div class="icon">📭</div>No data for this view/range</div></td></tr>`;
   } else {
@@ -637,7 +574,7 @@ function renderTable() {
       const classes = [];
       if (STATE.tab === "campaigns") classes.push("clickable");
       if (r.status === "PAUSED") classes.push("row-paused");
-      if (STATE.selected.has(String(r.keyword_id))) classes.push("row-selected");
+      if (r.keyword_id && STATE.selected.has(String(r.keyword_id))) classes.push("row-selected");
       const kwidAttr = r.keyword_id ? `data-kwid="${r.keyword_id}"` : "";
       return `<tr class='${classes.join(" ")}' ${kwidAttr} data-name='${(r.name || r.keyword || "").replace(/'/g, "&#39;")}'>` + cols.map(c => {
         let val = r[c.key];
@@ -699,15 +636,21 @@ function renderTable() {
           case "cpp_id":
             content = val ? `<span class='muted' style='font-size:11px'>${val.slice(0, 8)}…</span>` : "<span class='muted'>—</span>";
             break;
-          case "kw_state":
-            // Show the ASA keyword status (ACTIVE/PAUSED/etc) as a badge
-            content = r.status ? `<span class="kw-status-badge kw-status-${r.status}">${r.status}</span>` : "<span class='muted'>—</span>";
+          case "kw_state": {
+            const isPaused = r.status === "PAUSED";
+            const isBusy = r.keyword_id && STATE.busy.has(String(r.keyword_id));
+            const label = isBusy ? "…" : (isPaused ? "Paused" : "Running");
+            const dot = isBusy ? "dot-error" : (isPaused ? "dot-paused" : "dot-running");
+            content = `<span class="status-cell ${isPaused ? 'status-paused' : 'status-running'}"><span class="dot-icon ${dot}"></span>${label}</span>`;
             break;
+          }
           case "bid":
-            content = r.bid > 0 ? fmt.money(r.bid) : "<span class='muted'>—</span>";
-            break;
-          case "actions":
-            content = renderActions(r);
+            if (r.keyword_id && r.bid > 0) {
+              content = `<span class="bid-cell" data-action="edit-bid" data-kw-id="${r.keyword_id}">${fmt.money(r.bid)}<span class="pencil-icon">✎</span></span>`;
+              cls = "num bid-cell-wrap";
+            } else {
+              content = r.bid > 0 ? fmt.money(r.bid) : "<span class='muted'>—</span>";
+            }
             break;
           default:
             content = val != null && val !== "" ? (typeof val === "number" ? fmt.num(val) : String(val)) : "<span class='muted'>—</span>";
@@ -716,7 +659,7 @@ function renderTable() {
       }).join("") + "</tr>";
     }).join("");
 
-    // Campaigns tab → click a row to filter keywords to that campaign
+    // Campaigns tab → click a row to filter keywords
     if (STATE.tab === "campaigns") {
       body.querySelectorAll("tr.clickable").forEach(tr => {
         tr.addEventListener("click", () => {
@@ -732,8 +675,8 @@ function renderTable() {
     }
   }
 
-  // Header click → sort
-  head.querySelectorAll("th").forEach(th => {
+  // Header click sorting (ignore the select column)
+  head.querySelectorAll("th[data-col]").forEach(th => {
     th.addEventListener("click", () => {
       const col = th.dataset.col;
       if (STATE.sortCol === col) STATE.sortDir = STATE.sortDir === "desc" ? "asc" : "desc";
@@ -745,7 +688,21 @@ function renderTable() {
     });
   });
 
+  // Select-all checkbox in header
+  const selectAllCheck = document.getElementById("selectAllCheck");
+  if (selectAllCheck) {
+    selectAllCheck.addEventListener("change", (e) => {
+      const visibleIds = [...document.querySelectorAll("tbody tr[data-kwid]")]
+        .map(tr => tr.dataset.kwid);
+      if (e.target.checked) visibleIds.forEach(id => STATE.selected.add(id));
+      else visibleIds.forEach(id => STATE.selected.delete(id));
+      renderTable();
+      renderBulkInfo();
+    });
+  }
+
   document.getElementById("tableInfo").textContent = `${rows.length} row${rows.length === 1 ? "" : "s"}`;
+  renderBulkInfo();
 }
 
 function updateTabs() {
@@ -754,12 +711,37 @@ function updateTabs() {
   });
 }
 
+function renderBulkInfo() {
+  const selInfo = document.getElementById("selectedInfo");
+  const actionsBtn = document.getElementById("actionsBtn");
+  const count = STATE.selected.size;
+  const isKwTab = STATE.tab === "keywords" || STATE.tab === "winners" || STATE.tab === "losers";
+  const dropdown = document.getElementById("actionsDropdown");
+
+  if (!isKwTab) {
+    dropdown.style.display = "none";
+    selInfo.textContent = "";
+    return;
+  }
+  dropdown.style.display = "inline-block";
+
+  if (count === 0) {
+    actionsBtn.disabled = true;
+    selInfo.textContent = "Select keywords to enable actions";
+    selInfo.classList.remove("has-selection");
+  } else {
+    actionsBtn.disabled = false;
+    selInfo.textContent = `${count} keyword${count === 1 ? "" : "s"} selected`;
+    selInfo.classList.add("has-selection");
+  }
+}
+
 function render() {
   if (!STATE.data) return;
   renderKPIs();
   renderCharts();
   renderTable();
-  renderBulkBar();
+  renderBulkInfo();
 }
 
 // ─── Events ────────────────────────────────────────────────────
@@ -774,138 +756,120 @@ document.addEventListener("DOMContentLoaded", () => {
     });
   });
 
-  // Country filter
   document.getElementById("countryFilter").addEventListener("change", e => {
     STATE.country = e.target.value;
     render();
   });
-
-  // Campaign filter
   document.getElementById("campaignFilter").addEventListener("change", e => {
     STATE.campaign = e.target.value;
     render();
   });
 
-  // Clear filters button
-  const clearBtn = document.getElementById("clearFilters");
-  if (clearBtn) {
-    clearBtn.addEventListener("click", () => {
-      STATE.country = "";
-      STATE.campaign = "";
-      STATE.search = "";
-      document.getElementById("countryFilter").value = "";
-      document.getElementById("campaignFilter").value = "";
-      document.getElementById("searchBox").value = "";
-      render();
-    });
-  }
+  document.getElementById("clearFilters")?.addEventListener("click", () => {
+    STATE.country = "";
+    STATE.campaign = "";
+    STATE.search = "";
+    document.getElementById("countryFilter").value = "";
+    document.getElementById("campaignFilter").value = "";
+    document.getElementById("searchBox").value = "";
+    render();
+  });
 
-  // Tabs — when clicking Campaigns, clear campaign filter so we see all
+  // Tabs
   document.querySelectorAll(".tab").forEach(t => {
     t.addEventListener("click", () => {
       const newTab = t.dataset.tab;
-      // If clicking Campaigns and there's a campaign filter, clear it so we see all campaigns
       if (newTab === "campaigns" && STATE.campaign) {
         STATE.campaign = "";
         document.getElementById("campaignFilter").value = "";
       }
       STATE.tab = newTab;
       STATE.sortCol = null;
+      STATE.selected.clear();
       updateTabs();
       render();
     });
   });
 
-  // Search
   document.getElementById("searchBox").addEventListener("input", e => {
     STATE.search = e.target.value;
     renderTable();
   });
 
-  // Edit mode toggle
-  const editCheckbox = document.getElementById("editMode");
-  if (editCheckbox) {
-    editCheckbox.addEventListener("change", e => {
-      STATE.editMode = e.target.checked;
-      document.body.classList.toggle("edit-on", STATE.editMode);
-      if (STATE.editMode) {
-        toast("⚠ Edit mode ON — actions will apply live to Apple Search Ads", "");
-      }
-      renderTable();
-    });
-  }
+  // Actions dropdown toggle
+  const actionsBtn = document.getElementById("actionsBtn");
+  const actionsMenu = document.getElementById("actionsMenu");
+  actionsBtn?.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (actionsBtn.disabled) return;
+    actionsMenu.classList.toggle("show");
+  });
+  document.addEventListener("click", (e) => {
+    if (!e.target.closest(".actions-dropdown")) {
+      actionsMenu?.classList.remove("show");
+    }
+  });
+  actionsMenu?.addEventListener("click", (e) => {
+    const item = e.target.closest(".menu-item");
+    if (!item) return;
+    actionsMenu.classList.remove("show");
+    const kind = item.dataset.bulk;
+    if (kind === "pause") bulkStatusChange("PAUSED", "Pause");
+    else if (kind === "enable") bulkStatusChange("ACTIVE", "Resume");
+    else if (kind === "bid-up") bulkBidMultiply(1.20);
+    else if (kind === "bid-down") bulkBidMultiply(0.80);
+    else if (kind === "bid-custom") bulkBidCustom();
+  });
 
-  // Event delegation for action buttons + checkboxes in table
+  // Event delegation for checkboxes + inline bid edit in the table
   document.getElementById("tableBody").addEventListener("click", async (e) => {
     const el = e.target.closest("[data-action]");
     if (!el) return;
     const action = el.dataset.action;
 
-    // Checkbox selection — don't trigger row click
     if (action === "select") {
       e.stopPropagation();
       const kwId = el.dataset.kwId;
       if (el.checked) STATE.selected.add(String(kwId));
       else STATE.selected.delete(String(kwId));
-      renderBulkBar();
-      // Update row visual
-      const tr = el.closest("tr");
-      if (tr) tr.classList.toggle("row-selected", el.checked);
+      el.closest("tr").classList.toggle("row-selected", el.checked);
+      renderBulkInfo();
       return;
     }
 
-    const kwId = el.dataset.kwId;
-    const k = findKeyword(kwId);
-    if (!k) return;
+    if (action === "edit-bid") {
+      e.stopPropagation();
+      const kwId = el.dataset.kwId;
+      const k = findKeyword(kwId);
+      if (!k) return;
+      const current = (k.bid || 0).toFixed(2);
+      // Replace text with an input
+      el.innerHTML = `<input type="number" step="0.01" min="0.1" value="${current}" />`;
+      const input = el.querySelector("input");
+      input.focus();
+      input.select();
 
-    if (action === "pause-one") {
-      e.stopPropagation();
-      const r = await setKeywordStatus(k, "PAUSED");
-      if (r.ok) toast(`Paused: ${k.keyword}`, "success");
-      else toast(`Failed: ${r.error}`, "error");
-      renderTable();
-    } else if (action === "enable-one") {
-      e.stopPropagation();
-      const r = await setKeywordStatus(k, "ACTIVE");
-      if (r.ok) toast(`Enabled: ${k.keyword}`, "success");
-      else toast(`Failed: ${r.error}`, "error");
-      renderTable();
-    } else if (action === "save-bid") {
-      e.stopPropagation();
-      const input = el.parentElement.querySelector("input[data-action='bid']");
-      if (input) {
-        const r = await setKeywordBid(k, parseFloat(input.value));
-        if (r.ok) toast(`Bid updated: ${k.keyword}`, "success");
+      const commit = async () => {
+        const newBid = parseFloat(input.value);
+        if (newBid === k.bid || isNaN(newBid)) {
+          renderTable();
+          return;
+        }
+        if (!confirm(`Change bid for "${k.keyword}" to $${newBid.toFixed(2)}?`)) {
+          renderTable();
+          return;
+        }
+        const r = await setKeywordBid(k, newBid.toFixed(2));
+        if (r.ok) toast(`Bid updated: ${k.keyword} → $${newBid.toFixed(2)}`, "success");
         else toast(`Failed: ${r.error}`, "error");
         renderTable();
-      }
+      };
+      input.addEventListener("keydown", (ev) => {
+        if (ev.key === "Enter") commit();
+        if (ev.key === "Escape") renderTable();
+      });
+      input.addEventListener("blur", commit);
     }
-  });
-
-  // Bulk action bar
-  document.getElementById("bulkPauseBtn")?.addEventListener("click", () => bulkAction("pause"));
-  document.getElementById("bulkEnableBtn")?.addEventListener("click", () => bulkAction("enable"));
-  document.getElementById("bulkBidUpBtn")?.addEventListener("click", () => bulkBid(1.20));
-  document.getElementById("bulkBidDownBtn")?.addEventListener("click", () => bulkBid(0.80));
-  document.getElementById("bulkClearBtn")?.addEventListener("click", () => {
-    STATE.selected.clear();
-    renderTable();
-    renderBulkBar();
-  });
-
-  // Select all keywords currently visible
-  document.getElementById("selectAllBtn")?.addEventListener("click", () => {
-    // Find visible keyword rows
-    const visibleIds = [...document.querySelectorAll("tbody tr[data-kwid]")]
-      .map(tr => tr.dataset.kwid);
-    if (visibleIds.every(id => STATE.selected.has(id))) {
-      // All selected → deselect all
-      visibleIds.forEach(id => STATE.selected.delete(id));
-    } else {
-      visibleIds.forEach(id => STATE.selected.add(id));
-    }
-    renderTable();
-    renderBulkBar();
   });
 
   loadData();
