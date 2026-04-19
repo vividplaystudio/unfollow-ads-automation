@@ -88,13 +88,23 @@ function roasClass(roas) {
   return "roas-low";
 }
 
-function roasBadge(roas, spend) {
+function roasBadge(roas, spend, revenue) {
+  const profit = (revenue || 0) - (spend || 0);
   if (spend < 15) return `<span class="badge badge-wait">WAIT</span>`;
-  if (!roas || roas === 0) return `<span class="badge badge-pause">PAUSE</span>`;
-  if (roas >= 100) return `<span class="badge badge-winner">WINNER</span>`;
-  if (roas >= 50) return `<span class="badge badge-watch">WATCH</span>`;
-  if (roas >= 30) return `<span class="badge badge-ok">OK</span>`;
-  return `<span class="badge badge-losing">LOSING</span>`;
+  if (!revenue || revenue === 0) {
+    return `<span class="badge badge-pause">PAUSE · ${fmt.money(Math.abs(profit))} lost</span>`;
+  }
+  if (roas >= 100) return `<span class="badge badge-winner">WINNER · +${fmt.money(profit)}</span>`;
+  if (roas >= 50) return `<span class="badge badge-watch">WATCH · ${fmt.money(profit)}</span>`;
+  if (roas >= 30) return `<span class="badge badge-ok">OK · ${fmt.money(profit)}</span>`;
+  return `<span class="badge badge-losing">LOSING · ${fmt.money(profit)}</span>`;
+}
+
+function profitHtml(spend, revenue) {
+  if (!spend) return `<span class='muted'>—</span>`;
+  const profit = (revenue || 0) - spend;
+  if (profit > 0) return `<span class='profit-pos'>+${fmt.money(profit)}</span>`;
+  return `<span class='profit-neg'>${fmt.money(profit)}</span>`;
 }
 
 function matchesFilters(row) {
@@ -253,7 +263,8 @@ function renderTable() {
       { key: "country", label: "Country" },
       { key: "spend", label: "Spend", num: true },
       { key: "revenue", label: "Revenue", num: true },
-      { key: "subs", label: "Subs", num: true },
+      { key: "profit", label: "Profit", num: true },
+      { key: "subs", label: "Paid Subs", num: true },
       { key: "installs", label: "Installs", num: true },
       { key: "roas", label: "ROAS", num: true },
       { key: "cpa", label: "CPA", num: true },
@@ -268,7 +279,8 @@ function renderTable() {
         const subs = getMetric(c, "subs");
         const roas = spend > 0 ? revenue / spend * 100 : 0;
         const cpa = installs > 0 ? spend / installs : 0;
-        return { ...c, spend, revenue, installs, subs, roas, cpa, _name: c.name };
+        const profit = revenue - spend;
+        return { ...c, spend, revenue, profit, installs, subs, roas, cpa, _name: c.name };
       });
   } else if (STATE.tab === "keywords" || STATE.tab === "winners" || STATE.tab === "losers") {
     cols = [
@@ -278,7 +290,8 @@ function renderTable() {
       { key: "match", label: "Match" },
       { key: "spend", label: "Spend", num: true },
       { key: "revenue", label: "Revenue", num: true },
-      { key: "subs", label: "Subs", num: true },
+      { key: "profit", label: "Profit", num: true },
+      { key: "subs", label: "Paid", num: true },
       { key: "installs", label: "Installs", num: true },
       { key: "roas", label: "ROAS", num: true },
       { key: "cpa", label: "CPA", num: true },
@@ -301,7 +314,8 @@ function renderTable() {
         const ttr = imp > 0 ? taps / imp * 100 : 0;
         const cr = taps > 0 ? installs / taps * 100 : 0;
         const cpt = taps > 0 ? spend / taps : 0;
-        return { ...k, spend, revenue, installs, subs, taps, imp, roas, cpa, ttr, cr, cpt };
+        const profit = revenue - spend;
+        return { ...k, spend, revenue, profit, installs, subs, taps, imp, roas, cpa, ttr, cr, cpt };
       });
 
     // Filter Winners/Losers
@@ -366,6 +380,9 @@ function renderTable() {
           case "cpt":
             content = val > 0 ? fmt.money(val) : "<span class='muted'>—</span>";
             break;
+          case "profit":
+            content = profitHtml(r.spend, r.revenue);
+            break;
           case "roas":
             if (val > 0) {
               content = `<span class="${roasClass(val)}">${fmt.pct(val)}</span>`;
@@ -384,7 +401,7 @@ function renderTable() {
             content = val ? `<span class="match-badge">${val}</span>` : "<span class='muted'>—</span>";
             break;
           case "status":
-            content = roasBadge(r.roas, r.spend);
+            content = roasBadge(r.roas, r.spend, r.revenue);
             break;
           case "campaign":
             content = val ? (val.length > 32 ? val.slice(0, 30) + "…" : val) : "<span class='muted'>—</span>";

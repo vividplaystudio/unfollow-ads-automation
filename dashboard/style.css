@@ -330,6 +330,10 @@ tbody td.muted { color: var(--text-muted); }
 .roas-low { color: var(--danger); font-weight: 600; }
 .roas-none { color: var(--text-subtle); }
 
+/* Profit/Loss */
+.profit-pos { color: var(--success); font-weight: 600; }
+.profit-neg { color: var(--danger); font-weight: 600; }
+
 /* Country flags (text badges) */
 .country-badge {
   display: inline-block;

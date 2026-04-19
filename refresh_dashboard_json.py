@@ -351,9 +351,9 @@ def build_revenue_index(customers: list) -> dict:
         "all": None,
     }
 
-    by_kw = defaultdict(lambda: defaultdict(lambda: {"users": 0, "revenue": 0.0, "active": 0}))
-    by_camp = defaultdict(lambda: defaultdict(lambda: {"users": 0, "revenue": 0.0, "active": 0}))
-    by_country = defaultdict(lambda: defaultdict(lambda: {"users": 0, "revenue": 0.0, "active": 0}))
+    by_kw = defaultdict(lambda: defaultdict(lambda: {"users": 0, "paid_subs": 0, "revenue": 0.0, "active": 0}))
+    by_camp = defaultdict(lambda: defaultdict(lambda: {"users": 0, "paid_subs": 0, "revenue": 0.0, "active": 0}))
+    by_country = defaultdict(lambda: defaultdict(lambda: {"users": 0, "paid_subs": 0, "revenue": 0.0, "active": 0}))
 
     for c in customers:
         first_seen_ms = c.get("first_seen_at")
@@ -372,6 +372,8 @@ def build_revenue_index(customers: list) -> dict:
 
         total = float(c.get("_revenue", 0) or 0)
         is_active = 1 if c.get("_active") else 0
+        # A "paid sub" = customer with any revenue OR currently active entitlement
+        is_paid = 1 if (total > 0 or is_active) else 0
 
         for r, start in ranges.items():
             if r == "yesterday":
@@ -381,14 +383,17 @@ def build_revenue_index(customers: list) -> dict:
                 continue
 
             by_kw[(campaign, keyword)][r]["users"] += 1
+            by_kw[(campaign, keyword)][r]["paid_subs"] += is_paid
             by_kw[(campaign, keyword)][r]["revenue"] += total
             by_kw[(campaign, keyword)][r]["active"] += is_active
 
             by_camp[campaign][r]["users"] += 1
+            by_camp[campaign][r]["paid_subs"] += is_paid
             by_camp[campaign][r]["revenue"] += total
             by_camp[campaign][r]["active"] += is_active
 
             by_country[country][r]["users"] += 1
+            by_country[country][r]["paid_subs"] += is_paid
             by_country[country][r]["revenue"] += total
 
     return {"by_keyword": by_kw, "by_campaign": by_camp, "by_country": by_country}
@@ -580,9 +585,10 @@ def main() -> None:
             row[f"taps_{r}"] = d["taps"]
             row[f"impressions_{r}"] = d["impressions"]
 
-            rev_data = rev_index["by_campaign"].get(meta["name"], {}).get(r, {"users": 0, "revenue": 0, "active": 0})
+            rev_data = rev_index["by_campaign"].get(meta["name"], {}).get(r, {"users": 0, "paid_subs": 0, "revenue": 0, "active": 0})
             row[f"revenue_{r}"] = round(rev_data["revenue"], 2)
-            row[f"subs_{r}"] = rev_data["users"]
+            row[f"subs_{r}"] = rev_data["paid_subs"]  # Now means PAYING subs
+            row[f"asa_users_{r}"] = rev_data["users"]  # Total ASA-attributed users
             row[f"active_{r}"] = rev_data["active"]
         campaigns_out.append(row)
 
@@ -631,9 +637,10 @@ def main() -> None:
             row[f"impressions_{r}"] = d["impressions"]
             row[f"cpt_{r}"] = round(d.get("cpt", 0), 2)
 
-            rev_data = rev_index["by_keyword"].get((meta.get("name", ""), kw_lower), {}).get(r, {"users": 0, "revenue": 0})
+            rev_data = rev_index["by_keyword"].get((meta.get("name", ""), kw_lower), {}).get(r, {"users": 0, "paid_subs": 0, "revenue": 0})
             row[f"revenue_{r}"] = round(rev_data["revenue"], 2)
-            row[f"subs_{r}"] = rev_data["users"]
+            row[f"subs_{r}"] = rev_data["paid_subs"]
+            row[f"asa_users_{r}"] = rev_data["users"]
         keywords_out.append(row)
 
     # Ads
