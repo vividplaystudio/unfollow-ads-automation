@@ -232,28 +232,40 @@ def rc_fetch_customer_attrs(customer_id: str) -> dict:
         return {}
 
 
-def rc_fetch_customer_purchases(customer_id: str) -> float:
-    """Sum revenue in USD from all purchases for one customer."""
+def rc_fetch_customer_revenue(customer_id: str) -> float:
+    """Sum gross revenue (USD) from all subscriptions + one-time purchases."""
     encoded = urllib.parse.quote(customer_id, safe="")
+    total = 0.0
+
+    # Subscriptions (main revenue source)
+    url = f"https://api.revenuecat.com/v2/projects/{REVENUECAT_PROJECT_ID}/customers/{encoded}/subscriptions?limit=100"
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {REVENUECAT_API_KEY}"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode())
+        for s in data.get("items", []):
+            rev = s.get("total_revenue_in_usd", {})
+            if isinstance(rev, dict):
+                total += float(rev.get("gross", 0) or 0)
+    except Exception:
+        pass
+
+    # One-time purchases (non-subscription)
     url = f"https://api.revenuecat.com/v2/projects/{REVENUECAT_PROJECT_ID}/customers/{encoded}/purchases?limit=100"
     req = urllib.request.Request(url, headers={"Authorization": f"Bearer {REVENUECAT_API_KEY}"})
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             data = json.loads(resp.read().decode())
-        total = 0.0
         for p in data.get("items", []):
-            # Try multiple possible field names for amount
-            for key in ["revenue_in_usd", "amount_in_usd", "price_in_usd", "revenue", "price"]:
-                v = p.get(key)
-                if v is not None:
-                    try:
-                        total += float(v)
-                        break
-                    except (TypeError, ValueError):
-                        pass
-        return total
+            rev = p.get("revenue_in_usd", p.get("total_revenue_in_usd", {}))
+            if isinstance(rev, dict):
+                total += float(rev.get("gross", 0) or 0)
+            elif isinstance(rev, (int, float)):
+                total += float(rev)
     except Exception:
-        return 0.0
+        pass
+
+    return total
 
 
 def rc_fetch_customer_active(customer_id: str) -> bool:
@@ -288,7 +300,7 @@ def rc_enrich_customers(customers: list) -> list:
         customer["_attrs"] = attrs
         # Only fetch purchases + active if ASA-attributed (saves calls)
         if attrs.get("$mediaSource") == "Apple Search Ads":
-            customer["_revenue"] = rc_fetch_customer_purchases(cid)
+            customer["_revenue"] = rc_fetch_customer_revenue(cid)
             customer["_active"] = rc_fetch_customer_active(cid)
         else:
             customer["_revenue"] = 0.0
