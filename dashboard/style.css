@@ -400,3 +400,136 @@ tbody td.muted { color: var(--text-muted); }
 tbody td, thead th {
   font-variant-numeric: tabular-nums;
 }
+
+/* ─── Edit mode toggle ─── */
+.edit-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 12px;
+  background: var(--neutral-soft);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.15s;
+  user-select: none;
+}
+.edit-toggle:hover { background: var(--border); }
+.edit-toggle input[type="checkbox"] {
+  appearance: none;
+  width: 32px;
+  height: 18px;
+  background: var(--border);
+  border-radius: 10px;
+  position: relative;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+.edit-toggle input[type="checkbox"]::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  background: white;
+  border-radius: 50%;
+  transition: left 0.2s;
+}
+.edit-toggle input[type="checkbox"]:checked {
+  background: var(--accent);
+}
+.edit-toggle input[type="checkbox"]:checked::after {
+  left: 16px;
+}
+
+/* When edit mode active — visual cue */
+body.edit-on .table-section {
+  border: 2px solid var(--accent);
+  box-shadow: 0 0 0 4px rgba(79, 70, 229, 0.12);
+}
+
+/* Action cells */
+.action-cell {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.bid-editor {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.bid-editor input {
+  width: 56px;
+  padding: 3px 6px;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  font-size: 12px;
+  text-align: right;
+  font-family: inherit;
+  font-variant-numeric: tabular-nums;
+}
+.bid-editor input:focus { outline: none; border-color: var(--accent); }
+
+.btn-action {
+  padding: 3px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 600;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.btn-action:hover { background: var(--surface-hover); border-color: var(--border-strong); }
+.btn-action.btn-pause { color: var(--danger); border-color: var(--danger-soft); }
+.btn-action.btn-pause:hover { background: var(--danger-soft); }
+.btn-action.btn-enable { color: var(--success); border-color: var(--success-soft); }
+.btn-action.btn-enable:hover { background: var(--success-soft); }
+.btn-action.btn-save { background: var(--accent); color: white; border-color: var(--accent); }
+.btn-action.btn-save:hover { background: #4338ca; }
+.btn-action[disabled] { opacity: 0.5; cursor: not-allowed; }
+
+/* Status badges inside the keyword status column */
+.kw-status-badge {
+  display: inline-block;
+  padding: 2px 7px;
+  border-radius: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+}
+.kw-status-ACTIVE { background: var(--success-soft); color: #047857; }
+.kw-status-PAUSED { background: var(--danger-soft); color: #b91c1c; }
+.kw-status-DELETED { background: var(--neutral-soft); color: var(--neutral); }
+
+/* Toast */
+.toast {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  min-width: 240px;
+  max-width: 420px;
+  padding: 14px 18px;
+  border-radius: var(--radius);
+  background: var(--text);
+  color: white;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.15);
+  font-size: 13px;
+  opacity: 0;
+  transform: translateY(20px);
+  transition: opacity 0.25s, transform 0.25s;
+  pointer-events: none;
+  z-index: 200;
+}
+.toast.show {
+  opacity: 1;
+  transform: translateY(0);
+}
+.toast.success { background: var(--success); }
+.toast.error { background: var(--danger); }

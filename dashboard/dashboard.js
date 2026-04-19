@@ -12,7 +12,84 @@ const STATE = {
   sortDir: "desc",
   search: "",
   charts: {},
+  editMode: false,
 };
+
+// ─── API calls (to PHP proxy) ──────────────────────────────────
+async function asaCall(method, path, data) {
+  const res = await fetch("api.php", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ method, path, data }),
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok || body.error) {
+    throw new Error(body.error || body.message || `HTTP ${res.status}`);
+  }
+  return body;
+}
+
+function toast(msg, type = "") {
+  const el = document.getElementById("toast");
+  el.textContent = msg;
+  el.className = "toast show " + type;
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => el.classList.remove("show"), 3500);
+}
+
+async function pauseKeyword(k) {
+  if (!confirm(`Pause keyword "${k.keyword}" in ${k.campaign}?`)) return;
+  try {
+    const path = `/campaigns/${k.campaign_id}/adgroups/${k.ad_group_id}/targetingkeywords/${k.keyword_id}`;
+    await asaCall("PUT", path, {
+      id: k.keyword_id,
+      adGroupId: k.ad_group_id,
+      status: "PAUSED",
+    });
+    toast(`Paused: ${k.keyword}`, "success");
+    k.status = "PAUSED";
+    renderTable();
+  } catch (e) {
+    toast(`Failed: ${e.message}`, "error");
+  }
+}
+
+async function enableKeyword(k) {
+  try {
+    const path = `/campaigns/${k.campaign_id}/adgroups/${k.ad_group_id}/targetingkeywords/${k.keyword_id}`;
+    await asaCall("PUT", path, {
+      id: k.keyword_id,
+      adGroupId: k.ad_group_id,
+      status: "ACTIVE",
+    });
+    toast(`Enabled: ${k.keyword}`, "success");
+    k.status = "ACTIVE";
+    renderTable();
+  } catch (e) {
+    toast(`Failed: ${e.message}`, "error");
+  }
+}
+
+async function updateBid(k, newBid) {
+  if (!newBid || isNaN(newBid) || newBid <= 0) {
+    toast("Invalid bid", "error");
+    return;
+  }
+  if (!confirm(`Change bid for "${k.keyword}" to $${newBid}?`)) return;
+  try {
+    const path = `/campaigns/${k.campaign_id}/adgroups/${k.ad_group_id}/targetingkeywords/${k.keyword_id}`;
+    await asaCall("PUT", path, {
+      id: k.keyword_id,
+      adGroupId: k.ad_group_id,
+      bidAmount: { amount: String(newBid), currency: "USD" },
+    });
+    toast(`Bid updated: ${k.keyword} → $${newBid}`, "success");
+    k.bid = parseFloat(newBid);
+    renderTable();
+  } catch (e) {
+    toast(`Failed: ${e.message}`, "error");
+  }
+}
 
 // ─── Load data ─────────────────────────────────────────────────
 async function loadData() {
@@ -100,6 +177,35 @@ function profitHtml(spend, revenue) {
   const profit = (revenue || 0) - spend;
   if (profit > 0) return `<span class='profit-pos'>+${fmt.money(profit)}</span>`;
   return `<span class='profit-neg'>${fmt.money(profit)}</span>`;
+}
+
+function renderActions(k) {
+  // Only show actions for keywords with valid IDs
+  if (!k.keyword_id || !k.ad_group_id || !k.campaign_id) {
+    return `<span class='muted' style='font-size:11px'>—</span>`;
+  }
+  if (!STATE.editMode) {
+    return `<span class='muted' style='font-size:11px'>Enable edit mode</span>`;
+  }
+  const isPaused = k.status === "PAUSED";
+  const bidValue = (k.bid || 0).toFixed(2);
+  return `
+    <div class="action-cell">
+      <div class="bid-editor">
+        <input type="number" step="0.01" min="0.1" value="${bidValue}"
+               data-kw-id="${k.keyword_id}" data-ag-id="${k.ad_group_id}" data-c-id="${k.campaign_id}"
+               data-action="bid" />
+        <button class="btn-action btn-save" data-action="save-bid" data-kw-id="${k.keyword_id}">Save</button>
+      </div>
+      ${isPaused
+        ? `<button class="btn-action btn-enable" data-action="enable" data-kw-id="${k.keyword_id}">Enable</button>`
+        : `<button class="btn-action btn-pause" data-action="pause" data-kw-id="${k.keyword_id}">Pause</button>`}
+    </div>
+  `;
+}
+
+function findKeyword(kwId) {
+  return (STATE.data?.keywords || []).find(k => String(k.keyword_id) === String(kwId));
 }
 
 function matchesFilters(row, includeCampaign = true) {
@@ -305,6 +411,8 @@ function renderTable() {
       { key: "campaign", label: "Campaign" },
       { key: "country", label: "Country" },
       { key: "match", label: "Match" },
+      { key: "kw_state", label: "State" },
+      { key: "bid", label: "Bid", num: true },
       { key: "spend", label: "Spend", num: true },
       { key: "revenue", label: "Revenue", num: true },
       { key: "profit", label: "Profit", num: true },
@@ -319,6 +427,7 @@ function renderTable() {
       { key: "ttr", label: "TTR", num: true },
       { key: "cr", label: "CR", num: true },
       { key: "status", label: "Status" },
+      { key: "actions", label: "Actions" },
     ];
     rows = (STATE.data?.keywords || [])
       .filter(k => matchesFilters(k, true))
@@ -486,6 +595,16 @@ function renderTable() {
           case "cpp_id":
             content = val ? `<span class='muted' style='font-size:11px'>${val.slice(0, 8)}…</span>` : "<span class='muted'>—</span>";
             break;
+          case "kw_state":
+            // Show the ASA keyword status (ACTIVE/PAUSED/etc) as a badge
+            content = r.status ? `<span class="kw-status-badge kw-status-${r.status}">${r.status}</span>` : "<span class='muted'>—</span>";
+            break;
+          case "bid":
+            content = r.bid > 0 ? fmt.money(r.bid) : "<span class='muted'>—</span>";
+            break;
+          case "actions":
+            content = renderActions(r);
+            break;
           default:
             content = val != null && val !== "" ? (typeof val === "number" ? fmt.num(val) : String(val)) : "<span class='muted'>—</span>";
         }
@@ -596,6 +715,36 @@ document.addEventListener("DOMContentLoaded", () => {
   document.getElementById("searchBox").addEventListener("input", e => {
     STATE.search = e.target.value;
     renderTable();
+  });
+
+  // Edit mode toggle
+  const editCheckbox = document.getElementById("editMode");
+  if (editCheckbox) {
+    editCheckbox.addEventListener("change", e => {
+      STATE.editMode = e.target.checked;
+      document.body.classList.toggle("edit-on", STATE.editMode);
+      if (STATE.editMode) {
+        toast("⚠ Edit mode ON — actions will apply live to Apple Search Ads", "");
+      }
+      renderTable();
+    });
+  }
+
+  // Event delegation for action buttons in table
+  document.getElementById("tableBody").addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-action]");
+    if (!btn) return;
+    const action = btn.dataset.action;
+    const kwId = btn.dataset.kwId;
+    const k = findKeyword(kwId);
+    if (!k) return;
+
+    if (action === "pause") pauseKeyword(k);
+    else if (action === "enable") enableKeyword(k);
+    else if (action === "save-bid") {
+      const input = btn.parentElement.querySelector("input[data-action='bid']");
+      if (input) updateBid(k, parseFloat(input.value));
+    }
   });
 
   loadData();

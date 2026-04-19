@@ -631,6 +631,7 @@ def main() -> None:
                 asa_keyword_data[range_name][key] = {
                     "keyword": m.get("keyword", ""),
                     "campaign_id": cid,
+                    "ad_group_id": m.get("adGroupId"),
                     "keyword_id": m.get("keywordId"),
                     "match": m.get("matchType", ""),
                     "status": m.get("keywordStatus", ""),
@@ -725,6 +726,8 @@ def main() -> None:
         status = ""
         bid = 0
         is_share = ""
+        ad_group_id = None
+        keyword_id = None
         for r in ["all", "30d", "14d", "7d", "today", "yesterday"]:
             d = asa_keyword_data[r].get((cid, kw_lower))
             if d:
@@ -733,11 +736,15 @@ def main() -> None:
                 status = d.get("status") or status
                 bid = d.get("bid") or bid
                 is_share = d.get("is") or is_share
+                ad_group_id = d.get("ad_group_id") or ad_group_id
+                keyword_id = d.get("keyword_id") or keyword_id
                 break
 
         row = {
             "keyword": kw_display,
             "campaign_id": cid,
+            "ad_group_id": ad_group_id,
+            "keyword_id": keyword_id,
             "campaign": meta.get("name", ""),
             "country": country,
             "match": match,

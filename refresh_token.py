@@ -15,9 +15,11 @@ Environment variables (provided as GitHub Secrets):
 """
 
 import base64
+import ftplib
 import hashlib
 import json
 import os
+import ssl
 import subprocess
 import tempfile
 import time
@@ -31,6 +33,10 @@ KEY_ID = os.environ["KEY_ID"]
 PRIVATE_KEY_PEM = os.environ["PRIVATE_KEY_PEM"]
 SPREADSHEET_ID = os.environ["SPREADSHEET_ID"]
 GOOGLE_SERVICE_ACCOUNT_JSON = os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"]
+FTP_HOST = os.environ.get("FTP_HOST", "")
+FTP_USER = os.environ.get("FTP_USER", "")
+FTP_PASS = os.environ.get("FTP_PASS", "")
+FTP_PATH = os.environ.get("FTP_PATH", "/")
 
 # Which cell to write the token to (on the _Config tab)
 TOKEN_CELL = "_Config!B1"
@@ -216,7 +222,30 @@ def main() -> None:
 
         print("Writing to Google Sheet...")
         write_token_to_sheet(access_token, expires_at)
-        print(f"✅ Done! Token valid until {expires_at}")
+        print(f"✅ Sheet updated, token valid until {expires_at}")
+
+        # Also push token to cPanel so the dashboard PHP proxy can use it
+        if FTP_HOST:
+            try:
+                print("Uploading .token to cPanel...")
+                ctx = ssl.create_default_context()
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+                ftp = ftplib.FTP_TLS(FTP_HOST, timeout=30, context=ctx)
+                ftp.login(FTP_USER, FTP_PASS)
+                ftp.prot_p()
+                # Navigate to dashboard folder
+                try:
+                    ftp.cwd(FTP_PATH)
+                except ftplib.error_perm:
+                    pass
+                # Write token as .token file
+                import io
+                ftp.storbinary("STOR .token", io.BytesIO(access_token.encode()))
+                ftp.quit()
+                print("✅ Token uploaded to cPanel")
+            except Exception as e:
+                print(f"⚠ FTP upload failed: {e}")
     finally:
         os.unlink(key_path)
 
