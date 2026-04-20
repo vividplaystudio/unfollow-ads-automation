@@ -510,6 +510,40 @@ function renderTable() {
         const ttr = imp > 0 ? taps / imp * 100 : 0;
         return { ...a, spend, installs, taps, imp, impressions: imp, cpa, ttr };
       });
+  } else if (STATE.tab === "channels") {
+    cols = [
+      { key: "channel", label: "Channel" },
+      { key: "users", label: "Users", num: true },
+      { key: "subs", label: "Paid", num: true },
+      { key: "pay_rate", label: "Pay %", num: true },
+      { key: "revenue", label: "Revenue", num: true },
+      { key: "rev_per_user", label: "Rev/User", num: true },
+      { key: "rev_per_sub", label: "Rev/Sub", num: true },
+      { key: "weekly_subs", label: "W", num: true },
+      { key: "monthly_subs", label: "M", num: true },
+      { key: "yearly_subs", label: "Y", num: true },
+      { key: "renewals", label: "Renew", num: true },
+      { key: "canceled", label: "Cancel", num: true },
+      { key: "active", label: "Active", num: true },
+    ];
+    rows = (STATE.data?.channels || []).map(c => {
+      const users = getMetric(c, "users");
+      const subs = getMetric(c, "subs");
+      const revenue = getMetric(c, "revenue");
+      return {
+        ...c,
+        users, subs, revenue,
+        pay_rate: users > 0 ? (subs / users * 100) : 0,
+        rev_per_user: users > 0 ? revenue / users : 0,
+        rev_per_sub: subs > 0 ? revenue / subs : 0,
+        active: getMetric(c, "active"),
+        canceled: getMetric(c, "canceled"),
+        renewals: getMetric(c, "renewals"),
+        weekly_subs: getMetric(c, "weekly_subs"),
+        monthly_subs: getMetric(c, "monthly_subs"),
+        yearly_subs: getMetric(c, "yearly_subs"),
+      };
+    }).filter(r => r.users > 0 || r.revenue > 0);
   } else if (STATE.tab === "adgroups") {
     cols = [
       { key: "ad_group", label: "Ad Group" },
@@ -635,6 +669,19 @@ function renderTable() {
             break;
           case "cpp_id":
             content = val ? `<span class='muted' style='font-size:11px'>${val.slice(0, 8)}…</span>` : "<span class='muted'>—</span>";
+            break;
+          case "channel":
+            content = `<strong>${val || "—"}</strong>`;
+            break;
+          case "pay_rate":
+            content = val > 0 ? `<span class="${val >= 15 ? 'roas-high' : val >= 8 ? 'roas-mid' : 'roas-low'}">${val.toFixed(1)}%</span>` : "<span class='muted'>—</span>";
+            break;
+          case "rev_per_user":
+          case "rev_per_sub":
+            content = val > 0 ? fmt.money(val) : "<span class='muted'>—</span>";
+            break;
+          case "users":
+            content = val > 0 ? fmt.num(val) : "<span class='muted'>0</span>";
             break;
           case "kw_state": {
             const isPaused = r.status === "PAUSED";

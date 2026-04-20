@@ -368,25 +368,16 @@ def rc_enrich_customers(customers: list) -> list:
         cid = customer["id"]
         attrs = rc_fetch_customer_attrs(cid)
         customer["_attrs"] = attrs
-        if attrs.get("$mediaSource") == "Apple Search Ads":
-            subs = rc_fetch_customer_subs_detail(cid)
-            customer["_revenue"] = subs["revenue"]
-            customer["_active"] = subs["is_active"]
-            customer["_canceled"] = subs["is_canceled"]
-            customer["_renewals"] = subs["renewals"]
-            customer["_tier"] = subs["active_tier"] or subs["primary_tier"] or "none"
-            customer["_tier_counts"] = subs["tier_counts"]
-            customer["_tier_revenue"] = subs["tier_revenue"]
-            customer["_sub_count"] = subs["sub_count"]
-        else:
-            customer["_revenue"] = 0.0
-            customer["_active"] = False
-            customer["_canceled"] = False
-            customer["_renewals"] = 0
-            customer["_tier"] = "none"
-            customer["_tier_counts"] = {"weekly": 0, "monthly": 0, "yearly": 0, "other": 0}
-            customer["_tier_revenue"] = {"weekly": 0.0, "monthly": 0.0, "yearly": 0.0, "other": 0.0}
-            customer["_sub_count"] = 0
+        # Fetch subscription detail for ALL customers so we can track every channel's revenue
+        subs = rc_fetch_customer_subs_detail(cid)
+        customer["_revenue"] = subs["revenue"]
+        customer["_active"] = subs["is_active"]
+        customer["_canceled"] = subs["is_canceled"]
+        customer["_renewals"] = subs["renewals"]
+        customer["_tier"] = subs["active_tier"] or subs["primary_tier"] or "none"
+        customer["_tier_counts"] = subs["tier_counts"]
+        customer["_tier_revenue"] = subs["tier_revenue"]
+        customer["_sub_count"] = subs["sub_count"]
         return customer
 
     enriched = []
@@ -445,6 +436,7 @@ def build_revenue_index(customers: list) -> dict:
     by_camp = defaultdict(lambda: defaultdict(_zero))
     by_adgroup = defaultdict(lambda: defaultdict(_zero))
     by_country = defaultdict(lambda: defaultdict(_zero))
+    by_channel = defaultdict(lambda: defaultdict(_zero))  # channel = media source
 
     for c in customers:
         first_seen_ms = c.get("first_seen_at")
@@ -453,9 +445,21 @@ def build_revenue_index(customers: list) -> dict:
         first_seen = datetime.fromtimestamp(first_seen_ms / 1000, tz=timezone.utc)
 
         attrs = c.get("_attrs", {})
-        media_source = attrs.get("$mediaSource", "")
-        if media_source != "Apple Search Ads":
-            continue
+        media_source = attrs.get("$mediaSource", "").strip()
+
+        # Normalize channel name
+        if media_source == "Apple Search Ads":
+            channel = "Apple Search Ads"
+        elif not media_source:
+            channel = "Organic / Unattributed"
+        elif "facebook" in media_source.lower() or "meta" in media_source.lower():
+            channel = "Facebook / Meta"
+        elif "google" in media_source.lower():
+            channel = "Google Ads"
+        elif "tiktok" in media_source.lower():
+            channel = "TikTok"
+        else:
+            channel = media_source  # keep as-is
 
         campaign = attrs.get("$campaign", "")
         keyword = attrs.get("$keyword", "").lower()
@@ -477,31 +481,46 @@ def build_revenue_index(customers: list) -> dict:
             elif start and first_seen < start:
                 continue
 
-            buckets = [
-                by_kw[(campaign, keyword)][r],
-                by_camp[campaign][r],
-                by_adgroup[(campaign, adgroup)][r],
-                by_country[country][r],
-            ]
-            for b in buckets:
-                b["users"] += 1
-                b["paid_subs"] += is_paid
-                b["revenue"] += total
-                b["active"] += is_active
-                b["canceled"] += is_canceled
-                b["renewals"] += renewals
-                b["weekly_subs"] += tier_counts.get("weekly", 0)
-                b["monthly_subs"] += tier_counts.get("monthly", 0)
-                b["yearly_subs"] += tier_counts.get("yearly", 0)
-                b["weekly_rev"] += tier_rev.get("weekly", 0.0)
-                b["monthly_rev"] += tier_rev.get("monthly", 0.0)
-                b["yearly_rev"] += tier_rev.get("yearly", 0.0)
+            # Channel bucket — track EVERY customer, not just ASA
+            ch = by_channel[channel][r]
+            ch["users"] += 1
+            ch["paid_subs"] += is_paid
+            ch["revenue"] += total
+            ch["active"] += is_active
+            ch["canceled"] += is_canceled
+            ch["renewals"] += renewals
+            ch["weekly_subs"] += tier_counts.get("weekly", 0)
+            ch["monthly_subs"] += tier_counts.get("monthly", 0)
+            ch["yearly_subs"] += tier_counts.get("yearly", 0)
+
+            # Campaign/keyword/adgroup/country — only for ASA (these only make sense for ASA data)
+            if channel == "Apple Search Ads":
+                buckets = [
+                    by_kw[(campaign, keyword)][r],
+                    by_camp[campaign][r],
+                    by_adgroup[(campaign, adgroup)][r],
+                    by_country[country][r],
+                ]
+                for b in buckets:
+                    b["users"] += 1
+                    b["paid_subs"] += is_paid
+                    b["revenue"] += total
+                    b["active"] += is_active
+                    b["canceled"] += is_canceled
+                    b["renewals"] += renewals
+                    b["weekly_subs"] += tier_counts.get("weekly", 0)
+                    b["monthly_subs"] += tier_counts.get("monthly", 0)
+                    b["yearly_subs"] += tier_counts.get("yearly", 0)
+                    b["weekly_rev"] += tier_rev.get("weekly", 0.0)
+                    b["monthly_rev"] += tier_rev.get("monthly", 0.0)
+                    b["yearly_rev"] += tier_rev.get("yearly", 0.0)
 
     return {
         "by_keyword": by_kw,
         "by_campaign": by_camp,
         "by_adgroup": by_adgroup,
         "by_country": by_country,
+        "by_channel": by_channel,
     }
 
 
@@ -810,12 +829,30 @@ def main() -> None:
             row[f"yearly_subs_{r}"] = rev_data.get("yearly_subs", 0)
         adgroups_out.append(row)
 
+    # Channels breakdown (includes non-ASA sources — organic, Meta, etc.)
+    channels_out = []
+    for channel_name, range_data in rev_index["by_channel"].items():
+        row = {"channel": channel_name}
+        for r in ranges:
+            rd = range_data.get(r) or {}
+            row[f"users_{r}"] = rd.get("users", 0)
+            row[f"subs_{r}"] = rd.get("paid_subs", 0)
+            row[f"revenue_{r}"] = round(rd.get("revenue", 0), 2)
+            row[f"active_{r}"] = rd.get("active", 0)
+            row[f"canceled_{r}"] = rd.get("canceled", 0)
+            row[f"renewals_{r}"] = rd.get("renewals", 0)
+            row[f"weekly_subs_{r}"] = rd.get("weekly_subs", 0)
+            row[f"monthly_subs_{r}"] = rd.get("monthly_subs", 0)
+            row[f"yearly_subs_{r}"] = rd.get("yearly_subs", 0)
+        channels_out.append(row)
+
     output = {
         "last_updated": datetime.now(timezone.utc).isoformat(),
         "campaigns": campaigns_out,
         "keywords": keywords_out,
         "ads": ads_out,
         "ad_groups": adgroups_out,
+        "channels": channels_out,
         "totals": {
             r: {
                 "spend": round(sum(row[f"spend_{r}"] for row in campaigns_out), 2),
