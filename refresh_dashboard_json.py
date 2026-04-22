@@ -244,6 +244,10 @@ def detect_tier(period_ms: int) -> str:
     return "yearly"
 
 
+# Counters for one-shot RC API diagnostics in logs
+_RC_DEBUG_COUNTER = {"dumped": 0, "empty": 0, "err": 0, "with_items": 0}
+
+
 def _infer_subscription_transactions(sub: dict) -> list:
     """
     RevenueCat v2 doesn't expose per-transaction line items on /subscriptions.
@@ -319,9 +323,35 @@ def rc_fetch_customer_subs_detail(customer_id: str) -> dict:
     req = urllib.request.Request(url, headers={"Authorization": f"Bearer {REVENUECAT_API_KEY}"})
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
-            data = json.loads(resp.read().decode())
-    except Exception:
+            raw = resp.read().decode()
+            data = json.loads(raw)
+    except urllib.error.HTTPError as e:
+        err_body = ""
+        try:
+            err_body = e.read().decode()[:200]
+        except Exception:
+            pass
+        if _RC_DEBUG_COUNTER["err"] < 3:
+            print(f"  RC /subs err {e.code} for {customer_id[:40]}: {err_body}")
+            _RC_DEBUG_COUNTER["err"] += 1
         return result
+    except Exception as e:
+        if _RC_DEBUG_COUNTER["err"] < 3:
+            print(f"  RC /subs generic err for {customer_id[:40]}: {e}")
+            _RC_DEBUG_COUNTER["err"] += 1
+        return result
+
+    # One-shot diagnostic: dump first non-empty response so we can see what
+    # fields RC actually returns vs what we're parsing.
+    if data.get("items") and _RC_DEBUG_COUNTER["dumped"] < 2:
+        _RC_DEBUG_COUNTER["dumped"] += 1
+        print(f"  RC /subs sample response (customer {customer_id[:40]}):")
+        print("  " + json.dumps(data["items"][0], indent=2)[:1200])
+    elif not data.get("items"):
+        _RC_DEBUG_COUNTER["empty"] += 1
+
+    if data.get("items"):
+        _RC_DEBUG_COUNTER["with_items"] += 1
 
     latest_starts = 0
     for s in data.get("items", []):
@@ -420,16 +450,14 @@ def rc_fetch_customer_active(customer_id: str) -> bool:
 
 def rc_enrich_customers(customers: list) -> list:
     """
-    For each customer, fetch their attributes + purchases in parallel.
-    Skip customers from before our earliest date range (March 1, 2026).
+    For each customer, fetch their attributes + subscriptions in parallel.
+    Enrich EVERY customer — older users still paying renewals are a big chunk
+    of revenue, and filtering them out was under-counting the dashboard.
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    # Cutoff — only enrich customers from after this date to save API calls
-    cutoff_ms = int(datetime(2026, 3, 1, tzinfo=timezone.utc).timestamp() * 1000)
-
-    to_enrich = [c for c in customers if c.get("first_seen_at", 0) >= cutoff_ms]
-    print(f"  Enriching {len(to_enrich)} customers (from {len(customers)} total)...")
+    to_enrich = list(customers)
+    print(f"  Enriching {len(to_enrich)} customers (no date cutoff)...")
 
     def enrich_one(customer):
         cid = customer["id"]
@@ -459,7 +487,24 @@ def rc_enrich_customers(customers: list) -> list:
                 print(f"    {done}/{len(to_enrich)}")
 
     asa_count = sum(1 for c in enriched if c.get("_attrs", {}).get("$mediaSource") == "Apple Search Ads")
-    print(f"  Enriched: {len(enriched)} total, {asa_count} ASA-attributed")
+    with_subs = sum(1 for c in enriched if (c.get("_sub_count") or 0) > 0)
+    with_txns = sum(1 for c in enriched if c.get("_transactions"))
+    total_rev = sum(float(c.get("_revenue") or 0) for c in enriched)
+    active_count = sum(1 for c in enriched if c.get("_active"))
+
+    # Media-source distribution — helps spot mis-categorized channels
+    from collections import Counter
+    src_counter = Counter(
+        (c.get("_attrs", {}).get("$mediaSource") or "").strip() or "(empty)"
+        for c in enriched
+    )
+    print(f"  Enriched: {len(enriched)} total | ASA: {asa_count}")
+    print(f"  Customers with subs: {with_subs} | with transactions: {with_txns} | currently active: {active_count}")
+    print(f"  Sum of _revenue (all customers): ${total_rev:.2f}")
+    print(f"  RC /subs diagnostic: dumped_samples={_RC_DEBUG_COUNTER['dumped']}, "
+          f"errors={_RC_DEBUG_COUNTER['err']}, empty_responses={_RC_DEBUG_COUNTER['empty']}, "
+          f"with_items={_RC_DEBUG_COUNTER['with_items']}")
+    print(f"  Top media sources: {src_counter.most_common(10)}")
     return enriched
 
 
