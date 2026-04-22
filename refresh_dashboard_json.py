@@ -244,6 +244,52 @@ def detect_tier(period_ms: int) -> str:
     return "yearly"
 
 
+def _infer_subscription_transactions(sub: dict) -> list:
+    """
+    RevenueCat v2 doesn't expose per-transaction line items on /subscriptions.
+    Infer them from starts_at + period length + total_revenue.gross.
+
+    Each element is {"ts": ms_epoch, "amount": usd, "is_renewal": bool, "tier": str}.
+    Used to bucket revenue by transaction date instead of by cohort (first_seen).
+    """
+    starts = int(sub.get("starts_at") or 0)
+    ends = int(
+        sub.get("ends_at")
+        or sub.get("current_period_ends_at")
+        or 0
+    )
+    period_start = int(sub.get("current_period_starts_at") or starts)
+    period_end = int(sub.get("current_period_ends_at") or ends)
+    period_ms = max(0, period_end - period_start)
+    total_ms = max(0, ends - starts)
+
+    rev_obj = sub.get("total_revenue_in_usd") or {}
+    total_revenue = (
+        float(rev_obj.get("gross") or 0)
+        if isinstance(rev_obj, dict)
+        else float(rev_obj or 0)
+    )
+    tier = detect_tier(period_ms)
+
+    if total_revenue <= 0 or starts <= 0:
+        return []
+
+    if period_ms <= 0 or total_ms <= 0:
+        return [{"ts": starts, "amount": total_revenue, "is_renewal": False, "tier": tier}]
+
+    periods = max(1, int(round(total_ms / period_ms)))
+    per_period = total_revenue / periods
+    return [
+        {
+            "ts": starts + i * period_ms,
+            "amount": per_period,
+            "is_renewal": i > 0,
+            "tier": tier,
+        }
+        for i in range(periods)
+    ]
+
+
 def rc_fetch_customer_subs_detail(customer_id: str) -> dict:
     """
     Fetch all subscriptions for a customer and compute:
@@ -251,6 +297,8 @@ def rc_fetch_customer_subs_detail(customer_id: str) -> dict:
     - tier breakdown (weekly/monthly/yearly)
     - active + canceled flags
     - estimated renewals count
+    - transactions[]: per-charge list {ts, amount, is_renewal, tier} so revenue
+      can be bucketed by transaction date (matches RevenueCat dashboard).
     """
     encoded = urllib.parse.quote(customer_id, safe="")
     result = {
@@ -263,6 +311,7 @@ def rc_fetch_customer_subs_detail(customer_id: str) -> dict:
         "renewals": 0,                # total renewals across all subs
         "primary_tier": None,         # most recent tier (for labeling)
         "sub_count": 0,
+        "transactions": [],           # inferred per-charge history
     }
 
     # Fetch subscriptions
@@ -297,6 +346,8 @@ def rc_fetch_customer_subs_detail(customer_id: str) -> dict:
             periods = total_ms / period_ms
             result["renewals"] += max(0, int(round(periods)) - 1)
 
+        result["transactions"].extend(_infer_subscription_transactions(s))
+
         status = s.get("status", "")
         auto = s.get("auto_renewal_status", "")
 
@@ -328,10 +379,26 @@ def rc_fetch_customer_subs_detail(customer_id: str) -> dict:
             data = json.loads(resp.read().decode())
         for p in data.get("items", []):
             rev = p.get("revenue_in_usd") or p.get("total_revenue_in_usd") or {}
+            amount = 0.0
             if isinstance(rev, dict):
-                result["revenue"] += float(rev.get("gross", 0) or 0)
+                amount = float(rev.get("gross", 0) or 0)
             elif isinstance(rev, (int, float)):
-                result["revenue"] += float(rev)
+                amount = float(rev)
+            result["revenue"] += amount
+
+            purchased_at = int(
+                p.get("purchased_at")
+                or p.get("store_purchase_identifier_purchase_date")
+                or p.get("created_at")
+                or 0
+            )
+            if amount > 0 and purchased_at > 0:
+                result["transactions"].append({
+                    "ts": purchased_at,
+                    "amount": amount,
+                    "is_renewal": False,
+                    "tier": "other",
+                })
     except Exception:
         pass
 
@@ -378,6 +445,7 @@ def rc_enrich_customers(customers: list) -> list:
         customer["_tier_counts"] = subs["tier_counts"]
         customer["_tier_revenue"] = subs["tier_revenue"]
         customer["_sub_count"] = subs["sub_count"]
+        customer["_transactions"] = subs.get("transactions", [])
         return customer
 
     enriched = []
@@ -410,7 +478,14 @@ def get_country_from_campaign(name: str, countries: str) -> str:
 
 
 def build_revenue_index(customers: list) -> dict:
-    """Customers are expected to have been enriched with _attrs / _revenue / _active."""
+    """
+    Build per-campaign / keyword / channel metrics.
+
+    Revenue, renewals, and per-tier revenue are bucketed by TRANSACTION date
+    (matches the RevenueCat dashboard). Cohort-style counts (users, active,
+    canceled, paid_subs) stay tied to first_seen_at because they describe
+    who was *acquired* in the window.
+    """
     now = datetime.now(timezone.utc)
     today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
     yesterday_start = today_start - timedelta(days=1)
@@ -431,6 +506,14 @@ def build_revenue_index(customers: list) -> dict:
             "weekly_subs": 0, "monthly_subs": 0, "yearly_subs": 0,
             "weekly_rev": 0.0, "monthly_rev": 0.0, "yearly_rev": 0.0,
         }
+
+    def _dt_in_range(dt, r):
+        if r == "yesterday":
+            return yesterday_start <= dt < today_start
+        start = ranges[r]
+        if start is None:
+            return True
+        return dt >= start
 
     by_kw = defaultdict(lambda: defaultdict(_zero))
     by_camp = defaultdict(lambda: defaultdict(_zero))
@@ -466,54 +549,67 @@ def build_revenue_index(customers: list) -> dict:
         adgroup = attrs.get("$adGroup", "")
         country = c.get("last_seen_country", "")
 
-        total = float(c.get("_revenue", 0) or 0)
         is_active = 1 if c.get("_active") else 0
         is_canceled = 1 if c.get("_canceled") else 0
-        renewals = int(c.get("_renewals") or 0)
-        tier_counts = c.get("_tier_counts") or {}
-        tier_rev = c.get("_tier_revenue") or {}
-        is_paid = 1 if (total > 0 or is_active) else 0
+        transactions = c.get("_transactions") or []
 
-        for r, start in ranges.items():
-            if r == "yesterday":
-                if not (yesterday_start <= first_seen < today_start):
-                    continue
-            elif start and first_seen < start:
+        # Pre-aggregate transactions per window (transaction-date buckets).
+        txn_by_range = {r: {"revenue": 0.0, "renewals": 0,
+                            "weekly_rev": 0.0, "monthly_rev": 0.0, "yearly_rev": 0.0,
+                            "paid_in_range": False}
+                        for r in ranges}
+        for t in transactions:
+            ts = t.get("ts") or 0
+            if ts <= 0:
+                continue
+            dt = datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
+            amount = float(t.get("amount") or 0)
+            tier = t.get("tier") or "other"
+            is_renewal = bool(t.get("is_renewal"))
+            for r in ranges:
+                if _dt_in_range(dt, r):
+                    bucket = txn_by_range[r]
+                    bucket["revenue"] += amount
+                    if is_renewal:
+                        bucket["renewals"] += 1
+                    if tier in ("weekly", "monthly", "yearly"):
+                        bucket[f"{tier}_rev"] += amount
+                    bucket["paid_in_range"] = True
+
+        def _apply(b, r, include_cohort):
+            """include_cohort=True → also add users/active/canceled/new-sub counts."""
+            txn = txn_by_range[r]
+            b["revenue"] += txn["revenue"]
+            b["renewals"] += txn["renewals"]
+            b["weekly_rev"] += txn["weekly_rev"]
+            b["monthly_rev"] += txn["monthly_rev"]
+            b["yearly_rev"] += txn["yearly_rev"]
+            # paid_subs = customers with any transaction in the window
+            if txn["paid_in_range"]:
+                b["paid_subs"] += 1
+            if include_cohort:
+                b["users"] += 1
+                b["active"] += is_active
+                b["canceled"] += is_canceled
+                tier_counts = c.get("_tier_counts") or {}
+                b["weekly_subs"] += tier_counts.get("weekly", 0)
+                b["monthly_subs"] += tier_counts.get("monthly", 0)
+                b["yearly_subs"] += tier_counts.get("yearly", 0)
+
+        for r in ranges:
+            # Cohort check: customer was acquired in this window
+            in_cohort = _dt_in_range(first_seen, r)
+            # Include the row if either cohort-acquired OR had a transaction in the window
+            if not in_cohort and not txn_by_range[r]["paid_in_range"]:
                 continue
 
-            # Channel bucket — track EVERY customer, not just ASA
-            ch = by_channel[channel][r]
-            ch["users"] += 1
-            ch["paid_subs"] += is_paid
-            ch["revenue"] += total
-            ch["active"] += is_active
-            ch["canceled"] += is_canceled
-            ch["renewals"] += renewals
-            ch["weekly_subs"] += tier_counts.get("weekly", 0)
-            ch["monthly_subs"] += tier_counts.get("monthly", 0)
-            ch["yearly_subs"] += tier_counts.get("yearly", 0)
+            _apply(by_channel[channel][r], r, in_cohort)
 
-            # Campaign/keyword/adgroup/country — only for ASA (these only make sense for ASA data)
             if channel == "Apple Search Ads":
-                buckets = [
-                    by_kw[(campaign, keyword)][r],
-                    by_camp[campaign][r],
-                    by_adgroup[(campaign, adgroup)][r],
-                    by_country[country][r],
-                ]
-                for b in buckets:
-                    b["users"] += 1
-                    b["paid_subs"] += is_paid
-                    b["revenue"] += total
-                    b["active"] += is_active
-                    b["canceled"] += is_canceled
-                    b["renewals"] += renewals
-                    b["weekly_subs"] += tier_counts.get("weekly", 0)
-                    b["monthly_subs"] += tier_counts.get("monthly", 0)
-                    b["yearly_subs"] += tier_counts.get("yearly", 0)
-                    b["weekly_rev"] += tier_rev.get("weekly", 0.0)
-                    b["monthly_rev"] += tier_rev.get("monthly", 0.0)
-                    b["yearly_rev"] += tier_rev.get("yearly", 0.0)
+                _apply(by_kw[(campaign, keyword)][r], r, in_cohort)
+                _apply(by_camp[campaign][r], r, in_cohort)
+                _apply(by_adgroup[(campaign, adgroup)][r], r, in_cohort)
+                _apply(by_country[country][r], r, in_cohort)
 
     return {
         "by_keyword": by_kw,
