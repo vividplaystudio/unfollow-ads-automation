@@ -220,16 +220,15 @@ def rc_fetch_customer_attrs(customer_id: str) -> dict:
     """Fetch attribution attributes for one customer."""
     encoded = urllib.parse.quote(customer_id, safe="")
     url = f"https://api.revenuecat.com/v2/projects/{REVENUECAT_PROJECT_ID}/customers/{encoded}/attributes"
-    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {REVENUECAT_API_KEY}"})
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            data = json.loads(resp.read().decode())
-        result = {}
-        for item in data.get("items", []):
-            result[item.get("name", "")] = item.get("value", "")
-        return result
+        data = _rc_get_json(url)
     except Exception:
+        _RC_DEBUG_COUNTER["attrs_err"] = _RC_DEBUG_COUNTER.get("attrs_err", 0) + 1
         return {}
+    result = {}
+    for item in data.get("items", []):
+        result[item.get("name", "")] = item.get("value", "")
+    return result
 
 
 def detect_tier(period_ms: int) -> str:
@@ -246,6 +245,40 @@ def detect_tier(period_ms: int) -> str:
 
 # Counters for one-shot RC API diagnostics in logs
 _RC_DEBUG_COUNTER = {"dumped": 0, "empty": 0, "err": 0, "with_items": 0}
+
+
+def _rc_get_json(url: str, timeout: int = 30, max_retries: int = 6) -> dict:
+    """
+    GET against RevenueCat v2 with exponential-backoff retries on 429 and 5xx.
+    Returns parsed JSON on success or raises the last exception.
+    """
+    import time as _time
+    delay = 1.0
+    last_exc = None
+    for attempt in range(max_retries + 1):
+        req = urllib.request.Request(
+            url, headers={"Authorization": f"Bearer {REVENUECAT_API_KEY}"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return json.loads(resp.read().decode())
+        except urllib.error.HTTPError as e:
+            last_exc = e
+            if e.code == 429 or 500 <= e.code < 600:
+                retry_after = e.headers.get("Retry-After") if e.headers else None
+                try:
+                    wait = float(retry_after) if retry_after else delay
+                except ValueError:
+                    wait = delay
+                _time.sleep(min(wait, 30))
+                delay = min(delay * 2, 30)
+                continue
+            raise
+        except Exception as e:
+            last_exc = e
+            _time.sleep(delay)
+            delay = min(delay * 2, 30)
+    raise last_exc if last_exc else RuntimeError("rc_get_json failed without exception")
 
 
 def _infer_subscription_transactions(sub: dict) -> list:
@@ -318,23 +351,15 @@ def rc_fetch_customer_subs_detail(customer_id: str) -> dict:
         "transactions": [],           # inferred per-charge history
     }
 
-    # Fetch subscriptions
+    # Fetch subscriptions (with retry/backoff on 429)
     url = f"https://api.revenuecat.com/v2/projects/{REVENUECAT_PROJECT_ID}/customers/{encoded}/subscriptions?limit=50"
-    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {REVENUECAT_API_KEY}"})
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            raw = resp.read().decode()
-            data = json.loads(raw)
+        data = _rc_get_json(url)
     except urllib.error.HTTPError as e:
         _RC_DEBUG_COUNTER["err"] += 1
         _RC_DEBUG_COUNTER[f"err_{e.code}"] = _RC_DEBUG_COUNTER.get(f"err_{e.code}", 0) + 1
         if _RC_DEBUG_COUNTER["err"] <= 3:
-            err_body = ""
-            try:
-                err_body = e.read().decode()[:200]
-            except Exception:
-                pass
-            print(f"  RC /subs err {e.code} for {customer_id[:40]}: {err_body}")
+            print(f"  RC /subs err {e.code} for {customer_id[:40]}")
         return result
     except Exception as e:
         _RC_DEBUG_COUNTER["err"] += 1
@@ -403,12 +428,10 @@ def rc_fetch_customer_subs_detail(customer_id: str) -> dict:
                 result["primary_tier"] = t
                 break
 
-    # Also fetch one-time purchases
+    # Also fetch one-time purchases (with retry/backoff)
     url = f"https://api.revenuecat.com/v2/projects/{REVENUECAT_PROJECT_ID}/customers/{encoded}/purchases?limit=50"
-    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {REVENUECAT_API_KEY}"})
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            data = json.loads(resp.read().decode())
+        data = _rc_get_json(url)
         for p in data.get("items", []):
             rev = p.get("revenue_in_usd") or p.get("total_revenue_in_usd") or {}
             amount = 0.0
@@ -480,7 +503,9 @@ def rc_enrich_customers(customers: list) -> list:
 
     enriched = []
     done = 0
-    with ThreadPoolExecutor(max_workers=25) as executor:
+    # Lower concurrency to stay under RevenueCat's v2 rate limits.
+    # Previous value (25) triggered ~4k HTTP 429s in a single run.
+    with ThreadPoolExecutor(max_workers=8) as executor:
         futures = [executor.submit(enrich_one, c) for c in to_enrich]
         for future in as_completed(futures):
             enriched.append(future.result())
