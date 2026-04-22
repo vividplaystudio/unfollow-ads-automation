@@ -326,19 +326,21 @@ def rc_fetch_customer_subs_detail(customer_id: str) -> dict:
             raw = resp.read().decode()
             data = json.loads(raw)
     except urllib.error.HTTPError as e:
-        err_body = ""
-        try:
-            err_body = e.read().decode()[:200]
-        except Exception:
-            pass
-        if _RC_DEBUG_COUNTER["err"] < 3:
+        _RC_DEBUG_COUNTER["err"] += 1
+        _RC_DEBUG_COUNTER[f"err_{e.code}"] = _RC_DEBUG_COUNTER.get(f"err_{e.code}", 0) + 1
+        if _RC_DEBUG_COUNTER["err"] <= 3:
+            err_body = ""
+            try:
+                err_body = e.read().decode()[:200]
+            except Exception:
+                pass
             print(f"  RC /subs err {e.code} for {customer_id[:40]}: {err_body}")
-            _RC_DEBUG_COUNTER["err"] += 1
         return result
     except Exception as e:
-        if _RC_DEBUG_COUNTER["err"] < 3:
-            print(f"  RC /subs generic err for {customer_id[:40]}: {e}")
-            _RC_DEBUG_COUNTER["err"] += 1
+        _RC_DEBUG_COUNTER["err"] += 1
+        _RC_DEBUG_COUNTER["err_other"] = _RC_DEBUG_COUNTER.get("err_other", 0) + 1
+        if _RC_DEBUG_COUNTER["err"] <= 3:
+            print(f"  RC /subs generic err for {customer_id[:40]}: {type(e).__name__}: {e}")
         return result
 
     # One-shot diagnostic: dump first non-empty response so we can see what
@@ -504,6 +506,9 @@ def rc_enrich_customers(customers: list) -> list:
     print(f"  RC /subs diagnostic: dumped_samples={_RC_DEBUG_COUNTER['dumped']}, "
           f"errors={_RC_DEBUG_COUNTER['err']}, empty_responses={_RC_DEBUG_COUNTER['empty']}, "
           f"with_items={_RC_DEBUG_COUNTER['with_items']}")
+    err_breakdown = {k: v for k, v in _RC_DEBUG_COUNTER.items() if k.startswith("err_")}
+    if err_breakdown:
+        print(f"  RC error breakdown: {err_breakdown}")
     print(f"  Top media sources: {src_counter.most_common(10)}")
     return enriched
 
