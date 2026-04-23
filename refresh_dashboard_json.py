@@ -31,6 +31,11 @@ SPREADSHEET_ID = os.environ["SPREADSHEET_ID"]
 GOOGLE_SERVICE_ACCOUNT_JSON = os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"]
 REVENUECAT_API_KEY = os.environ["REVENUECAT_API_KEY"]
 REVENUECAT_PROJECT_ID = os.environ.get("REVENUECAT_PROJECT_ID", "6afc72a9")
+RC_WEBHOOK_SECRET = os.environ.get("RC_WEBHOOK_SECRET", "").strip()
+RC_EVENTS_URL = os.environ.get(
+    "RC_EVENTS_URL",
+    "https://genivox.com/ads-upload/rc_events.php",
+)
 ORG_ID = os.environ.get("ASA_ORG_ID", "8868820")
 
 FTP_HOST = os.environ.get("FTP_HOST", "")
@@ -245,6 +250,85 @@ def detect_tier(period_ms: int) -> str:
 
 # Counters for one-shot RC API diagnostics in logs
 _RC_DEBUG_COUNTER = {"dumped": 0, "empty": 0, "err": 0, "with_items": 0}
+
+
+def _classify_product_tier(product_id: str, period_type: str = "") -> str:
+    """Best-effort tier inference from RevenueCat product_id / period_type."""
+    pl = (product_id or "").lower()
+    if "year" in pl or "annual" in pl:
+        return "yearly"
+    if "month" in pl:
+        return "monthly"
+    if "week" in pl:
+        return "weekly"
+    return "other"
+
+
+def fetch_webhook_events() -> dict:
+    """
+    Pull captured RC webhook events from the server endpoint and return a
+    map {app_user_id: [{ts, amount, is_renewal, tier}]} suitable for the same
+    bucketing code the inference path uses.
+
+    Returns empty dict if RC_WEBHOOK_SECRET is not configured — in that case
+    we fall back to inference for every customer, which is what the script
+    was doing before webhooks existed.
+    """
+    if not RC_WEBHOOK_SECRET:
+        print("  [webhooks] RC_WEBHOOK_SECRET not set — skipping webhook fetch")
+        return {}
+
+    url = f"{RC_EVENTS_URL}?limit=50000"
+    req = urllib.request.Request(
+        url, headers={"Authorization": f"Bearer {RC_WEBHOOK_SECRET}"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            data = json.loads(resp.read().decode())
+    except Exception as e:
+        print(f"  [webhooks] fetch failed: {type(e).__name__}: {e}")
+        return {}
+
+    events = data.get("events", [])
+    print(f"  [webhooks] fetched {len(events)} events")
+
+    revenue_types = {"INITIAL_PURCHASE", "RENEWAL", "NON_RENEWING_PURCHASE", "PRODUCT_CHANGE"}
+    by_user = defaultdict(list)
+    total_revenue = 0.0
+    counted_by_type = defaultdict(int)
+    for rec in events:
+        ev = rec.get("event") or {}
+        etype = ev.get("type")
+        if etype not in revenue_types:
+            continue
+        app_user_id = ev.get("app_user_id") or ev.get("original_app_user_id")
+        if not app_user_id:
+            continue
+        price = float(ev.get("price") or 0)
+        if price <= 0:
+            continue
+        ts = int(ev.get("purchased_at_ms") or ev.get("event_timestamp_ms") or 0)
+        if ts <= 0:
+            continue
+
+        tier = _classify_product_tier(
+            ev.get("product_id", ""), ev.get("period_type", "")
+        )
+        by_user[app_user_id].append({
+            "ts": ts,
+            "amount": price,
+            "is_renewal": etype == "RENEWAL",
+            "tier": tier,
+        })
+        total_revenue += price
+        counted_by_type[etype] += 1
+
+    print(
+        f"  [webhooks] indexed {sum(len(v) for v in by_user.values())} "
+        f"revenue events for {len(by_user)} users — total ${total_revenue:.2f} — "
+        f"by type: {dict(counted_by_type)}"
+    )
+    return dict(by_user)
 
 
 def _rc_get_json(url: str, timeout: int = 30, max_retries: int = 6) -> dict:
@@ -504,9 +588,15 @@ def rc_enrich_customers(customers: list) -> list:
     For each customer, fetch their attributes + subscriptions in parallel.
     Enrich EVERY customer — older users still paying renewals are a big chunk
     of revenue, and filtering them out was under-counting the dashboard.
+
+    Revenue comes from webhook events when available (100% accurate, with real
+    transaction dates) and falls back to inference for customers with no
+    webhook events yet (e.g. historical customers from before webhooks were
+    configured, or transactions outside the webhook log window).
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
+    webhook_events = fetch_webhook_events()
     to_enrich = list(customers)
     print(f"  Enriching {len(to_enrich)} customers (no date cutoff)...")
 
@@ -524,7 +614,17 @@ def rc_enrich_customers(customers: list) -> list:
         customer["_tier_counts"] = subs["tier_counts"]
         customer["_tier_revenue"] = subs["tier_revenue"]
         customer["_sub_count"] = subs["sub_count"]
-        customer["_transactions"] = subs.get("transactions", [])
+
+        # Prefer webhook-sourced transactions (exact amounts + exact dates)
+        # over inferred ones. Inference runs first so the fallback is always
+        # populated; webhook events override if we have them for this user.
+        webhook_txns = webhook_events.get(cid)
+        if webhook_txns:
+            customer["_transactions"] = webhook_txns
+            customer["_txn_source"] = "webhook"
+        else:
+            customer["_transactions"] = subs.get("transactions", [])
+            customer["_txn_source"] = "inference"
         return customer
 
     enriched = []
@@ -542,8 +642,11 @@ def rc_enrich_customers(customers: list) -> list:
     asa_count = sum(1 for c in enriched if c.get("_attrs", {}).get("$mediaSource") == "Apple Search Ads")
     with_subs = sum(1 for c in enriched if (c.get("_sub_count") or 0) > 0)
     with_txns = sum(1 for c in enriched if c.get("_transactions"))
+    from_webhook = sum(1 for c in enriched if c.get("_txn_source") == "webhook")
+    from_inference = sum(1 for c in enriched if c.get("_txn_source") == "inference" and c.get("_transactions"))
     total_rev = sum(float(c.get("_revenue") or 0) for c in enriched)
     active_count = sum(1 for c in enriched if c.get("_active"))
+    print(f"  Transaction sources: webhook={from_webhook} inference={from_inference}")
 
     # Media-source distribution — helps spot mis-categorized channels
     from collections import Counter

@@ -18,13 +18,15 @@ jobs:
           FTP_USER: ${{ secrets.FTP_USER }}
           FTP_PASS: ${{ secrets.FTP_PASS }}
           FTP_PATH: ${{ secrets.FTP_PATH }}
+          RC_WEBHOOK_SECRET: ${{ secrets.RC_WEBHOOK_SECRET }}
         run: |
           python3 << 'EOF'
-          import ftplib, ssl, os
+          import ftplib, ssl, os, io
           host = os.environ["FTP_HOST"]
           user = os.environ["FTP_USER"]
           pw = os.environ["FTP_PASS"]
           path = os.environ["FTP_PATH"]
+          rc_secret = os.environ.get("RC_WEBHOOK_SECRET", "").strip()
 
           ctx = ssl.create_default_context()
           ctx.check_hostname = False
@@ -58,6 +60,17 @@ jobs:
                   with open(local, "rb") as f:
                       print(f"Uploading {fname}...")
                       ftp.storbinary(f"STOR {fname}", f)
+
+          # Write the RC webhook shared secret to disk as .rc_webhook_secret
+          # so rc_webhook.php / rc_events.php can authenticate incoming calls.
+          # Only write if we have a secret (no-op if the GH secret is unset).
+          if rc_secret:
+              buf = io.BytesIO(rc_secret.encode("utf-8"))
+              print("Uploading .rc_webhook_secret...")
+              ftp.storbinary("STOR .rc_webhook_secret", buf)
+          else:
+              print("RC_WEBHOOK_SECRET not set — skipping secret file upload")
+
           ftp.quit()
-          print("✅ All dashboard files uploaded")
+          print("All dashboard files uploaded")
           EOF

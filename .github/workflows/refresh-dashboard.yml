@@ -30,4 +30,5 @@ jobs:
           FTP_USER: ${{ secrets.FTP_USER }}
           FTP_PASS: ${{ secrets.FTP_PASS }}
           FTP_PATH: ${{ secrets.FTP_PATH }}
+          RC_WEBHOOK_SECRET: ${{ secrets.RC_WEBHOOK_SECRET }}
         run: python3 refresh_dashboard_json.py
