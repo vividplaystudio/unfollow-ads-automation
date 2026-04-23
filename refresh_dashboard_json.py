@@ -368,45 +368,38 @@ def rc_fetch_customer_subs_detail(customer_id: str) -> dict:
             print(f"  RC /subs generic err for {customer_id[:40]}: {type(e).__name__}: {e}")
         return result
 
-    # One-shot diagnostic: for the first customer with sub items, list the
-    # keys (avoids GitHub-Actions secret-masking that hides full JSON dumps)
-    # and probe candidate "per-transaction" endpoints so we can find one
-    # that exposes real charge dates + amounts instead of our inference.
-    if data.get("items") and _RC_DEBUG_COUNTER["dumped"] < 1:
-        _RC_DEBUG_COUNTER["dumped"] += 1
+    # Probe /invoices on customers that look like they have renewal history
+    # (current_period_starts_at > starts_at). Stop after we find one with
+    # non-empty invoices so we can see the actual shape.
+    if data.get("items") and _RC_DEBUG_COUNTER["dumped"] < 5:
         sub = data["items"][0]
-        print(f"  [PROBE] Subscription keys: {sorted(sub.keys())}")
-        for k in ("starts_at", "ends_at", "current_period_starts_at",
-                  "current_period_ends_at", "status", "auto_renewal_status",
-                  "product_id", "store"):
-            print(f"  [PROBE]   {k} = {sub.get(k)!r}")
-        rev = sub.get("total_revenue_in_usd")
-        if isinstance(rev, dict):
-            print(f"  [PROBE]   total_revenue_in_usd keys: {sorted(rev.keys())}")
-
-        sub_id = sub.get("id") or sub.get("subscription_id")
-        probes = [
-            f"/v2/projects/{REVENUECAT_PROJECT_ID}/customers/{encoded}/invoices?limit=5",
-            f"/v2/projects/{REVENUECAT_PROJECT_ID}/customers/{encoded}/transactions?limit=5",
-            f"/v2/projects/{REVENUECAT_PROJECT_ID}/customers/{encoded}/events?limit=5",
-            f"/v2/projects/{REVENUECAT_PROJECT_ID}/customers/{encoded}/entries?limit=5",
-            f"/v2/projects/{REVENUECAT_PROJECT_ID}/events?limit=5",
-        ]
-        if sub_id:
-            probes.append(
-                f"/v2/projects/{REVENUECAT_PROJECT_ID}/customers/{encoded}/subscriptions/{sub_id}/events?limit=5"
+        starts = int(sub.get("starts_at") or 0)
+        cur_start = int(sub.get("current_period_starts_at") or 0)
+        if cur_start > starts:  # has renewals
+            _RC_DEBUG_COUNTER["dumped"] += 1
+            sub_id = sub.get("id")
+            inv_url = (
+                f"https://api.revenuecat.com/v2/projects/"
+                f"{REVENUECAT_PROJECT_ID}/customers/{encoded}/invoices?limit=20"
             )
-        for path in probes:
             try:
-                probe = _rc_get_json(f"https://api.revenuecat.com{path}", max_retries=1)
-                items = probe.get("items", [])
-                print(f"  [PROBE]   {path} -> 200 OK, {len(items)} items")
+                inv = _rc_get_json(inv_url, max_retries=1)
+                items = inv.get("items", [])
+                print(f"  [PROBE] /invoices -> {len(items)} items "
+                      f"(customer has {(cur_start-starts)//(7*86400000)}w of renewals)")
                 if items:
-                    print(f"  [PROBE]     item[0] keys: {sorted(items[0].keys())}")
+                    print(f"  [PROBE]   item[0] keys: {sorted(items[0].keys())}")
+                    for k in ("paid_at", "invoice_date", "created_at",
+                              "period_start", "period_end", "amount",
+                              "amount_in_usd", "total_in_usd", "revenue_in_usd",
+                              "status", "type", "kind"):
+                        v = items[0].get(k)
+                        if v is not None:
+                            print(f"  [PROBE]     {k} = {v!r}")
             except urllib.error.HTTPError as e:
-                print(f"  [PROBE]   {path} -> HTTP {e.code}")
+                print(f"  [PROBE] /invoices -> HTTP {e.code}")
             except Exception as e:
-                print(f"  [PROBE]   {path} -> {type(e).__name__}: {e}")
+                print(f"  [PROBE] /invoices -> {type(e).__name__}: {e}")
     elif not data.get("items"):
         _RC_DEBUG_COUNTER["empty"] += 1
 
