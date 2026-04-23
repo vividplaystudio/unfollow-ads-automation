@@ -368,12 +368,45 @@ def rc_fetch_customer_subs_detail(customer_id: str) -> dict:
             print(f"  RC /subs generic err for {customer_id[:40]}: {type(e).__name__}: {e}")
         return result
 
-    # One-shot diagnostic: dump first non-empty response so we can see what
-    # fields RC actually returns vs what we're parsing.
-    if data.get("items") and _RC_DEBUG_COUNTER["dumped"] < 2:
+    # One-shot diagnostic: for the first customer with sub items, list the
+    # keys (avoids GitHub-Actions secret-masking that hides full JSON dumps)
+    # and probe candidate "per-transaction" endpoints so we can find one
+    # that exposes real charge dates + amounts instead of our inference.
+    if data.get("items") and _RC_DEBUG_COUNTER["dumped"] < 1:
         _RC_DEBUG_COUNTER["dumped"] += 1
-        print(f"  RC /subs sample response (customer {customer_id[:40]}):")
-        print("  " + json.dumps(data["items"][0], indent=2)[:1200])
+        sub = data["items"][0]
+        print(f"  [PROBE] Subscription keys: {sorted(sub.keys())}")
+        for k in ("starts_at", "ends_at", "current_period_starts_at",
+                  "current_period_ends_at", "status", "auto_renewal_status",
+                  "product_id", "store"):
+            print(f"  [PROBE]   {k} = {sub.get(k)!r}")
+        rev = sub.get("total_revenue_in_usd")
+        if isinstance(rev, dict):
+            print(f"  [PROBE]   total_revenue_in_usd keys: {sorted(rev.keys())}")
+
+        sub_id = sub.get("id") or sub.get("subscription_id")
+        probes = [
+            f"/v2/projects/{REVENUECAT_PROJECT_ID}/customers/{encoded}/invoices?limit=5",
+            f"/v2/projects/{REVENUECAT_PROJECT_ID}/customers/{encoded}/transactions?limit=5",
+            f"/v2/projects/{REVENUECAT_PROJECT_ID}/customers/{encoded}/events?limit=5",
+            f"/v2/projects/{REVENUECAT_PROJECT_ID}/customers/{encoded}/entries?limit=5",
+            f"/v2/projects/{REVENUECAT_PROJECT_ID}/events?limit=5",
+        ]
+        if sub_id:
+            probes.append(
+                f"/v2/projects/{REVENUECAT_PROJECT_ID}/customers/{encoded}/subscriptions/{sub_id}/events?limit=5"
+            )
+        for path in probes:
+            try:
+                probe = _rc_get_json(f"https://api.revenuecat.com{path}", max_retries=1)
+                items = probe.get("items", [])
+                print(f"  [PROBE]   {path} -> 200 OK, {len(items)} items")
+                if items:
+                    print(f"  [PROBE]     item[0] keys: {sorted(items[0].keys())}")
+            except urllib.error.HTTPError as e:
+                print(f"  [PROBE]   {path} -> HTTP {e.code}")
+            except Exception as e:
+                print(f"  [PROBE]   {path} -> {type(e).__name__}: {e}")
     elif not data.get("items"):
         _RC_DEBUG_COUNTER["empty"] += 1
 
