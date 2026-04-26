@@ -1,8 +1,11 @@
 name: Refresh Dashboard
 
 on:
-  schedule:
-    - cron: "15 * * * *"
+  # No standalone schedule — the token refresh runs every hour and
+  # successful runs trigger this workflow via workflow_run, so the dashboard
+  # always refreshes against a fresh token. Adding a schedule here used to
+  # fire while the previous token was already expired, producing failure
+  # emails that recovered automatically a minute later.
   workflow_dispatch:
   workflow_run:
     workflows: ["Refresh Apple Search Ads Token"]
