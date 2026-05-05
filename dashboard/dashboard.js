@@ -983,6 +983,11 @@ function renderMetaKpis() {
   const s = META.data.summary || {};
   const spend = w => s[w]?.spend || 0;
 
+  const tI = metaInstalls("today");
+  document.getElementById("metaSpendToday").textContent = fmt.money(spend("today"));
+  document.getElementById("metaSpendTodaySub").textContent =
+    `${fmt.num(tI)} installs · ${tI > 0 ? fmt.money(spend("today")/tI) : "—"} CPI`;
+
   const yI = metaInstalls("yesterday");
   document.getElementById("metaSpendYday").textContent = fmt.money(spend("yesterday"));
   document.getElementById("metaSpendYdaySub").textContent =
