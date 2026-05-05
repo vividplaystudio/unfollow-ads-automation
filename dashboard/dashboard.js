@@ -921,4 +921,311 @@ document.addEventListener("DOMContentLoaded", () => {
 
   loadData();
   setInterval(loadData, 5 * 60 * 1000);
+
+  initMeta();
+  setInterval(loadMetaData, 5 * 60 * 1000);
 });
+
+
+// ═══════════════════════════════════════════════════════════════
+// Meta Ads section (independent of ASA STATE)
+// ═══════════════════════════════════════════════════════════════
+
+const META = {
+  data: null,
+  tab: "campaigns",
+  filterCampaignId: null,
+  filterAdsetId: null,
+  sortCol: "spend",
+  sortDir: "desc",
+  search: "",
+};
+
+async function loadMetaData() {
+  try {
+    const res = await fetch("meta_ads.json?v=" + Date.now());
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    META.data = await res.json();
+    renderMeta();
+  } catch (e) {
+    console.error("Failed to load meta_ads.json:", e);
+    document.getElementById("metaTableBody").innerHTML =
+      `<tr><td colspan="20" class="empty-state"><div class="icon">⚠️</div>Could not load meta_ads.json<br><small>${e.message}</small></td></tr>`;
+  }
+}
+
+function metaInstalls(window) {
+  const a = META.data?.summary?.[window]?.actions || {};
+  return a.mobile_app_install || a.omni_app_install || 0;
+}
+
+function renderMeta() {
+  if (!META.data) return;
+  renderMetaKpis();
+  renderMetaTable();
+
+  const lu = META.data.generated_at ? new Date(META.data.generated_at) : null;
+  const el = document.getElementById("metaUpdated");
+  if (lu) {
+    const mins = Math.round((Date.now() - lu) / 60000);
+    let text;
+    if (mins < 1) text = "just now";
+    else if (mins < 60) text = `${mins} min ago`;
+    else text = `${Math.round(mins / 60)}h ago`;
+    el.textContent = "updated " + text;
+    el.title = lu.toLocaleString();
+  } else {
+    el.textContent = "—";
+  }
+}
+
+function renderMetaKpis() {
+  const s = META.data.summary || {};
+  const spend = w => s[w]?.spend || 0;
+
+  const yI = metaInstalls("yesterday");
+  document.getElementById("metaSpendYday").textContent = fmt.money(spend("yesterday"));
+  document.getElementById("metaSpendYdaySub").textContent =
+    `${fmt.num(yI)} installs · ${yI > 0 ? fmt.money(spend("yesterday")/yI) : "—"} CPI`;
+
+  const w7 = metaInstalls("last_7_days");
+  document.getElementById("metaSpend7d").textContent = fmt.money(spend("last_7_days"));
+  document.getElementById("metaSpend7dSub").textContent =
+    `${fmt.num(w7)} installs · ${w7 > 0 ? fmt.money(spend("last_7_days")/w7) : "—"} CPI`;
+
+  const w30 = metaInstalls("last_30_days");
+  document.getElementById("metaSpend30d").textContent = fmt.money(spend("last_30_days"));
+  document.getElementById("metaSpend30dSub").textContent = `${fmt.num(w30)} installs`;
+
+  document.getElementById("metaInstalls30d").textContent = fmt.num(w30);
+  document.getElementById("metaInstalls30dSub").textContent = "last 30 days";
+  document.getElementById("metaCPI30d").textContent =
+    fmt.money(w30 > 0 ? spend("last_30_days") / w30 : 0);
+
+  const ctr = s.last_30_days?.ctr || 0;
+  document.getElementById("metaCTR30d").textContent = ctr.toFixed(2) + "%";
+  document.getElementById("metaCTR30dSub").textContent =
+    `CPC ${fmt.money(s.last_30_days?.cpc || 0)} · CPM ${fmt.money(s.last_30_days?.cpm || 0)}`;
+}
+
+function aggregateMetaAds() {
+  const ads = META.data?.ads || [];
+  const byAd = {};
+  for (const r of ads) {
+    const k = r.ad_id;
+    if (!byAd[k]) byAd[k] = {
+      ad_id: r.ad_id, ad_name: r.ad_name,
+      adset_id: r.adset_id, adset_name: r.adset_name,
+      campaign_id: r.campaign_id, campaign_name: r.campaign_name,
+      spend: 0, impressions: 0, clicks: 0, installs: 0, purchases: 0,
+    };
+    const a = byAd[k];
+    a.spend       += r.spend || 0;
+    a.impressions += r.impressions || 0;
+    a.clicks      += r.clicks || 0;
+    a.installs    += (r.action_mobile_app_install || r.action_omni_app_install || 0);
+    a.purchases   += (r.action_purchase || r["action_app_custom_event.fb_mobile_purchase"] || 0);
+  }
+  return Object.values(byAd).map(a => ({
+    ...a,
+    ctr: a.impressions > 0 ? a.clicks / a.impressions * 100 : 0,
+    cpc: a.clicks > 0 ? a.spend / a.clicks : 0,
+    cpm: a.impressions > 0 ? a.spend / a.impressions * 1000 : 0,
+    cpi: a.installs > 0 ? a.spend / a.installs : 0,
+  }));
+}
+
+function metaCols() {
+  if (META.tab === "campaigns") return [
+    { key: "campaign_name", label: "Campaign", drill: "campaign" },
+    { key: "spend",       label: "Spend",   num: true, fmt: fmt.money },
+    { key: "impressions", label: "Impr",    num: true },
+    { key: "clicks",      label: "Clicks",  num: true },
+    { key: "ctr",         label: "CTR",     num: true, fmt: v => v.toFixed(2) + "%" },
+    { key: "cpc",         label: "CPC",     num: true, fmt: fmt.money },
+    { key: "cpm",         label: "CPM",     num: true, fmt: fmt.money },
+    { key: "installs",    label: "Installs",num: true },
+    { key: "cpi",         label: "CPI",     num: true, fmt: fmt.money },
+  ];
+  if (META.tab === "adsets") return [
+    { key: "adset_name",    label: "Ad Set", drill: "adset" },
+    { key: "campaign_name", label: "Campaign" },
+    { key: "spend",       label: "Spend",   num: true, fmt: fmt.money },
+    { key: "impressions", label: "Impr",    num: true },
+    { key: "clicks",      label: "Clicks",  num: true },
+    { key: "ctr",         label: "CTR",     num: true, fmt: v => v.toFixed(2) + "%" },
+    { key: "cpc",         label: "CPC",     num: true, fmt: fmt.money },
+    { key: "installs",    label: "Installs",num: true },
+    { key: "cpi",         label: "CPI",     num: true, fmt: fmt.money },
+  ];
+  return [
+    { key: "ad_name",       label: "Ad" },
+    { key: "adset_name",    label: "Ad Set" },
+    { key: "campaign_name", label: "Campaign" },
+    { key: "spend",       label: "Spend",   num: true, fmt: fmt.money },
+    { key: "impressions", label: "Impr",    num: true },
+    { key: "clicks",      label: "Clicks",  num: true },
+    { key: "ctr",         label: "CTR",     num: true, fmt: v => v.toFixed(2) + "%" },
+    { key: "cpc",         label: "CPC",     num: true, fmt: fmt.money },
+    { key: "installs",    label: "Installs",num: true },
+    { key: "cpi",         label: "CPI",     num: true, fmt: fmt.money },
+  ];
+}
+
+function metaRowsForTab() {
+  const ads = aggregateMetaAds();
+  if (META.tab === "ads") {
+    return ads.filter(a => {
+      if (META.filterCampaignId && a.campaign_id !== META.filterCampaignId) return false;
+      if (META.filterAdsetId   && a.adset_id    !== META.filterAdsetId)    return false;
+      return true;
+    });
+  }
+  const groupKey = META.tab === "campaigns" ? "campaign_id" : "adset_id";
+  const agg = {};
+  for (const a of ads) {
+    if (META.tab === "adsets" && META.filterCampaignId && a.campaign_id !== META.filterCampaignId) continue;
+    const k = a[groupKey];
+    if (!agg[k]) agg[k] = {
+      campaign_id: a.campaign_id, campaign_name: a.campaign_name,
+      adset_id: a.adset_id, adset_name: a.adset_name,
+      spend: 0, impressions: 0, clicks: 0, installs: 0,
+    };
+    agg[k].spend       += a.spend;
+    agg[k].impressions += a.impressions;
+    agg[k].clicks      += a.clicks;
+    agg[k].installs    += a.installs;
+  }
+  return Object.values(agg).map(r => ({
+    ...r,
+    ctr: r.impressions > 0 ? r.clicks / r.impressions * 100 : 0,
+    cpc: r.clicks > 0 ? r.spend / r.clicks : 0,
+    cpm: r.impressions > 0 ? r.spend / r.impressions * 1000 : 0,
+    cpi: r.installs > 0 ? r.spend / r.installs : 0,
+  }));
+}
+
+function renderMetaTable() {
+  const head = document.getElementById("metaTableHead");
+  const body = document.getElementById("metaTableBody");
+  const cols = metaCols();
+  let rows = metaRowsForTab();
+
+  const q = (META.search || "").toLowerCase().trim();
+  if (q) {
+    rows = rows.filter(r =>
+      (r.ad_name || "").toLowerCase().includes(q) ||
+      (r.adset_name || "").toLowerCase().includes(q) ||
+      (r.campaign_name || "").toLowerCase().includes(q)
+    );
+  }
+
+  rows.sort((a, b) => {
+    const va = a[META.sortCol], vb = b[META.sortCol];
+    if (typeof va === "string" || typeof vb === "string") {
+      return META.sortDir === "asc"
+        ? String(va || "").localeCompare(String(vb || ""))
+        : String(vb || "").localeCompare(String(va || ""));
+    }
+    return META.sortDir === "asc" ? (va || 0) - (vb || 0) : (vb || 0) - (va || 0);
+  });
+
+  head.innerHTML = "<tr>" + cols.map(c => {
+    const arrow = META.sortCol === c.key ? (META.sortDir === "asc" ? " ▲" : " ▼") : "";
+    return `<th data-meta-sort="${c.key}" class="${c.num ? "num" : ""}">${c.label}${arrow}</th>`;
+  }).join("") + "</tr>";
+
+  if (!rows.length) {
+    body.innerHTML = `<tr><td colspan="${cols.length}" class="empty-state">No data</td></tr>`;
+  } else {
+    body.innerHTML = rows.map(r => {
+      const cells = cols.map(c => {
+        let v = r[c.key];
+        if (v == null || v === "") v = "—";
+        else if (c.fmt) v = c.fmt(v);
+        else if (c.num) v = fmt.num(v);
+        let drill = "";
+        if (c.drill === "campaign") drill = `data-drill-campaign="${r.campaign_id}"`;
+        if (c.drill === "adset")    drill = `data-drill-adset="${r.adset_id}" data-drill-camp="${r.campaign_id}"`;
+        const cls = (c.num ? "num " : "") + (c.drill ? "drill" : "");
+        return `<td class="${cls.trim()}" ${drill}>${v}</td>`;
+      }).join("");
+      return `<tr>${cells}</tr>`;
+    }).join("");
+  }
+
+  const bc = document.getElementById("metaBreadcrumb");
+  const parts = [];
+  if (META.filterCampaignId) {
+    const r = (META.data.campaigns || []).find(c => c.campaign_id === META.filterCampaignId);
+    parts.push(`Campaign: <b>${r?.campaign_name || META.filterCampaignId}</b>`);
+  }
+  if (META.filterAdsetId) {
+    const r = (META.data.adsets || []).find(s => s.adset_id === META.filterAdsetId);
+    parts.push(`Ad Set: <b>${r?.adset_name || META.filterAdsetId}</b>`);
+  }
+  bc.innerHTML = parts.length
+    ? parts.join(" › ") + ` <a href="#" id="metaClearFilter">clear</a>`
+    : "";
+
+  document.getElementById("metaTableInfo").textContent = `${rows.length} rows`;
+}
+
+function setMetaTab(name) {
+  META.tab = name;
+  document.querySelectorAll("[data-meta-tab]").forEach(b =>
+    b.classList.toggle("active", b.dataset.metaTab === name)
+  );
+  renderMetaTable();
+}
+
+function initMeta() {
+  document.querySelectorAll("[data-meta-tab]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      META.sortCol = "spend";
+      META.sortDir = "desc";
+      setMetaTab(btn.dataset.metaTab);
+    });
+  });
+
+  document.getElementById("metaTableHead").addEventListener("click", e => {
+    const th = e.target.closest("th[data-meta-sort]");
+    if (!th) return;
+    const col = th.dataset.metaSort;
+    if (META.sortCol === col) META.sortDir = META.sortDir === "asc" ? "desc" : "asc";
+    else { META.sortCol = col; META.sortDir = "desc"; }
+    renderMetaTable();
+  });
+
+  document.getElementById("metaTableBody").addEventListener("click", e => {
+    const td = e.target.closest("td");
+    if (!td) return;
+    if (td.dataset.drillCampaign) {
+      META.filterCampaignId = td.dataset.drillCampaign;
+      META.filterAdsetId = null;
+      META.sortCol = "spend"; META.sortDir = "desc";
+      setMetaTab("adsets");
+    } else if (td.dataset.drillAdset) {
+      META.filterAdsetId = td.dataset.drillAdset;
+      if (td.dataset.drillCamp) META.filterCampaignId = td.dataset.drillCamp;
+      META.sortCol = "spend"; META.sortDir = "desc";
+      setMetaTab("ads");
+    }
+  });
+
+  document.getElementById("metaBreadcrumb").addEventListener("click", e => {
+    if (e.target.id === "metaClearFilter") {
+      e.preventDefault();
+      META.filterCampaignId = null;
+      META.filterAdsetId = null;
+      renderMetaTable();
+    }
+  });
+
+  document.getElementById("metaSearch").addEventListener("input", e => {
+    META.search = e.target.value;
+    renderMetaTable();
+  });
+
+  loadMetaData();
+}

@@ -176,6 +176,70 @@
     </div>
   </section>
 
+  <!-- ─── Meta Ads ─────────────────────────────────────────── -->
+  <section class="table-section meta-section">
+    <div class="meta-header">
+      <h2>Meta Ads</h2>
+      <span class="meta-updated" id="metaUpdated">—</span>
+    </div>
+
+    <div class="kpi-grid">
+      <div class="kpi-card">
+        <div class="kpi-label">Spend (Yesterday)</div>
+        <div class="kpi-value" id="metaSpendYday">$0</div>
+        <div class="kpi-sub" id="metaSpendYdaySub">—</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Spend (7d)</div>
+        <div class="kpi-value" id="metaSpend7d">$0</div>
+        <div class="kpi-sub" id="metaSpend7dSub">—</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Spend (30d)</div>
+        <div class="kpi-value" id="metaSpend30d">$0</div>
+        <div class="kpi-sub" id="metaSpend30dSub">—</div>
+      </div>
+      <div class="kpi-card kpi-highlight">
+        <div class="kpi-label">Installs (30d)</div>
+        <div class="kpi-value" id="metaInstalls30d">0</div>
+        <div class="kpi-sub" id="metaInstalls30dSub">—</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">CPI (30d)</div>
+        <div class="kpi-value" id="metaCPI30d">$0</div>
+        <div class="kpi-sub">cost per install</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">CTR (30d)</div>
+        <div class="kpi-value" id="metaCTR30d">0%</div>
+        <div class="kpi-sub" id="metaCTR30dSub">—</div>
+      </div>
+    </div>
+
+    <div class="tabs">
+      <button class="tab active" data-meta-tab="campaigns">Campaigns</button>
+      <button class="tab" data-meta-tab="adsets">Ad Sets</button>
+      <button class="tab" data-meta-tab="ads">Ads</button>
+    </div>
+
+    <div class="table-toolbar">
+      <div class="toolbar-left">
+        <span id="metaBreadcrumb" class="meta-breadcrumb"></span>
+      </div>
+      <div class="toolbar-right">
+        <input type="text" id="metaSearch" class="search-box" placeholder="Search Meta..." />
+        <div class="table-info" id="metaTableInfo">—</div>
+      </div>
+    </div>
+
+    <div class="table-wrap">
+      <table id="metaTable">
+        <thead id="metaTableHead"></thead>
+        <tbody id="metaTableBody"></tbody>
+      </table>
+    </div>
+  </section>
+
 </main>
 
 <script src="dashboard.js"></script>
