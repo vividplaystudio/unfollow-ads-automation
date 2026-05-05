@@ -1012,18 +1012,21 @@ function renderMeta() {
 
 function renderMetaKpis() {
   const ads = aggregateMetaAds();
-  let spend = 0, impressions = 0, clicks = 0, installs = 0, purchases = 0;
+  let spend = 0, impressions = 0, clicks = 0, link_clicks = 0;
+  let installs = 0, purchases = 0;
   for (const a of ads) {
     spend       += a.spend;
     impressions += a.impressions;
     clicks      += a.clicks;
+    link_clicks += a.link_clicks || 0;
     installs    += a.installs;
     purchases   += a.purchases || 0;
   }
-  const ctr = impressions > 0 ? clicks / impressions * 100 : 0;
-  const cpc = clicks > 0 ? spend / clicks : 0;
+  const link_ctr = impressions > 0 ? link_clicks / impressions * 100 : 0;
   const cpm = impressions > 0 ? spend / impressions * 1000 : 0;
+  const cpc_link = link_clicks > 0 ? spend / link_clicks : 0;
   const cpi = installs > 0 ? spend / installs : 0;
+  const cpr = purchases > 0 ? spend / purchases : 0;
 
   const r = metaDateRange();
   const rangeLabel = r ? (r.since === r.until ? r.since : `${r.since} → ${r.until}`) : "—";
@@ -1031,20 +1034,20 @@ function renderMetaKpis() {
   document.getElementById("metaSpend").textContent = fmt.money(spend);
   document.getElementById("metaSpendSub").textContent = rangeLabel;
 
+  document.getElementById("metaResults").textContent = fmt.num(purchases);
+  document.getElementById("metaResultsSub").textContent =
+    purchases > 0 ? rangeLabel : "no purchases tracked yet";
+
+  document.getElementById("metaCPR").textContent = purchases > 0 ? fmt.money(cpr) : "—";
+
   document.getElementById("metaInstalls").textContent = fmt.num(installs);
-  document.getElementById("metaInstallsSub").textContent =
-    purchases > 0 ? `${fmt.num(purchases)} purchases` : rangeLabel;
+  document.getElementById("metaInstallsSub").textContent = rangeLabel;
 
   document.getElementById("metaCPI").textContent = fmt.money(cpi);
 
-  document.getElementById("metaCTR").textContent = ctr.toFixed(2) + "%";
-  document.getElementById("metaCTRSub").textContent = `CPM ${fmt.money(cpm)}`;
-
-  document.getElementById("metaCPC").textContent = fmt.money(cpc);
-  document.getElementById("metaCPCSub").textContent = `${fmt.num(clicks)} clicks`;
-
-  document.getElementById("metaImpr").textContent = fmt.num(impressions);
-  document.getElementById("metaImprSub").textContent = `reach ~${fmt.num(impressions)}`;
+  document.getElementById("metaCTR").textContent = link_ctr.toFixed(2) + "%";
+  document.getElementById("metaCTRSub").textContent =
+    `${fmt.num(link_clicks)} link clicks · CPM ${fmt.money(cpm)} · link CPC ${fmt.money(cpc_link)}`;
 }
 
 function aggregateMetaAds() {
@@ -1058,58 +1061,60 @@ function aggregateMetaAds() {
       ad_id: r.ad_id, ad_name: r.ad_name,
       adset_id: r.adset_id, adset_name: r.adset_name,
       campaign_id: r.campaign_id, campaign_name: r.campaign_name,
-      spend: 0, impressions: 0, clicks: 0, installs: 0, purchases: 0,
+      spend: 0, impressions: 0, clicks: 0, link_clicks: 0,
+      installs: 0, purchases: 0,
     };
     const a = byAd[k];
     a.spend       += r.spend || 0;
     a.impressions += r.impressions || 0;
     a.clicks      += r.clicks || 0;
+    a.link_clicks += r.inline_link_clicks || 0;
     a.installs    += (r.action_mobile_app_install || r.action_omni_app_install || 0);
-    a.purchases   += (r.action_purchase || r["action_app_custom_event.fb_mobile_purchase"] || 0);
+    a.purchases   += (r.action_purchase || r.action_omni_purchase || r["action_app_custom_event.fb_mobile_purchase"] || 0);
   }
   return Object.values(byAd).map(a => ({
     ...a,
     ctr: a.impressions > 0 ? a.clicks / a.impressions * 100 : 0,
+    link_ctr: a.impressions > 0 ? a.link_clicks / a.impressions * 100 : 0,
     cpc: a.clicks > 0 ? a.spend / a.clicks : 0,
     cpm: a.impressions > 0 ? a.spend / a.impressions * 1000 : 0,
     cpi: a.installs > 0 ? a.spend / a.installs : 0,
+    cpr: a.purchases > 0 ? a.spend / a.purchases : 0,
   }));
 }
 
 function metaCols() {
   if (META.tab === "campaigns") return [
     { key: "campaign_name", label: "Campaign", drill: "campaign" },
-    { key: "spend",       label: "Spend",   num: true, fmt: fmt.money },
-    { key: "impressions", label: "Impr",    num: true },
-    { key: "clicks",      label: "Clicks",  num: true },
-    { key: "ctr",         label: "CTR",     num: true, fmt: v => v.toFixed(2) + "%" },
-    { key: "cpc",         label: "CPC",     num: true, fmt: fmt.money },
-    { key: "cpm",         label: "CPM",     num: true, fmt: fmt.money },
-    { key: "installs",    label: "Installs",num: true },
-    { key: "cpi",         label: "CPI",     num: true, fmt: fmt.money },
+    { key: "spend",       label: "Spend",      num: true, fmt: fmt.money },
+    { key: "purchases",   label: "Results",    num: true },
+    { key: "cpr",         label: "Cost/Result",num: true, fmt: v => v > 0 ? fmt.money(v) : "—" },
+    { key: "installs",    label: "Installs",   num: true },
+    { key: "cpi",         label: "CPI",        num: true, fmt: fmt.money },
+    { key: "link_ctr",    label: "CTR (link)", num: true, fmt: v => v.toFixed(2) + "%" },
+    { key: "cpm",         label: "CPM",        num: true, fmt: fmt.money },
+    { key: "impressions", label: "Impr",       num: true },
   ];
   if (META.tab === "adsets") return [
     { key: "adset_name",    label: "Ad Set", drill: "adset" },
     { key: "campaign_name", label: "Campaign" },
-    { key: "spend",       label: "Spend",   num: true, fmt: fmt.money },
-    { key: "impressions", label: "Impr",    num: true },
-    { key: "clicks",      label: "Clicks",  num: true },
-    { key: "ctr",         label: "CTR",     num: true, fmt: v => v.toFixed(2) + "%" },
-    { key: "cpc",         label: "CPC",     num: true, fmt: fmt.money },
-    { key: "installs",    label: "Installs",num: true },
-    { key: "cpi",         label: "CPI",     num: true, fmt: fmt.money },
+    { key: "spend",       label: "Spend",      num: true, fmt: fmt.money },
+    { key: "purchases",   label: "Results",    num: true },
+    { key: "cpr",         label: "Cost/Result",num: true, fmt: v => v > 0 ? fmt.money(v) : "—" },
+    { key: "installs",    label: "Installs",   num: true },
+    { key: "cpi",         label: "CPI",        num: true, fmt: fmt.money },
+    { key: "link_ctr",    label: "CTR (link)", num: true, fmt: v => v.toFixed(2) + "%" },
   ];
   return [
     { key: "ad_name",       label: "Ad" },
     { key: "adset_name",    label: "Ad Set" },
     { key: "campaign_name", label: "Campaign" },
-    { key: "spend",       label: "Spend",   num: true, fmt: fmt.money },
-    { key: "impressions", label: "Impr",    num: true },
-    { key: "clicks",      label: "Clicks",  num: true },
-    { key: "ctr",         label: "CTR",     num: true, fmt: v => v.toFixed(2) + "%" },
-    { key: "cpc",         label: "CPC",     num: true, fmt: fmt.money },
-    { key: "installs",    label: "Installs",num: true },
-    { key: "cpi",         label: "CPI",     num: true, fmt: fmt.money },
+    { key: "spend",       label: "Spend",      num: true, fmt: fmt.money },
+    { key: "purchases",   label: "Results",    num: true },
+    { key: "cpr",         label: "Cost/Result",num: true, fmt: v => v > 0 ? fmt.money(v) : "—" },
+    { key: "installs",    label: "Installs",   num: true },
+    { key: "cpi",         label: "CPI",        num: true, fmt: fmt.money },
+    { key: "link_ctr",    label: "CTR (link)", num: true, fmt: v => v.toFixed(2) + "%" },
   ];
 }
 
@@ -1130,19 +1135,24 @@ function metaRowsForTab() {
     if (!agg[k]) agg[k] = {
       campaign_id: a.campaign_id, campaign_name: a.campaign_name,
       adset_id: a.adset_id, adset_name: a.adset_name,
-      spend: 0, impressions: 0, clicks: 0, installs: 0,
+      spend: 0, impressions: 0, clicks: 0, link_clicks: 0,
+      installs: 0, purchases: 0,
     };
     agg[k].spend       += a.spend;
     agg[k].impressions += a.impressions;
     agg[k].clicks      += a.clicks;
+    agg[k].link_clicks += a.link_clicks || 0;
     agg[k].installs    += a.installs;
+    agg[k].purchases   += a.purchases || 0;
   }
   return Object.values(agg).map(r => ({
     ...r,
     ctr: r.impressions > 0 ? r.clicks / r.impressions * 100 : 0,
+    link_ctr: r.impressions > 0 ? r.link_clicks / r.impressions * 100 : 0,
     cpc: r.clicks > 0 ? r.spend / r.clicks : 0,
     cpm: r.impressions > 0 ? r.spend / r.impressions * 1000 : 0,
     cpi: r.installs > 0 ? r.spend / r.installs : 0,
+    cpr: r.purchases > 0 ? r.spend / r.purchases : 0,
   }));
 }
 

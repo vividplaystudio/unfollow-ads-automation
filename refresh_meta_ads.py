@@ -51,6 +51,9 @@ INSIGHT_FIELDS = [
     "cpc",
     "cpm",
     "frequency",
+    "inline_link_clicks",
+    "inline_link_click_ctr",
+    "cost_per_inline_link_click",
     "actions",
     "action_values",
     "cost_per_action_type",
@@ -152,6 +155,9 @@ def normalize_row(row: dict) -> dict:
         "cpc": float(row.get("cpc", 0) or 0),
         "cpm": float(row.get("cpm", 0) or 0),
         "frequency": float(row.get("frequency", 0) or 0),
+        "inline_link_clicks": int(row.get("inline_link_clicks", 0) or 0),
+        "inline_link_click_ctr": float(row.get("inline_link_click_ctr", 0) or 0),
+        "cost_per_inline_link_click": float(row.get("cost_per_inline_link_click", 0) or 0),
     }
     out.update(normalize_actions(row))
     return out
@@ -159,13 +165,14 @@ def normalize_row(row: dict) -> dict:
 
 def summarize(rows: list) -> dict:
     """Aggregate a list of insight rows into one summary dict."""
-    s = {"spend": 0.0, "impressions": 0, "clicks": 0, "reach": 0}
+    s = {"spend": 0.0, "impressions": 0, "clicks": 0, "reach": 0, "link_clicks": 0}
     actions = {}
     for r in rows:
         s["spend"] += float(r.get("spend", 0) or 0)
         s["impressions"] += int(r.get("impressions", 0) or 0)
         s["clicks"] += int(r.get("clicks", 0) or 0)
         s["reach"] += int(r.get("reach", 0) or 0)
+        s["link_clicks"] += int(r.get("inline_link_clicks", 0) or 0)
         for a in r.get("actions", []) or []:
             t = a.get("action_type")
             if t in TRACKED_ACTION_TYPES:
@@ -174,6 +181,8 @@ def summarize(rows: list) -> dict:
     s["cpm"] = (s["spend"] / s["impressions"] * 1000) if s["impressions"] else 0
     s["cpc"] = (s["spend"] / s["clicks"]) if s["clicks"] else 0
     s["ctr"] = (s["clicks"] / s["impressions"] * 100) if s["impressions"] else 0
+    s["link_ctr"] = (s["link_clicks"] / s["impressions"] * 100) if s["impressions"] else 0
+    s["cost_per_link_click"] = (s["spend"] / s["link_clicks"]) if s["link_clicks"] else 0
     return s
 
 
