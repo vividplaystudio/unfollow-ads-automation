@@ -37,6 +37,7 @@ jobs:
         run: python3 refresh_dashboard_json.py
 
       - name: Run Meta Ads refresher (JSON + FTP)
+        if: always()
         env:
           META_ACCESS_TOKEN: ${{ secrets.META_ACCESS_TOKEN }}
           META_AD_ACCOUNT_ID: ${{ secrets.META_AD_ACCOUNT_ID }}
