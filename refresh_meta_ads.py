@@ -106,13 +106,19 @@ def meta_paginated(path: str, params: dict) -> list:
 # ══════════════════════════════════════════════════════════════════
 
 def fetch_insights(level: str, since: str, until: str, time_increment: str | int = "all_days") -> list:
-    """Fetch insights at the given level and date range."""
+    """Fetch insights at the given level and date range.
+    Use the unified attribution setting + the same windows Ads Manager UI shows
+    (7-day click + 1-day view) so 'Results' / 'in-app subscribes' line up with
+    what the user sees in Meta Ads Manager."""
     params = {
         "level": level,
         "fields": ",".join(INSIGHT_FIELDS),
         "time_range": json.dumps({"since": since, "until": until}),
         "time_increment": str(time_increment),
         "limit": 500,
+        "use_unified_attribution_setting": "true",
+        "action_attribution_windows": json.dumps(["7d_click", "1d_view"]),
+        "action_report_time": "conversion",
     }
     return meta_paginated(f"act_{META_AD_ACCOUNT_ID}/insights", params)
 
