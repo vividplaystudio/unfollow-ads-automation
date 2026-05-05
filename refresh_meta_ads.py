@@ -59,19 +59,13 @@ INSIGHT_FIELDS = [
     "cost_per_action_type",
 ]
 
-# Action types we care about for a subscription app
-TRACKED_ACTION_TYPES = {
-    "mobile_app_install",
-    "app_install",
-    "omni_app_install",
-    "app_custom_event.fb_mobile_purchase",
-    "purchase",
-    "omni_purchase",
-    "subscribe",
-    "start_trial",
-    "app_custom_event.fb_mobile_initiated_checkout",
-    "app_custom_event.fb_mobile_complete_registration",
-}
+# Capture every action type Meta returns. The Meta Ads Manager UI shows
+# results as "in-app subscribes" but the API field can be any of several
+# variants (subscribe, app_custom_event.fb_mobile_subscribe, omni_subscribe,
+# app_custom_event.SUBSCRIBE, etc.) depending on how the event is logged.
+# Whitelist filtering hides these — pull everything and let the dashboard
+# pick the right key.
+TRACKED_ACTION_TYPES = None  # None = no filter, keep all action types
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -124,15 +118,20 @@ def fetch_insights(level: str, since: str, until: str, time_increment: str | int
 
 
 def normalize_actions(row: dict) -> dict:
-    """Flatten the messy actions / action_values arrays into named columns."""
+    """Flatten the messy actions / action_values arrays into named columns.
+    Captures every action type returned (no whitelist)."""
     out = {}
     for a in row.get("actions", []) or []:
         t = a.get("action_type")
-        if t in TRACKED_ACTION_TYPES:
+        if not t:
+            continue
+        if TRACKED_ACTION_TYPES is None or t in TRACKED_ACTION_TYPES:
             out[f"action_{t}"] = float(a.get("value", 0))
     for a in row.get("action_values", []) or []:
         t = a.get("action_type")
-        if t in TRACKED_ACTION_TYPES:
+        if not t:
+            continue
+        if TRACKED_ACTION_TYPES is None or t in TRACKED_ACTION_TYPES:
             out[f"value_{t}"] = float(a.get("value", 0))
     return out
 
@@ -175,7 +174,9 @@ def summarize(rows: list) -> dict:
         s["link_clicks"] += int(r.get("inline_link_clicks", 0) or 0)
         for a in r.get("actions", []) or []:
             t = a.get("action_type")
-            if t in TRACKED_ACTION_TYPES:
+            if not t:
+                continue
+            if TRACKED_ACTION_TYPES is None or t in TRACKED_ACTION_TYPES:
                 actions[t] = actions.get(t, 0.0) + float(a.get("value", 0))
     s["actions"] = actions
     s["cpm"] = (s["spend"] / s["impressions"] * 1000) if s["impressions"] else 0
