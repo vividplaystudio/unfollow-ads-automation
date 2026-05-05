@@ -1070,7 +1070,19 @@ function aggregateMetaAds() {
     a.clicks      += r.clicks || 0;
     a.link_clicks += r.inline_link_clicks || 0;
     a.installs    += (r.action_mobile_app_install || r.action_omni_app_install || 0);
-    a.purchases   += (r.action_purchase || r.action_omni_purchase || r["action_app_custom_event.fb_mobile_purchase"] || 0);
+    // Adjust → Meta MMP integration delivers subscribe events that the
+    // Insights API buckets as app_custom_event.other (the user has no
+    // trials, so this is effectively pure subscribes).
+    a.purchases   += (
+      r.action_subscribe ||
+      r.action_omni_subscribe ||
+      r["action_app_custom_event.fb_mobile_subscribe"] ||
+      r.action_purchase ||
+      r.action_omni_purchase ||
+      r["action_app_custom_event.fb_mobile_purchase"] ||
+      r["action_app_custom_event.other"] ||
+      0
+    );
   }
   return Object.values(byAd).map(a => ({
     ...a,
