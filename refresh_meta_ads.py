@@ -57,6 +57,10 @@ INSIGHT_FIELDS = [
     "actions",
     "action_values",
     "cost_per_action_type",
+    "conversions",
+    "cost_per_conversion",
+    "conversion_values",
+    "purchase_roas",
 ]
 
 # Capture every action type Meta returns. The Meta Ads Manager UI shows
