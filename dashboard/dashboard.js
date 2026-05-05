@@ -939,7 +939,38 @@ const META = {
   sortCol: "spend",
   sortDir: "desc",
   search: "",
+  range: "7d",
+  customFrom: null,  // "YYYY-MM-DD"
+  customTo: null,
 };
+
+// Returns {since, until} ISO date strings (inclusive) for the active range,
+// or null if custom dates are missing.
+function metaDateRange() {
+  // Use the latest date present in the per-day data as "today" — Meta's
+  // date_start is in account timezone, which may differ from the user's.
+  const dates = (META.data?.ads || []).map(r => r.date).filter(Boolean).sort();
+  const latest = dates.length ? dates[dates.length - 1] : new Date().toISOString().slice(0, 10);
+  const earliest = dates.length ? dates[0] : latest;
+
+  const sub = (iso, days) => {
+    const d = new Date(iso + "T00:00:00Z");
+    d.setUTCDate(d.getUTCDate() - days);
+    return d.toISOString().slice(0, 10);
+  };
+
+  switch (META.range) {
+    case "today":     return { since: latest, until: latest };
+    case "yesterday": return { since: sub(latest, 1), until: sub(latest, 1) };
+    case "7d":        return { since: sub(latest, 6),  until: latest };
+    case "14d":       return { since: sub(latest, 13), until: latest };
+    case "30d":       return { since: earliest, until: latest };
+    case "custom":
+      if (!META.customFrom || !META.customTo) return null;
+      return { since: META.customFrom, until: META.customTo };
+    default:          return { since: earliest, until: latest };
+  }
+}
 
 async function loadMetaData() {
   try {
@@ -980,43 +1011,48 @@ function renderMeta() {
 }
 
 function renderMetaKpis() {
-  const s = META.data.summary || {};
-  const spend = w => s[w]?.spend || 0;
+  const ads = aggregateMetaAds();
+  let spend = 0, impressions = 0, clicks = 0, installs = 0, purchases = 0;
+  for (const a of ads) {
+    spend       += a.spend;
+    impressions += a.impressions;
+    clicks      += a.clicks;
+    installs    += a.installs;
+    purchases   += a.purchases || 0;
+  }
+  const ctr = impressions > 0 ? clicks / impressions * 100 : 0;
+  const cpc = clicks > 0 ? spend / clicks : 0;
+  const cpm = impressions > 0 ? spend / impressions * 1000 : 0;
+  const cpi = installs > 0 ? spend / installs : 0;
 
-  const tI = metaInstalls("today");
-  document.getElementById("metaSpendToday").textContent = fmt.money(spend("today"));
-  document.getElementById("metaSpendTodaySub").textContent =
-    `${fmt.num(tI)} installs · ${tI > 0 ? fmt.money(spend("today")/tI) : "—"} CPI`;
+  const r = metaDateRange();
+  const rangeLabel = r ? (r.since === r.until ? r.since : `${r.since} → ${r.until}`) : "—";
 
-  const yI = metaInstalls("yesterday");
-  document.getElementById("metaSpendYday").textContent = fmt.money(spend("yesterday"));
-  document.getElementById("metaSpendYdaySub").textContent =
-    `${fmt.num(yI)} installs · ${yI > 0 ? fmt.money(spend("yesterday")/yI) : "—"} CPI`;
+  document.getElementById("metaSpend").textContent = fmt.money(spend);
+  document.getElementById("metaSpendSub").textContent = rangeLabel;
 
-  const w7 = metaInstalls("last_7_days");
-  document.getElementById("metaSpend7d").textContent = fmt.money(spend("last_7_days"));
-  document.getElementById("metaSpend7dSub").textContent =
-    `${fmt.num(w7)} installs · ${w7 > 0 ? fmt.money(spend("last_7_days")/w7) : "—"} CPI`;
+  document.getElementById("metaInstalls").textContent = fmt.num(installs);
+  document.getElementById("metaInstallsSub").textContent =
+    purchases > 0 ? `${fmt.num(purchases)} purchases` : rangeLabel;
 
-  const w30 = metaInstalls("last_30_days");
-  document.getElementById("metaSpend30d").textContent = fmt.money(spend("last_30_days"));
-  document.getElementById("metaSpend30dSub").textContent = `${fmt.num(w30)} installs`;
+  document.getElementById("metaCPI").textContent = fmt.money(cpi);
 
-  document.getElementById("metaInstalls30d").textContent = fmt.num(w30);
-  document.getElementById("metaInstalls30dSub").textContent = "last 30 days";
-  document.getElementById("metaCPI30d").textContent =
-    fmt.money(w30 > 0 ? spend("last_30_days") / w30 : 0);
+  document.getElementById("metaCTR").textContent = ctr.toFixed(2) + "%";
+  document.getElementById("metaCTRSub").textContent = `CPM ${fmt.money(cpm)}`;
 
-  const ctr = s.last_30_days?.ctr || 0;
-  document.getElementById("metaCTR30d").textContent = ctr.toFixed(2) + "%";
-  document.getElementById("metaCTR30dSub").textContent =
-    `CPC ${fmt.money(s.last_30_days?.cpc || 0)} · CPM ${fmt.money(s.last_30_days?.cpm || 0)}`;
+  document.getElementById("metaCPC").textContent = fmt.money(cpc);
+  document.getElementById("metaCPCSub").textContent = `${fmt.num(clicks)} clicks`;
+
+  document.getElementById("metaImpr").textContent = fmt.num(impressions);
+  document.getElementById("metaImprSub").textContent = `reach ~${fmt.num(impressions)}`;
 }
 
 function aggregateMetaAds() {
   const ads = META.data?.ads || [];
+  const range = metaDateRange();
   const byAd = {};
   for (const r of ads) {
+    if (range && r.date && (r.date < range.since || r.date > range.until)) continue;
     const k = r.ad_id;
     if (!byAd[k]) byAd[k] = {
       ad_id: r.ad_id, ad_name: r.ad_name,
@@ -1185,6 +1221,42 @@ function setMetaTab(name) {
 }
 
 function initMeta() {
+  // Date range pills
+  document.querySelectorAll("[data-meta-range]").forEach(p => {
+    p.addEventListener("click", () => {
+      document.querySelectorAll("[data-meta-range]").forEach(x => x.classList.remove("active"));
+      p.classList.add("active");
+      META.range = p.dataset.metaRange;
+      const customEl = document.getElementById("metaCustomRange");
+      if (META.range === "custom") {
+        customEl.style.display = "";
+        // Default to last 7d if not set yet
+        if (!META.customFrom || !META.customTo) {
+          const dates = (META.data?.ads || []).map(r => r.date).filter(Boolean).sort();
+          const latest = dates.length ? dates[dates.length - 1] : new Date().toISOString().slice(0, 10);
+          const earlier = new Date(latest + "T00:00:00Z");
+          earlier.setUTCDate(earlier.getUTCDate() - 6);
+          META.customFrom = earlier.toISOString().slice(0, 10);
+          META.customTo = latest;
+          document.getElementById("metaCustomFrom").value = META.customFrom;
+          document.getElementById("metaCustomTo").value = META.customTo;
+        }
+      } else {
+        customEl.style.display = "none";
+      }
+      renderMeta();
+    });
+  });
+
+  document.getElementById("metaCustomFrom").addEventListener("change", e => {
+    META.customFrom = e.target.value;
+    if (META.range === "custom") renderMeta();
+  });
+  document.getElementById("metaCustomTo").addEventListener("change", e => {
+    META.customTo = e.target.value;
+    if (META.range === "custom") renderMeta();
+  });
+
   document.querySelectorAll("[data-meta-tab]").forEach(btn => {
     btn.addEventListener("click", () => {
       META.sortCol = "spend";

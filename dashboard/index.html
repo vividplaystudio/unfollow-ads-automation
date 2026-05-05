@@ -183,41 +183,56 @@
       <span class="meta-updated" id="metaUpdated">—</span>
     </div>
 
+    <div class="filter-bar meta-filter-bar">
+      <div class="filter-group">
+        <span class="filter-label">Date range</span>
+        <div class="pill-group" id="metaRangePills">
+          <button class="pill" data-meta-range="today">Today</button>
+          <button class="pill" data-meta-range="yesterday">Yesterday</button>
+          <button class="pill active" data-meta-range="7d">7 days</button>
+          <button class="pill" data-meta-range="14d">14 days</button>
+          <button class="pill" data-meta-range="30d">30 days</button>
+          <button class="pill" data-meta-range="custom">Custom</button>
+        </div>
+      </div>
+      <div class="filter-group meta-custom-range" id="metaCustomRange" style="display:none">
+        <span class="filter-label">From</span>
+        <input type="date" id="metaCustomFrom" class="select" />
+        <span class="filter-label">To</span>
+        <input type="date" id="metaCustomTo" class="select" />
+      </div>
+    </div>
+
     <div class="kpi-grid">
       <div class="kpi-card">
-        <div class="kpi-label">Spend (Today)</div>
-        <div class="kpi-value" id="metaSpendToday">$0</div>
-        <div class="kpi-sub" id="metaSpendTodaySub">—</div>
-      </div>
-      <div class="kpi-card">
-        <div class="kpi-label">Spend (Yesterday)</div>
-        <div class="kpi-value" id="metaSpendYday">$0</div>
-        <div class="kpi-sub" id="metaSpendYdaySub">—</div>
-      </div>
-      <div class="kpi-card">
-        <div class="kpi-label">Spend (7d)</div>
-        <div class="kpi-value" id="metaSpend7d">$0</div>
-        <div class="kpi-sub" id="metaSpend7dSub">—</div>
-      </div>
-      <div class="kpi-card">
-        <div class="kpi-label">Spend (30d)</div>
-        <div class="kpi-value" id="metaSpend30d">$0</div>
-        <div class="kpi-sub" id="metaSpend30dSub">—</div>
+        <div class="kpi-label">Spend</div>
+        <div class="kpi-value" id="metaSpend">$0</div>
+        <div class="kpi-sub" id="metaSpendSub">—</div>
       </div>
       <div class="kpi-card kpi-highlight">
-        <div class="kpi-label">Installs (30d)</div>
-        <div class="kpi-value" id="metaInstalls30d">0</div>
-        <div class="kpi-sub" id="metaInstalls30dSub">—</div>
+        <div class="kpi-label">Installs</div>
+        <div class="kpi-value" id="metaInstalls">0</div>
+        <div class="kpi-sub" id="metaInstallsSub">—</div>
       </div>
       <div class="kpi-card">
-        <div class="kpi-label">CPI (30d)</div>
-        <div class="kpi-value" id="metaCPI30d">$0</div>
+        <div class="kpi-label">CPI</div>
+        <div class="kpi-value" id="metaCPI">$0</div>
         <div class="kpi-sub">cost per install</div>
       </div>
       <div class="kpi-card">
-        <div class="kpi-label">CTR (30d)</div>
-        <div class="kpi-value" id="metaCTR30d">0%</div>
-        <div class="kpi-sub" id="metaCTR30dSub">—</div>
+        <div class="kpi-label">CTR</div>
+        <div class="kpi-value" id="metaCTR">0%</div>
+        <div class="kpi-sub" id="metaCTRSub">—</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">CPC</div>
+        <div class="kpi-value" id="metaCPC">$0</div>
+        <div class="kpi-sub" id="metaCPCSub">—</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Impressions</div>
+        <div class="kpi-value" id="metaImpr">0</div>
+        <div class="kpi-sub" id="metaImprSub">—</div>
       </div>
     </div>
 
