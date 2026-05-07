@@ -46,3 +46,14 @@ jobs:
           FTP_PASS: ${{ secrets.FTP_PASS }}
           FTP_PATH: ${{ secrets.FTP_PATH }}
         run: python3 refresh_meta_ads.py
+
+      - name: Run Adjust refresher (JSON + FTP)
+        if: always()
+        env:
+          ADJUST_API_TOKEN: ${{ secrets.ADJUST_API_TOKEN }}
+          ADJUST_APP_TOKEN: ${{ secrets.ADJUST_APP_TOKEN }}
+          FTP_HOST: ${{ secrets.FTP_HOST }}
+          FTP_USER: ${{ secrets.FTP_USER }}
+          FTP_PASS: ${{ secrets.FTP_PASS }}
+          FTP_PATH: ${{ secrets.FTP_PATH }}
+        run: python3 refresh_adjust.py
