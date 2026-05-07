@@ -1105,6 +1105,7 @@ function renderMetaKpis() {
   const ads = aggregateMetaAds();
   let spend = 0, impressions = 0, clicks = 0, link_clicks = 0;
   let installs = 0, purchases = 0;
+  let adjRev = 0, adjW = 0, adjM = 0, adjY = 0, adjInst = 0;
   for (const a of ads) {
     spend       += a.spend;
     impressions += a.impressions;
@@ -1112,12 +1113,20 @@ function renderMetaKpis() {
     link_clicks += a.link_clicks || 0;
     installs    += a.installs;
     purchases   += a.purchases || 0;
+    adjRev      += a.adj_revenue  || 0;
+    adjW        += a.adj_weekly   || 0;
+    adjM        += a.adj_monthly  || 0;
+    adjY        += a.adj_yearly   || 0;
+    adjInst     += a.adj_installs || 0;
   }
+  const adjSubs = adjW + adjM + adjY;
   const link_ctr = impressions > 0 ? link_clicks / impressions * 100 : 0;
   const cpm = impressions > 0 ? spend / impressions * 1000 : 0;
   const cpc_link = link_clicks > 0 ? spend / link_clicks : 0;
   const cpi = installs > 0 ? spend / installs : 0;
-  const cpr = purchases > 0 ? spend / purchases : 0;
+  const roas = spend > 0 ? adjRev / spend * 100 : 0;
+  const profit = adjRev - spend;
+  const cps = adjSubs > 0 ? spend / adjSubs : 0;
 
   const r = metaDateRange();
   const rangeLabel = r ? (r.since === r.until ? r.since : `${r.since} → ${r.until}`) : "—";
@@ -1125,14 +1134,30 @@ function renderMetaKpis() {
   document.getElementById("metaSpend").textContent = fmt.money(spend);
   document.getElementById("metaSpendSub").textContent = rangeLabel;
 
-  document.getElementById("metaResults").textContent = fmt.num(purchases);
-  document.getElementById("metaResultsSub").textContent =
-    purchases > 0 ? rangeLabel : "no purchases tracked yet";
+  document.getElementById("metaRevenue").textContent = fmt.money(adjRev);
+  const profitTxt = (profit >= 0 ? "+" : "−") + fmt.money(Math.abs(profit));
+  const profitColor = profit >= 0 ? "var(--success, #10b981)" : "var(--danger, #ef4444)";
+  const revSub = document.getElementById("metaRevenueSub");
+  revSub.innerHTML = `<span style="color:${profitColor}">${profitTxt}</span> profit · ${rangeLabel}`;
 
-  document.getElementById("metaCPR").textContent = purchases > 0 ? fmt.money(cpr) : "—";
+  document.getElementById("metaROAS").textContent = roas > 0 ? roas.toFixed(0) + "%" : "—";
+  const roasSub = document.getElementById("metaROASSub");
+  roasSub.textContent = roas >= 100
+    ? "profitable ✓"
+    : roas > 0 ? `need ${(100 - roas).toFixed(0)}% more` : "—";
+  roasSub.style.color = roas >= 100 ? "var(--success, #10b981)" : "var(--danger, #ef4444)";
+
+  // "Results" card now reflects Adjust subscribes (real attribution)
+  // rather than Meta's app_custom_event.other proxy
+  document.getElementById("metaResults").textContent = fmt.num(adjSubs);
+  document.getElementById("metaResultsSub").textContent =
+    adjSubs > 0 ? `${adjW} W · ${adjM} M · ${adjY} Y` : rangeLabel;
+
+  document.getElementById("metaCPR").textContent = adjSubs > 0 ? fmt.money(cps) : "—";
 
   document.getElementById("metaInstalls").textContent = fmt.num(installs);
-  document.getElementById("metaInstallsSub").textContent = rangeLabel;
+  document.getElementById("metaInstallsSub").textContent =
+    adjInst > 0 ? `${fmt.num(adjInst)} (Adjust)` : rangeLabel;
 
   document.getElementById("metaCPI").textContent = fmt.money(cpi);
 
