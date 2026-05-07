@@ -977,11 +977,73 @@ async function loadMetaData() {
     const res = await fetch("meta_ads.json?v=" + Date.now());
     if (!res.ok) throw new Error("HTTP " + res.status);
     META.data = await res.json();
+    await loadAdjustData();   // best-effort, doesn't block Meta render
     renderMeta();
   } catch (e) {
     console.error("Failed to load meta_ads.json:", e);
     document.getElementById("metaTableBody").innerHTML =
       `<tr><td colspan="20" class="empty-state"><div class="icon">⚠️</div>Could not load meta_ads.json<br><small>${e.message}</small></td></tr>`;
+  }
+}
+
+// Adjust attribution data, keyed off the (id) suffix in the creative/
+// adgroup/campaign strings. Always reflects last 30 days regardless of
+// the date-range pill — Adjust API only pulls 30d in the current puller.
+const ADJ = {
+  data: null,
+  byAdId: new Map(),       // meta ad_id → {installs, revenue, events}
+  byAdsetId: new Map(),    // meta adset_id → {...}
+  byCampaignId: new Map(), // meta campaign_id → {...}
+};
+
+function adjExtractId(s) {
+  if (!s) return null;
+  const m = String(s).match(/\((\d{6,})\)\s*$/);
+  return m ? m[1] : null;
+}
+
+async function loadAdjustData() {
+  try {
+    const res = await fetch("adjust.json?v=" + Date.now());
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    ADJ.data = await res.json();
+  } catch (e) {
+    console.warn("Adjust data not available:", e.message);
+    ADJ.data = null;
+    return;
+  }
+  ADJ.byAdId.clear();
+  ADJ.byAdsetId.clear();
+  ADJ.byCampaignId.clear();
+
+  const accumulate = (map, key, row) => {
+    if (!key) return;
+    const cur = map.get(key) || { installs: 0, revenue: 0, events: 0, clicks: 0 };
+    cur.installs += +(row.installs || 0);
+    cur.revenue  += +(row.all_revenue || 0);
+    cur.events   += +(row.events || 0);
+    cur.clicks   += +(row.clicks || 0);
+    map.set(key, cur);
+  };
+
+  // by_creative is the most granular — ad-level rows from Meta land here
+  for (const r of ADJ.data.by_creative || []) {
+    if ((r.network || "").indexOf("Facebook") < 0 && (r.network || "").indexOf("Instagram") < 0) continue;
+    accumulate(ADJ.byAdId,       adjExtractId(r.creative), r);
+    accumulate(ADJ.byAdsetId,    adjExtractId(r.adgroup),  r);
+    accumulate(ADJ.byCampaignId, adjExtractId(r.campaign), r);
+  }
+  // by_adgroup ensures ad-set rows include rolled-up totals even when
+  // Meta has no per-ad creative match
+  for (const r of ADJ.data.by_adgroup || []) {
+    if ((r.network || "").indexOf("Facebook") < 0 && (r.network || "").indexOf("Instagram") < 0) continue;
+    const adsetKey = adjExtractId(r.adgroup);
+    if (adsetKey && !ADJ.byAdsetId.has(adsetKey)) accumulate(ADJ.byAdsetId, adsetKey, r);
+  }
+  for (const r of ADJ.data.by_campaign || []) {
+    if ((r.network || "").indexOf("Facebook") < 0 && (r.network || "").indexOf("Instagram") < 0) continue;
+    const campKey = adjExtractId(r.campaign);
+    if (campKey && !ADJ.byCampaignId.has(campKey)) accumulate(ADJ.byCampaignId, campKey, r);
   }
 }
 
@@ -1084,36 +1146,52 @@ function aggregateMetaAds() {
       0
     );
   }
-  return Object.values(byAd).map(a => ({
-    ...a,
-    ctr: a.impressions > 0 ? a.clicks / a.impressions * 100 : 0,
-    link_ctr: a.impressions > 0 ? a.link_clicks / a.impressions * 100 : 0,
-    cpc: a.clicks > 0 ? a.spend / a.clicks : 0,
-    cpm: a.impressions > 0 ? a.spend / a.impressions * 1000 : 0,
-    cpi: a.installs > 0 ? a.spend / a.installs : 0,
-    cpr: a.purchases > 0 ? a.spend / a.purchases : 0,
-  }));
+  return Object.values(byAd).map(a => {
+    const adj = ADJ.byAdId.get(a.ad_id) || { installs: 0, revenue: 0, events: 0 };
+    return {
+      ...a,
+      ctr: a.impressions > 0 ? a.clicks / a.impressions * 100 : 0,
+      link_ctr: a.impressions > 0 ? a.link_clicks / a.impressions * 100 : 0,
+      cpc: a.clicks > 0 ? a.spend / a.clicks : 0,
+      cpm: a.impressions > 0 ? a.spend / a.impressions * 1000 : 0,
+      cpi: a.installs > 0 ? a.spend / a.installs : 0,
+      cpr: a.purchases > 0 ? a.spend / a.purchases : 0,
+      adj_installs: adj.installs,
+      adj_revenue: adj.revenue,
+      adj_events: adj.events,
+      roas: a.spend > 0 ? adj.revenue / a.spend * 100 : 0,
+      profit: adj.revenue - a.spend,
+    };
+  });
 }
 
 function metaCols() {
+  // Adjust columns are always 30d (Adjust puller pulls 30d only).
+  // We label them so the user knows the join window.
+  const adjCols = [
+    { key: "adj_revenue", label: "Revenue (30d)",num: true, fmt: v => v > 0 ? fmt.money(v) : "—" },
+    { key: "roas",        label: "ROAS",         num: true, fmt: v => v > 0 ? v.toFixed(0) + "%" : "—" },
+    { key: "profit",      label: "Profit",       num: true, fmt: profitFmt },
+    { key: "adj_installs",label: "Adj Inst (30d)",num: true },
+  ];
   if (META.tab === "campaigns") return [
     { key: "campaign_name", label: "Campaign", drill: "campaign" },
     { key: "spend",       label: "Spend",      num: true, fmt: fmt.money },
-    { key: "purchases",   label: "Results",    num: true },
+    ...adjCols,
+    { key: "purchases",   label: "Meta Subs",  num: true },
     { key: "cpr",         label: "Cost/Result",num: true, fmt: v => v > 0 ? fmt.money(v) : "—" },
-    { key: "installs",    label: "Installs",   num: true },
+    { key: "installs",    label: "Meta Inst",  num: true },
     { key: "cpi",         label: "CPI",        num: true, fmt: fmt.money },
     { key: "link_ctr",    label: "CTR (link)", num: true, fmt: v => v.toFixed(2) + "%" },
     { key: "cpm",         label: "CPM",        num: true, fmt: fmt.money },
-    { key: "impressions", label: "Impr",       num: true },
   ];
   if (META.tab === "adsets") return [
     { key: "adset_name",    label: "Ad Set", drill: "adset" },
     { key: "campaign_name", label: "Campaign" },
     { key: "spend",       label: "Spend",      num: true, fmt: fmt.money },
-    { key: "purchases",   label: "Results",    num: true },
+    ...adjCols,
+    { key: "purchases",   label: "Meta Subs",  num: true },
     { key: "cpr",         label: "Cost/Result",num: true, fmt: v => v > 0 ? fmt.money(v) : "—" },
-    { key: "installs",    label: "Installs",   num: true },
     { key: "cpi",         label: "CPI",        num: true, fmt: fmt.money },
     { key: "link_ctr",    label: "CTR (link)", num: true, fmt: v => v.toFixed(2) + "%" },
   ];
@@ -1122,12 +1200,18 @@ function metaCols() {
     { key: "adset_name",    label: "Ad Set" },
     { key: "campaign_name", label: "Campaign" },
     { key: "spend",       label: "Spend",      num: true, fmt: fmt.money },
-    { key: "purchases",   label: "Results",    num: true },
+    ...adjCols,
+    { key: "purchases",   label: "Meta Subs",  num: true },
     { key: "cpr",         label: "Cost/Result",num: true, fmt: v => v > 0 ? fmt.money(v) : "—" },
-    { key: "installs",    label: "Installs",   num: true },
     { key: "cpi",         label: "CPI",        num: true, fmt: fmt.money },
     { key: "link_ctr",    label: "CTR (link)", num: true, fmt: v => v.toFixed(2) + "%" },
   ];
+}
+
+function profitFmt(v) {
+  if (v == null || v === 0) return "—";
+  if (v > 0) return `<span class="profit-pos">+${fmt.money(v)}</span>`;
+  return `<span class="profit-neg">${fmt.money(v)}</span>`;
 }
 
 function metaRowsForTab() {
@@ -1157,15 +1241,25 @@ function metaRowsForTab() {
     agg[k].installs    += a.installs;
     agg[k].purchases   += a.purchases || 0;
   }
-  return Object.values(agg).map(r => ({
-    ...r,
-    ctr: r.impressions > 0 ? r.clicks / r.impressions * 100 : 0,
-    link_ctr: r.impressions > 0 ? r.link_clicks / r.impressions * 100 : 0,
-    cpc: r.clicks > 0 ? r.spend / r.clicks : 0,
-    cpm: r.impressions > 0 ? r.spend / r.impressions * 1000 : 0,
-    cpi: r.installs > 0 ? r.spend / r.installs : 0,
-    cpr: r.purchases > 0 ? r.spend / r.purchases : 0,
-  }));
+  return Object.values(agg).map(r => {
+    const adjMap = META.tab === "campaigns" ? ADJ.byCampaignId : ADJ.byAdsetId;
+    const adjKey = META.tab === "campaigns" ? r.campaign_id : r.adset_id;
+    const adj = adjMap.get(adjKey) || { installs: 0, revenue: 0, events: 0 };
+    return {
+      ...r,
+      ctr: r.impressions > 0 ? r.clicks / r.impressions * 100 : 0,
+      link_ctr: r.impressions > 0 ? r.link_clicks / r.impressions * 100 : 0,
+      cpc: r.clicks > 0 ? r.spend / r.clicks : 0,
+      cpm: r.impressions > 0 ? r.spend / r.impressions * 1000 : 0,
+      cpi: r.installs > 0 ? r.spend / r.installs : 0,
+      cpr: r.purchases > 0 ? r.spend / r.purchases : 0,
+      adj_installs: adj.installs,
+      adj_revenue: adj.revenue,
+      adj_events: adj.events,
+      roas: r.spend > 0 ? adj.revenue / r.spend * 100 : 0,
+      profit: adj.revenue - r.spend,
+    };
+  });
 }
 
 function renderMetaTable() {
