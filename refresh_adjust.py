@@ -46,7 +46,6 @@ BASE_METRICS = [
     "clicks",
     "impressions",
     "all_revenue",
-    "paid_revenue",
     "events",
 ]
 
