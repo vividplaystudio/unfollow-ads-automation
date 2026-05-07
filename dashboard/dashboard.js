@@ -1034,11 +1034,21 @@ function adjRebuildMapsForCurrentWindow() {
 
   const accumulate = (map, k, row) => {
     if (!k) return;
-    const cur = map.get(k) || { installs: 0, revenue: 0, events: 0, clicks: 0 };
-    cur.installs += +(row.installs || 0);
-    cur.revenue  += +(row.all_revenue || 0);
-    cur.events   += +(row.events || 0);
-    cur.clicks   += +(row.clicks || 0);
+    const cur = map.get(k) || {
+      installs: 0, revenue: 0, events: 0, clicks: 0,
+      weekly: 0, monthly: 0, yearly: 0,
+      weekly_rev: 0, monthly_rev: 0, yearly_rev: 0,
+    };
+    cur.installs    += +(row.installs || 0);
+    cur.revenue     += +(row.all_revenue || 0);
+    cur.events      += +(row.events || 0);
+    cur.clicks      += +(row.clicks || 0);
+    cur.weekly      += +(row.com_weekly_events || 0);
+    cur.monthly     += +(row.com_monthly_events || 0);
+    cur.yearly      += +(row.com_yearly_events || 0);
+    cur.weekly_rev  += +(row.com_weekly_revenue || 0);
+    cur.monthly_rev += +(row.com_monthly_revenue || 0);
+    cur.yearly_rev  += +(row.com_yearly_revenue || 0);
     map.set(k, cur);
   };
 
@@ -1166,32 +1176,59 @@ function aggregateMetaAds() {
     );
   }
   return Object.values(byAd).map(a => {
-    const adj = ADJ.byAdId.get(a.ad_id) || { installs: 0, revenue: 0, events: 0 };
-    return {
-      ...a,
-      ctr: a.impressions > 0 ? a.clicks / a.impressions * 100 : 0,
-      link_ctr: a.impressions > 0 ? a.link_clicks / a.impressions * 100 : 0,
-      cpc: a.clicks > 0 ? a.spend / a.clicks : 0,
-      cpm: a.impressions > 0 ? a.spend / a.impressions * 1000 : 0,
-      cpi: a.installs > 0 ? a.spend / a.installs : 0,
-      cpr: a.purchases > 0 ? a.spend / a.purchases : 0,
-      adj_installs: adj.installs,
-      adj_revenue: adj.revenue,
-      adj_events: adj.events,
-      roas: a.spend > 0 ? adj.revenue / a.spend * 100 : 0,
-      profit: adj.revenue - a.spend,
-    };
+    const adj = ADJ.byAdId.get(a.ad_id) || {};
+    return enrichWithAdj(a, adj);
   });
+}
+
+// Merge a Meta row with its Adjust counterpart, computing all derived
+// columns (CTR/CPI/CPR/ROAS/profit/yearly mix). Used both per-ad and at
+// every group level (campaign / adset).
+function enrichWithAdj(row, adj) {
+  adj = adj || {};
+  const yearly  = adj.yearly  || 0;
+  const monthly = adj.monthly || 0;
+  const weekly  = adj.weekly  || 0;
+  const subs    = yearly + monthly + weekly;
+  const adjRev  = adj.revenue || 0;
+  return {
+    ...row,
+    ctr: row.impressions > 0 ? row.clicks / row.impressions * 100 : 0,
+    link_ctr: row.impressions > 0 ? (row.link_clicks || 0) / row.impressions * 100 : 0,
+    cpc: row.clicks > 0 ? row.spend / row.clicks : 0,
+    cpm: row.impressions > 0 ? row.spend / row.impressions * 1000 : 0,
+    cpi: row.installs > 0 ? row.spend / row.installs : 0,
+    cpr: row.purchases > 0 ? row.spend / row.purchases : 0,
+    adj_installs: adj.installs || 0,
+    adj_revenue: adjRev,
+    adj_events: adj.events || 0,
+    adj_weekly: weekly,
+    adj_monthly: monthly,
+    adj_yearly: yearly,
+    adj_subs_total: subs,
+    adj_yearly_pct: subs > 0 ? yearly / subs * 100 : 0,
+    cps: subs > 0 ? row.spend / subs : 0,                         // cost per sub (Adjust)
+    roas: row.spend > 0 ? adjRev / row.spend * 100 : 0,
+    profit: adjRev - row.spend,
+  };
 }
 
 function metaCols() {
   // Adjust columns now respect the active date pill (matched against the
-  // per-day per-creative dataset).
+  // per-day per-creative dataset). W/M/Y are the live paywall events
+  // (Com_Weekly $4.99, Com_Monthly $9.99, Com_Yearly $22.99).
   const adjCols = [
-    { key: "adj_revenue", label: "Revenue",  num: true, fmt: v => v > 0 ? fmt.money(v) : "—" },
-    { key: "roas",        label: "ROAS",     num: true, fmt: v => v > 0 ? v.toFixed(0) + "%" : "—" },
-    { key: "profit",      label: "Profit",   num: true, fmt: profitFmt },
-    { key: "adj_installs",label: "Adj Inst", num: true },
+    { key: "adj_revenue",   label: "Revenue",   num: true, fmt: v => v > 0 ? fmt.money(v) : "—" },
+    { key: "roas",          label: "ROAS",      num: true, fmt: v => v > 0 ? v.toFixed(0) + "%" : "—" },
+    { key: "profit",        label: "Profit",    num: true, fmt: profitFmt },
+    { key: "adj_subs_total",label: "Subs",      num: true },
+    { key: "cps",           label: "Cost/Sub",  num: true, fmt: v => v > 0 ? fmt.money(v) : "—" },
+    { key: "adj_weekly",    label: "W",         num: true, title: "Com_Weekly $4.99" },
+    { key: "adj_monthly",   label: "M",         num: true, title: "Com_Monthly $9.99" },
+    { key: "adj_yearly",    label: "Y",         num: true, title: "Com_Yearly $22.99" },
+    { key: "adj_yearly_pct",label: "Y %",       num: true, fmt: v => v > 0 ? v.toFixed(0) + "%" : "—",
+      title: "Yearly subs as % of total — higher = better LTV mix" },
+    { key: "adj_installs",  label: "Adj Inst",  num: true },
   ];
   if (META.tab === "campaigns") return [
     { key: "campaign_name", label: "Campaign", drill: "campaign" },
@@ -1263,21 +1300,7 @@ function metaRowsForTab() {
   return Object.values(agg).map(r => {
     const adjMap = META.tab === "campaigns" ? ADJ.byCampaignId : ADJ.byAdsetId;
     const adjKey = META.tab === "campaigns" ? r.campaign_id : r.adset_id;
-    const adj = adjMap.get(adjKey) || { installs: 0, revenue: 0, events: 0 };
-    return {
-      ...r,
-      ctr: r.impressions > 0 ? r.clicks / r.impressions * 100 : 0,
-      link_ctr: r.impressions > 0 ? r.link_clicks / r.impressions * 100 : 0,
-      cpc: r.clicks > 0 ? r.spend / r.clicks : 0,
-      cpm: r.impressions > 0 ? r.spend / r.impressions * 1000 : 0,
-      cpi: r.installs > 0 ? r.spend / r.installs : 0,
-      cpr: r.purchases > 0 ? r.spend / r.purchases : 0,
-      adj_installs: adj.installs,
-      adj_revenue: adj.revenue,
-      adj_events: adj.events,
-      roas: r.spend > 0 ? adj.revenue / r.spend * 100 : 0,
-      profit: adj.revenue - r.spend,
-    };
+    return enrichWithAdj(r, adjMap.get(adjKey));
   });
 }
 
@@ -1308,7 +1331,8 @@ function renderMetaTable() {
 
   head.innerHTML = "<tr>" + cols.map(c => {
     const arrow = META.sortCol === c.key ? (META.sortDir === "asc" ? " ▲" : " ▼") : "";
-    return `<th data-meta-sort="${c.key}" class="${c.num ? "num" : ""}">${c.label}${arrow}</th>`;
+    const title = c.title ? ` title="${c.title.replace(/"/g, "&quot;")}"` : "";
+    return `<th data-meta-sort="${c.key}" class="${c.num ? "num" : ""}"${title}>${c.label}${arrow}</th>`;
   }).join("") + "</tr>";
 
   if (!rows.length) {
