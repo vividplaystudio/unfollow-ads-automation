@@ -85,8 +85,11 @@ def adjust_get(params: dict) -> dict:
         raise
 
 
-def fetch_report(since: str, until: str, dimensions: list, extra: dict = None) -> list:
-    metrics = BASE_METRICS + event_metrics()
+def fetch_report(since: str, until: str, dimensions: list, extra: dict = None,
+                  include_events: bool = True) -> list:
+    """Fetch a report. If event-specific metrics fail (unknown token), retry
+    with just base metrics so we still get installs/revenue."""
+    metrics = BASE_METRICS + (event_metrics() if include_events else [])
     params = {
         "app_token__in": ADJUST_APP_TOKEN,
         "date_period": f"{since}:{until}",
@@ -95,7 +98,13 @@ def fetch_report(since: str, until: str, dimensions: list, extra: dict = None) -
     }
     if extra:
         params.update(extra)
-    return adjust_get(params).get("rows", [])
+    try:
+        return adjust_get(params).get("rows", [])
+    except urllib.error.HTTPError as e:
+        if include_events and e.code == 400:
+            print("    ↻ Retrying without event metrics (token mismatch?)")
+            return fetch_report(since, until, dimensions, extra, include_events=False)
+        raise
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -135,11 +144,34 @@ def upload_to_ftp(local_file: str, remote_name: str) -> None:
 # Main
 # ══════════════════════════════════════════════════════════════════
 
+def list_known_events() -> None:
+    """Print the actual event tokens Adjust has registered for this app —
+    helps verify whether our hard-coded EVENT_TOKENS are correct."""
+    today = datetime.now(timezone.utc).date()
+    since = (today - timedelta(days=29)).isoformat()
+    until = today.isoformat()
+    params = {
+        "app_token__in": ADJUST_APP_TOKEN,
+        "date_period": f"{since}:{until}",
+        "dimensions": "event",
+        "metrics": "events",
+    }
+    try:
+        data = adjust_get(params)
+    except urllib.error.HTTPError:
+        return
+    rows = data.get("rows", [])
+    print(f"  Known events on this app ({len(rows)} total):")
+    for r in rows[:30]:
+        print(f"    {r}")
+
+
 def main() -> None:
     today = datetime.now(timezone.utc).date()
     d = lambda offset: (today - timedelta(days=offset)).isoformat()
 
     print(f"▶ Adjust refresh for app {ADJUST_APP_TOKEN[:6]}…")
+    list_known_events()
 
     print("  Fetching summary windows (network breakdown)…")
     summary = {
