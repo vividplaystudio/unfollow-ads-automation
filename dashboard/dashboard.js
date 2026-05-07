@@ -1259,8 +1259,6 @@ function metaCols() {
     { key: "campaign_name", label: "Campaign", drill: "campaign" },
     { key: "spend",       label: "Spend",      num: true, fmt: fmt.money },
     ...adjCols,
-    { key: "purchases",   label: "Meta Subs",  num: true },
-    { key: "cpr",         label: "Cost/Result",num: true, fmt: v => v > 0 ? fmt.money(v) : "—" },
     { key: "installs",    label: "Meta Inst",  num: true },
     { key: "cpi",         label: "CPI",        num: true, fmt: fmt.money },
     { key: "link_ctr",    label: "CTR (link)", num: true, fmt: v => v.toFixed(2) + "%" },
@@ -1271,8 +1269,6 @@ function metaCols() {
     { key: "campaign_name", label: "Campaign" },
     { key: "spend",       label: "Spend",      num: true, fmt: fmt.money },
     ...adjCols,
-    { key: "purchases",   label: "Meta Subs",  num: true },
-    { key: "cpr",         label: "Cost/Result",num: true, fmt: v => v > 0 ? fmt.money(v) : "—" },
     { key: "cpi",         label: "CPI",        num: true, fmt: fmt.money },
     { key: "link_ctr",    label: "CTR (link)", num: true, fmt: v => v.toFixed(2) + "%" },
   ];
@@ -1282,8 +1278,6 @@ function metaCols() {
     { key: "campaign_name", label: "Campaign" },
     { key: "spend",       label: "Spend",      num: true, fmt: fmt.money },
     ...adjCols,
-    { key: "purchases",   label: "Meta Subs",  num: true },
-    { key: "cpr",         label: "Cost/Result",num: true, fmt: v => v > 0 ? fmt.money(v) : "—" },
     { key: "cpi",         label: "CPI",        num: true, fmt: fmt.money },
     { key: "link_ctr",    label: "CTR (link)", num: true, fmt: v => v.toFixed(2) + "%" },
   ];
