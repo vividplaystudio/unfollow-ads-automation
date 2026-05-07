@@ -51,12 +51,14 @@ BASE_METRICS = [
 
 
 def event_metrics() -> list:
-    """Per-event count + revenue metrics. Currently disabled because Adjust
-    rejects every metric format we've tried (`<token>_event`, `<token>_events`,
-    `<token>_revenue`) for app pbu6v5… even though the UI Events tab shows
-    these tokens as Live. Most likely the tokens belong to a different
-    Adjust app entry. Re-enable once the correct app/token combo is found."""
-    return []
+    """Per-event count + revenue metrics for Adjust Reports Service.
+    Try the human-readable event NAME (Com_Monthly, etc.) — not the
+    6-char token — since the token form was rejected for this app."""
+    out = []
+    for name in EVENT_TOKENS.keys():
+        out.append(f"{name}_events")
+        out.append(f"{name}_revenue")
+    return out
 
 
 # ══════════════════════════════════════════════════════════════════
