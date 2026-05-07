@@ -51,10 +51,12 @@ BASE_METRICS = [
 
 
 def event_metrics() -> list:
-    """Per-event count + revenue metrics for Adjust Reports Service."""
+    """Per-event count + revenue metrics for Adjust Reports Service.
+    Format is `<token>_event` (singular) for count, `<token>_revenue` for value.
+    The earlier `_events` (plural) was wrong — Reports Service uses singular."""
     out = []
     for token in EVENT_TOKENS.values():
-        out.append(f"{token}_events")
+        out.append(f"{token}_event")
         out.append(f"{token}_revenue")
     return out
 
@@ -195,6 +197,17 @@ def main() -> None:
     by_creative = fetch_report(d(29), d(0), ["network", "campaign", "adgroup", "creative"])
     print(f"    {len(by_creative)} creative rows")
 
+    # Per-day per-creative for the Meta-attributed networks. This powers
+    # the dashboard's Today/Yesterday/7d/14d/30d/Custom date filter on
+    # the ROAS column. We filter at the API level to keep payload small.
+    print("  Fetching per-day per-creative (Meta networks only)…")
+    by_creative_daily = fetch_report(
+        d(29), d(0),
+        ["network", "campaign", "adgroup", "creative", "day"],
+        extra={"network__in": "Facebook Installs,Instagram Installs,Facebook (Ad Spend)"},
+    )
+    print(f"    {len(by_creative_daily)} creative-day rows")
+
     payload = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "app_token": ADJUST_APP_TOKEN,
@@ -203,6 +216,7 @@ def main() -> None:
         "by_campaign": by_campaign,
         "by_adgroup": by_adgroup,
         "by_creative": by_creative,
+        "by_creative_daily": by_creative_daily,
     }
 
     with open(OUTPUT_FILE, "w") as f:
