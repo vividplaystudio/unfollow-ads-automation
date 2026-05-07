@@ -986,14 +986,15 @@ async function loadMetaData() {
   }
 }
 
-// Adjust attribution data, keyed off the (id) suffix in the creative/
-// adgroup/campaign strings. Always reflects last 30 days regardless of
-// the date-range pill — Adjust API only pulls 30d in the current puller.
+// Adjust attribution data. Maps are rebuilt every render based on the
+// current Meta date-range pill so the ROAS column matches the same
+// window as Spend / Installs / etc.
 const ADJ = {
   data: null,
   byAdId: new Map(),       // meta ad_id → {installs, revenue, events}
   byAdsetId: new Map(),    // meta adset_id → {...}
   byCampaignId: new Map(), // meta campaign_id → {...}
+  windowKey: null,         // last range we built maps for (cache key)
 };
 
 function adjExtractId(s) {
@@ -1002,48 +1003,65 @@ function adjExtractId(s) {
   return m ? m[1] : null;
 }
 
+function adjIsMetaNetwork(network) {
+  if (!network) return false;
+  return network.indexOf("Facebook") >= 0 || network.indexOf("Instagram") >= 0;
+}
+
 async function loadAdjustData() {
   try {
     const res = await fetch("adjust.json?v=" + Date.now());
     if (!res.ok) throw new Error("HTTP " + res.status);
     ADJ.data = await res.json();
+    ADJ.windowKey = null; // force rebuild
   } catch (e) {
     console.warn("Adjust data not available:", e.message);
     ADJ.data = null;
-    return;
   }
+}
+
+// Rebuild ADJ maps for the current Meta date window. Cheap (<2ms for ~700 rows).
+function adjRebuildMapsForCurrentWindow() {
+  if (!ADJ.data) return;
+  const range = metaDateRange();
+  const key = range ? `${range.since}:${range.until}` : "all";
+  if (key === ADJ.windowKey) return;
+
   ADJ.byAdId.clear();
   ADJ.byAdsetId.clear();
   ADJ.byCampaignId.clear();
+  ADJ.windowKey = key;
 
-  const accumulate = (map, key, row) => {
-    if (!key) return;
-    const cur = map.get(key) || { installs: 0, revenue: 0, events: 0, clicks: 0 };
+  const accumulate = (map, k, row) => {
+    if (!k) return;
+    const cur = map.get(k) || { installs: 0, revenue: 0, events: 0, clicks: 0 };
     cur.installs += +(row.installs || 0);
     cur.revenue  += +(row.all_revenue || 0);
     cur.events   += +(row.events || 0);
     cur.clicks   += +(row.clicks || 0);
-    map.set(key, cur);
+    map.set(k, cur);
   };
 
-  // by_creative is the most granular — ad-level rows from Meta land here
-  for (const r of ADJ.data.by_creative || []) {
-    if ((r.network || "").indexOf("Facebook") < 0 && (r.network || "").indexOf("Instagram") < 0) continue;
+  // Use per-day data when range is set so ROAS matches the date pill.
+  // Each daily row carries network/campaign/adgroup/creative + day.
+  const daily = ADJ.data.by_creative_daily || [];
+  for (const r of daily) {
+    if (!adjIsMetaNetwork(r.network)) continue;
+    if (range && r.day && (r.day < range.since || r.day > range.until)) continue;
     accumulate(ADJ.byAdId,       adjExtractId(r.creative), r);
     accumulate(ADJ.byAdsetId,    adjExtractId(r.adgroup),  r);
     accumulate(ADJ.byCampaignId, adjExtractId(r.campaign), r);
   }
-  // by_adgroup ensures ad-set rows include rolled-up totals even when
-  // Meta has no per-ad creative match
-  for (const r of ADJ.data.by_adgroup || []) {
-    if ((r.network || "").indexOf("Facebook") < 0 && (r.network || "").indexOf("Instagram") < 0) continue;
-    const adsetKey = adjExtractId(r.adgroup);
-    if (adsetKey && !ADJ.byAdsetId.has(adsetKey)) accumulate(ADJ.byAdsetId, adsetKey, r);
-  }
-  for (const r of ADJ.data.by_campaign || []) {
-    if ((r.network || "").indexOf("Facebook") < 0 && (r.network || "").indexOf("Instagram") < 0) continue;
-    const campKey = adjExtractId(r.campaign);
-    if (campKey && !ADJ.byCampaignId.has(campKey)) accumulate(ADJ.byCampaignId, campKey, r);
+
+  // Fallback: if the daily dataset is empty for some reason, fall back to
+  // 30d totals so the dashboard still shows something useful.
+  if (ADJ.byAdId.size === 0 && ADJ.byCampaignId.size === 0) {
+    for (const r of ADJ.data.by_creative || []) {
+      if (!adjIsMetaNetwork(r.network)) continue;
+      accumulate(ADJ.byAdId,       adjExtractId(r.creative), r);
+      accumulate(ADJ.byAdsetId,    adjExtractId(r.adgroup),  r);
+      accumulate(ADJ.byCampaignId, adjExtractId(r.campaign), r);
+    }
   }
 }
 
@@ -1054,6 +1072,7 @@ function metaInstalls(window) {
 
 function renderMeta() {
   if (!META.data) return;
+  adjRebuildMapsForCurrentWindow();
   renderMetaKpis();
   renderMetaTable();
 
@@ -1166,13 +1185,13 @@ function aggregateMetaAds() {
 }
 
 function metaCols() {
-  // Adjust columns are always 30d (Adjust puller pulls 30d only).
-  // We label them so the user knows the join window.
+  // Adjust columns now respect the active date pill (matched against the
+  // per-day per-creative dataset).
   const adjCols = [
-    { key: "adj_revenue", label: "Revenue (30d)",num: true, fmt: v => v > 0 ? fmt.money(v) : "—" },
-    { key: "roas",        label: "ROAS",         num: true, fmt: v => v > 0 ? v.toFixed(0) + "%" : "—" },
-    { key: "profit",      label: "Profit",       num: true, fmt: profitFmt },
-    { key: "adj_installs",label: "Adj Inst (30d)",num: true },
+    { key: "adj_revenue", label: "Revenue",  num: true, fmt: v => v > 0 ? fmt.money(v) : "—" },
+    { key: "roas",        label: "ROAS",     num: true, fmt: v => v > 0 ? v.toFixed(0) + "%" : "—" },
+    { key: "profit",      label: "Profit",   num: true, fmt: profitFmt },
+    { key: "adj_installs",label: "Adj Inst", num: true },
   ];
   if (META.tab === "campaigns") return [
     { key: "campaign_name", label: "Campaign", drill: "campaign" },
