@@ -824,6 +824,87 @@ def build_revenue_index(customers: list) -> dict:
     }
 
 
+def compute_daily_rc(customers, days: int = 30) -> list:
+    """Per-day RC aggregation for the last `days` days (UTC).
+
+    Buckets each transaction by its purchase date and counts:
+      - revenue, weekly/monthly/yearly revenue
+      - new_subs (customer's first paid transaction on that day)
+      - renewals (any transaction marked is_renewal)
+      - per-tier new-sub counts
+      - canceled (best-effort: customers whose subscription expired on day
+        without renewal — uses _canceled_at if enrich set it, else 0)
+
+    Returns a list of {date, revenue, new_subs, renewals, weekly_*,
+    monthly_*, yearly_*} sorted oldest → newest.
+    """
+    today = datetime.now(timezone.utc).date()
+    daily = {}
+    for offset in range(days):
+        d = (today - timedelta(days=offset)).isoformat()
+        daily[d] = {
+            "date": d,
+            "revenue": 0.0,
+            "new_subs": 0,
+            "renewals": 0,
+            "canceled": 0,
+            "weekly_count": 0, "monthly_count": 0, "yearly_count": 0,
+            "weekly_rev": 0.0, "monthly_rev": 0.0, "yearly_rev": 0.0,
+        }
+
+    for c in customers:
+        transactions = c.get("_transactions") or []
+        sorted_txs = sorted(transactions, key=lambda t: t.get("ts") or 0)
+        first_paid_seen = False
+
+        for t in sorted_txs:
+            ts = t.get("ts") or 0
+            if ts <= 0:
+                continue
+            day_key = datetime.fromtimestamp(ts / 1000, tz=timezone.utc).date().isoformat()
+            if day_key not in daily:
+                # Track whether we've seen the first paid tx (it might be older
+                # than the 30d window) so day-of-first-purchase is correct
+                if not bool(t.get("is_renewal")):
+                    first_paid_seen = True
+                continue
+
+            amount = float(t.get("amount") or 0)
+            tier = t.get("tier") or "other"
+            is_renewal = bool(t.get("is_renewal"))
+            d = daily[day_key]
+
+            d["revenue"] += amount
+            if is_renewal:
+                d["renewals"] += 1
+            elif not first_paid_seen:
+                # First-ever paid transaction for this customer
+                d["new_subs"] += 1
+                first_paid_seen = True
+                if tier == "weekly":
+                    d["weekly_count"] += 1
+                elif tier == "monthly":
+                    d["monthly_count"] += 1
+                elif tier == "yearly":
+                    d["yearly_count"] += 1
+
+            if tier == "weekly":
+                d["weekly_rev"] += amount
+            elif tier == "monthly":
+                d["monthly_rev"] += amount
+            elif tier == "yearly":
+                d["yearly_rev"] += amount
+
+    out = []
+    for d in sorted(daily.values(), key=lambda x: x["date"]):
+        d["revenue"] = round(d["revenue"], 2)
+        d["weekly_rev"] = round(d["weekly_rev"], 2)
+        d["monthly_rev"] = round(d["monthly_rev"], 2)
+        d["yearly_rev"] = round(d["yearly_rev"], 2)
+        out.append(d)
+    return out
+
+
 # ══════════════════════════════════════════════════════════════════
 # FTP upload
 # ══════════════════════════════════════════════════════════════════
@@ -990,6 +1071,9 @@ def main() -> None:
     customers = rc_get_all_customers()
     customers = rc_enrich_customers(customers)
     rev_index = build_revenue_index(customers)
+    daily_rc = compute_daily_rc(customers, days=30)
+    print(f"  Daily RC: {len(daily_rc)} days, "
+          f"latest revenue ${daily_rc[-1]['revenue']:.2f}")
 
     # Build unified output
     print("\nBuilding JSON...")
@@ -1153,6 +1237,7 @@ def main() -> None:
         "ads": ads_out,
         "ad_groups": adgroups_out,
         "channels": channels_out,
+        "daily_rc": daily_rc,
         "totals": {
             r: {
                 "spend": round(sum(row[f"spend_{r}"] for row in campaigns_out), 2),

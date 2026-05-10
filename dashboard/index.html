@@ -268,6 +268,56 @@
         <tbody id="metaTableBody"></tbody>
       </table>
     </div>
+
+    <!-- ─── Subscription Health (global, from RevenueCat) ──── -->
+    <div class="meta-header" style="margin-top:32px">
+      <h2>Subscription Health</h2>
+      <span class="meta-updated" id="rcUpdated">—</span>
+    </div>
+    <div class="kpi-grid">
+      <div class="kpi-card kpi-highlight">
+        <div class="kpi-label">Active Subs</div>
+        <div class="kpi-value" id="rcActive">0</div>
+        <div class="kpi-sub" id="rcActiveSub">—</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Avg LTV</div>
+        <div class="kpi-value" id="rcLtv">$0</div>
+        <div class="kpi-sub">revenue ÷ paid subs</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Churn Rate</div>
+        <div class="kpi-value" id="rcChurn">0%</div>
+        <div class="kpi-sub" id="rcChurnSub">canceled ÷ subs</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Renewal Rate</div>
+        <div class="kpi-value" id="rcRenewal">0%</div>
+        <div class="kpi-sub" id="rcRenewalSub">renewals ÷ subs</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Total Revenue (all-time)</div>
+        <div class="kpi-value" id="rcTotalRev">$0</div>
+        <div class="kpi-sub" id="rcTotalRevSub">—</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">Total Paid Subs</div>
+        <div class="kpi-value" id="rcTotalSubs">0</div>
+        <div class="kpi-sub" id="rcTotalSubsSub">W·M·Y mix</div>
+      </div>
+    </div>
+
+    <!-- ─── Daily Health: Meta + Adjust + RevenueCat side-by-side ─ -->
+    <div class="meta-header" style="margin-top:32px">
+      <h2>Daily Health (last 30 days)</h2>
+      <span class="meta-updated">Sources: Meta · Adjust · RevenueCat</span>
+    </div>
+    <div class="table-wrap">
+      <table id="dailyTable">
+        <thead id="dailyTableHead"></thead>
+        <tbody id="dailyTableBody"></tbody>
+      </table>
+    </div>
   </section>
 
 </main>

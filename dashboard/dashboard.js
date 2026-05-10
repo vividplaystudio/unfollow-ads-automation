@@ -977,12 +977,29 @@ async function loadMetaData() {
     const res = await fetch("meta_ads.json?v=" + Date.now());
     if (!res.ok) throw new Error("HTTP " + res.status);
     META.data = await res.json();
-    await loadAdjustData();   // best-effort, doesn't block Meta render
+    await loadAdjustData();    // best-effort, doesn't block Meta render
+    await loadRevenueCatData();// best-effort
     renderMeta();
+    renderSubscriptionHealth();
+    renderDailyHealth();
   } catch (e) {
     console.error("Failed to load meta_ads.json:", e);
     document.getElementById("metaTableBody").innerHTML =
       `<tr><td colspan="20" class="empty-state"><div class="icon">⚠️</div>Could not load meta_ads.json<br><small>${e.message}</small></td></tr>`;
+  }
+}
+
+// RevenueCat data (the existing data.json from refresh_dashboard_json.py)
+const RC = { data: null };
+
+async function loadRevenueCatData() {
+  try {
+    const res = await fetch("data.json?v=" + Date.now());
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    RC.data = await res.json();
+  } catch (e) {
+    console.warn("RevenueCat data not available:", e.message);
+    RC.data = null;
   }
 }
 
@@ -1388,6 +1405,141 @@ function renderMetaTable() {
     : "";
 
   document.getElementById("metaTableInfo").textContent = `${rows.length} rows`;
+}
+
+// ─── Subscription Health (global, from RevenueCat) ──────────
+function renderSubscriptionHealth() {
+  if (!RC.data) return;
+  const channels = RC.data.channels || [];
+  let revenue = 0, paidSubs = 0, active = 0, canceled = 0, renewals = 0;
+  let weekly = 0, monthly = 0, yearly = 0;
+  for (const c of channels) {
+    revenue  += +(c.revenue_all || 0);
+    paidSubs += +(c.subs_all || 0);
+    active   += +(c.active_all || 0);
+    canceled += +(c.canceled_all || 0);
+    renewals += +(c.renewals_all || 0);
+    weekly   += +(c.weekly_subs_all || 0);
+    monthly  += +(c.monthly_subs_all || 0);
+    yearly   += +(c.yearly_subs_all || 0);
+  }
+  const ltv = paidSubs > 0 ? revenue / paidSubs : 0;
+  const churn = paidSubs > 0 ? canceled / paidSubs * 100 : 0;
+  const renewRate = paidSubs > 0 ? renewals / paidSubs * 100 : 0;
+
+  document.getElementById("rcActive").textContent = fmt.num(active);
+  document.getElementById("rcActiveSub").textContent = `${fmt.num(paidSubs)} total subs`;
+
+  document.getElementById("rcLtv").textContent = fmt.money(ltv);
+
+  document.getElementById("rcChurn").textContent = churn.toFixed(1) + "%";
+  document.getElementById("rcChurnSub").textContent = `${fmt.num(canceled)} canceled all-time`;
+
+  document.getElementById("rcRenewal").textContent = renewRate.toFixed(0) + "%";
+  document.getElementById("rcRenewalSub").textContent = `${fmt.num(renewals)} renewal events`;
+
+  document.getElementById("rcTotalRev").textContent = fmt.money(revenue);
+  // Channel breakdown
+  const byChannel = channels.slice().sort((a, b) => (b.revenue_all || 0) - (a.revenue_all || 0));
+  document.getElementById("rcTotalRevSub").textContent =
+    byChannel.slice(0, 3).map(c => `${c.channel.replace(" / Unattributed", "")} ${fmt.money(c.revenue_all || 0)}`).join(" · ");
+
+  document.getElementById("rcTotalSubs").textContent = fmt.num(paidSubs);
+  document.getElementById("rcTotalSubsSub").textContent = `${weekly} W · ${monthly} M · ${yearly} Y`;
+
+  const lu = RC.data.last_updated ? new Date(RC.data.last_updated) : null;
+  if (lu) {
+    const mins = Math.round((Date.now() - lu) / 60000);
+    document.getElementById("rcUpdated").textContent =
+      "updated " + (mins < 60 ? `${mins}m ago` : `${Math.round(mins/60)}h ago`);
+  }
+}
+
+// ─── Daily Health: Meta + Adjust + RC side-by-side ──────────
+function renderDailyHealth() {
+  const head = document.getElementById("dailyTableHead");
+  const body = document.getElementById("dailyTableBody");
+  if (!head || !body) return;
+
+  // Build per-day Meta totals
+  const metaByDay = new Map();
+  for (const r of META.data?.ads || []) {
+    if (!r.date) continue;
+    const cur = metaByDay.get(r.date) || { spend: 0, installs: 0, clicks: 0 };
+    cur.spend    += r.spend || 0;
+    cur.installs += (r.action_mobile_app_install || r.action_omni_app_install || 0);
+    cur.clicks   += r.clicks || 0;
+    metaByDay.set(r.date, cur);
+  }
+
+  // Build per-day Adjust totals (Meta-attributed networks only)
+  const adjByDay = new Map();
+  for (const r of ADJ.data?.by_creative_daily || []) {
+    if (!adjIsMetaNetwork(r.network)) continue;
+    const day = r.day;
+    if (!day) continue;
+    const cur = adjByDay.get(day) || {
+      installs: 0, revenue: 0, weekly: 0, monthly: 0, yearly: 0,
+    };
+    cur.installs += +(r.installs || 0);
+    cur.revenue  += +(r.all_revenue || 0);
+    cur.weekly   += +(r.com_weekly_events || 0);
+    cur.monthly  += +(r.com_monthly_events || 0);
+    cur.yearly   += +(r.com_yearly_events || 0);
+    adjByDay.set(day, cur);
+  }
+
+  // RC daily (global, all channels)
+  const rcByDay = new Map();
+  for (const r of RC.data?.daily_rc || []) {
+    rcByDay.set(r.date, r);
+  }
+
+  // Union of all days, sorted newest first
+  const allDays = new Set([...metaByDay.keys(), ...adjByDay.keys(), ...rcByDay.keys()]);
+  const days = [...allDays].sort().reverse();
+
+  const cols = [
+    { label: "Date" },
+    { label: "Meta Spend",  num: true },
+    { label: "Meta Inst",   num: true },
+    { label: "Adj Inst",    num: true },
+    { label: "Adj Rev",     num: true },
+    { label: "Adj Subs (W·M·Y)", num: true, title: "Weekly · Monthly · Yearly subscribes attributed to Meta" },
+    { label: "RC Rev",      num: true, title: "RevenueCat real revenue (all channels including renewals)" },
+    { label: "RC New",      num: true, title: "First-time subscribers across all sources" },
+    { label: "RC Renewals", num: true },
+    { label: "Match",       num: true, title: "Adj Rev ÷ RC Rev — should be near 100% for Meta-attributed share" },
+  ];
+  head.innerHTML = "<tr>" + cols.map(c =>
+    `<th class="${c.num ? "num" : ""}"${c.title ? ` title="${c.title}"` : ""}>${c.label}</th>`
+  ).join("") + "</tr>";
+
+  if (!days.length) {
+    body.innerHTML = `<tr><td colspan="${cols.length}" class="empty-state">No daily data yet</td></tr>`;
+    return;
+  }
+
+  body.innerHTML = days.map(d => {
+    const m = metaByDay.get(d) || { spend: 0, installs: 0, clicks: 0 };
+    const a = adjByDay.get(d) || { installs: 0, revenue: 0, weekly: 0, monthly: 0, yearly: 0 };
+    const r = rcByDay.get(d) || { revenue: 0, new_subs: 0, renewals: 0 };
+    const adjSubs = a.weekly + a.monthly + a.yearly;
+    const matchPct = (r.revenue || 0) > 0 ? (a.revenue / r.revenue * 100) : 0;
+    const matchClass = matchPct === 0 ? "" : matchPct > 80 ? "profit-pos" : matchPct < 30 ? "profit-neg" : "";
+    return `<tr>
+      <td>${d}</td>
+      <td class="num">${m.spend > 0 ? fmt.money(m.spend) : "—"}</td>
+      <td class="num">${m.installs ? fmt.num(m.installs) : "—"}</td>
+      <td class="num">${a.installs ? fmt.num(a.installs) : "—"}</td>
+      <td class="num">${a.revenue > 0 ? fmt.money(a.revenue) : "—"}</td>
+      <td class="num">${adjSubs > 0 ? `${a.weekly}·${a.monthly}·${a.yearly}` : "—"}</td>
+      <td class="num">${r.revenue > 0 ? fmt.money(r.revenue) : "—"}</td>
+      <td class="num">${r.new_subs ? fmt.num(r.new_subs) : "—"}</td>
+      <td class="num">${r.renewals ? fmt.num(r.renewals) : "—"}</td>
+      <td class="num"><span class="${matchClass}">${matchPct > 0 ? matchPct.toFixed(0) + "%" : "—"}</span></td>
+    </tr>`;
+  }).join("");
 }
 
 function setMetaTab(name) {
