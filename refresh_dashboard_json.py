@@ -905,6 +905,83 @@ def compute_daily_rc(customers, days: int = 30) -> list:
     return out
 
 
+def compute_cohort_retention(customers) -> dict:
+    """Per-tier subscription retention curves.
+
+    For each tier (weekly/monthly/yearly), count what % of customers in a
+    cohort N days old still have an active subscription at day N. We use
+    transaction count as the survival proxy:
+
+      D{n} retained ⟺ customer has ≥ ((n / cycle_days) + 1) transactions
+      of this tier (initial purchase + n/cycle renewals)
+
+    Cohort is filtered to customers whose FIRST paid tx was ≥ N days ago,
+    so D28 measures only people who've had a chance to renew 4 times.
+
+    Returns:
+      {
+        "weekly":  {"D7": {cohort_size, retained, rate, required_txs}, ...},
+        "monthly": {...},
+        "yearly":  {...},
+      }
+    """
+    today = datetime.now(timezone.utc)
+
+    tier_specs = {
+        "weekly":  {"cycle": 7,   "checkpoints": [7, 14, 28, 56, 84]},
+        "monthly": {"cycle": 30,  "checkpoints": [30, 60, 90, 180]},
+        "yearly":  {"cycle": 365, "checkpoints": [365]},
+    }
+
+    # Pre-extract per-customer (first_tier, first_dt, tier_tx_counts)
+    per_cust = []
+    for c in customers:
+        txs = sorted(c.get("_transactions") or [], key=lambda t: t.get("ts") or 0)
+        if not txs:
+            continue
+        first_tier = txs[0].get("tier")
+        first_ts = txs[0].get("ts")
+        if not first_ts or first_tier not in tier_specs:
+            continue
+        first_dt = datetime.fromtimestamp(first_ts / 1000, tz=timezone.utc)
+        tier_tx_counts = {"weekly": 0, "monthly": 0, "yearly": 0}
+        for t in txs:
+            tt = t.get("tier")
+            if tt in tier_tx_counts:
+                tier_tx_counts[tt] += 1
+        per_cust.append({
+            "first_tier": first_tier,
+            "first_dt": first_dt,
+            "tier_tx_counts": tier_tx_counts,
+            "is_active": bool(c.get("_active")),
+        })
+
+    results = {}
+    for tier, spec in tier_specs.items():
+        cycle = spec["cycle"]
+        results[tier] = {}
+        for d in spec["checkpoints"]:
+            required_txs = (d // cycle) + 1
+            cohort_size = 0
+            retained = 0
+            for cust in per_cust:
+                if cust["first_tier"] != tier:
+                    continue
+                days_since = (today - cust["first_dt"]).days
+                if days_since < d:
+                    continue
+                cohort_size += 1
+                if cust["tier_tx_counts"][tier] >= required_txs:
+                    retained += 1
+            results[tier][f"D{d}"] = {
+                "cohort_size": cohort_size,
+                "retained": retained,
+                "rate": round(retained / cohort_size * 100, 1) if cohort_size else 0,
+                "required_txs": required_txs,
+            }
+    return results
+
+
 # ══════════════════════════════════════════════════════════════════
 # FTP upload
 # ══════════════════════════════════════════════════════════════════
@@ -1074,6 +1151,10 @@ def main() -> None:
     daily_rc = compute_daily_rc(customers, days=30)
     print(f"  Daily RC: {len(daily_rc)} days, "
           f"latest revenue ${daily_rc[-1]['revenue']:.2f}")
+    cohort_retention = compute_cohort_retention(customers)
+    if cohort_retention.get("weekly", {}).get("D7"):
+        d7 = cohort_retention["weekly"]["D7"]
+        print(f"  Weekly D7 retention: {d7['rate']}% ({d7['retained']}/{d7['cohort_size']})")
 
     # Build unified output
     print("\nBuilding JSON...")
@@ -1238,6 +1319,7 @@ def main() -> None:
         "ad_groups": adgroups_out,
         "channels": channels_out,
         "daily_rc": daily_rc,
+        "cohort_retention": cohort_retention,
         "totals": {
             r: {
                 "spend": round(sum(row[f"spend_{r}"] for row in campaigns_out), 2),

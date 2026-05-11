@@ -981,6 +981,7 @@ async function loadMetaData() {
     await loadRevenueCatData();// best-effort
     renderMeta();
     renderSubscriptionHealth();
+    renderCohortRetention();
     renderDailyHealth();
   } catch (e) {
     console.error("Failed to load meta_ads.json:", e);
@@ -1453,6 +1454,85 @@ function renderSubscriptionHealth() {
     document.getElementById("rcUpdated").textContent =
       "updated " + (mins < 60 ? `${mins}m ago` : `${Math.round(mins/60)}h ago`);
   }
+}
+
+// ─── Cohort Retention vs industry benchmarks ───────────────
+// Utility-app benchmarks (sourced from RevenueCat State of Subscription
+// Apps + Apple category data). [low, median, high] in percent.
+const RETENTION_BENCHMARKS = {
+  weekly: {
+    D7:  [25, 40, 55],
+    D14: [15, 25, 40],
+    D28: [8,  13, 22],
+    D56: [4,  7,  12],
+    D84: [2,  4,  8],
+  },
+  monthly: {
+    D30:  [40, 55, 70],
+    D60:  [25, 35, 50],
+    D90:  [15, 25, 35],
+    D180: [8,  15, 25],
+  },
+  yearly: {
+    D365: [55, 65, 78],
+  },
+};
+
+function retentionVerdict(rate, bench) {
+  if (!bench) return { label: "—", cls: "" };
+  const [low, med, high] = bench;
+  if (rate >= high) return { label: "top quartile", cls: "profit-pos" };
+  if (rate >= med)  return { label: "above median", cls: "profit-pos" };
+  if (rate >= low)  return { label: "at median",    cls: "" };
+  return { label: "below median", cls: "profit-neg" };
+}
+
+function renderCohortRetention() {
+  const head = document.getElementById("retentionTableHead");
+  const body = document.getElementById("retentionTableBody");
+  if (!head || !body) return;
+
+  const ret = RC.data?.cohort_retention || {};
+  const cols = [
+    { label: "Tier" },
+    { label: "Checkpoint", title: "Days since first paid transaction" },
+    { label: "Cohort", num: true, title: "Subscribers who started ≥ N days ago" },
+    { label: "Retained", num: true, title: "Of those, how many had enough renewals to still be subscribed at day N" },
+    { label: "Rate", num: true },
+    { label: "Industry (low–med–high)", num: true, title: "Utility-app benchmarks: bottom quartile, median, top quartile" },
+    { label: "Verdict" },
+  ];
+  head.innerHTML = "<tr>" + cols.map(c =>
+    `<th class="${c.num ? "num" : ""}"${c.title ? ` title="${c.title}"` : ""}>${c.label}</th>`
+  ).join("") + "</tr>";
+
+  const tierLabel = { weekly: "Weekly $4.99", monthly: "Monthly $9.99", yearly: "Yearly $22.99" };
+  const rows = [];
+  for (const tier of ["weekly", "monthly", "yearly"]) {
+    const tierData = ret[tier] || {};
+    const checkpoints = Object.keys(tierData);
+    if (!checkpoints.length) continue;
+    let firstRow = true;
+    for (const cp of checkpoints) {
+      const r = tierData[cp];
+      const bench = RETENTION_BENCHMARKS[tier]?.[cp];
+      const v = retentionVerdict(r.rate, bench);
+      const benchTxt = bench ? `${bench[0]}% – ${bench[1]}% – ${bench[2]}%` : "—";
+      rows.push(`<tr>
+        <td>${firstRow ? `<strong>${tierLabel[tier]}</strong>` : ""}</td>
+        <td>${cp}</td>
+        <td class="num">${fmt.num(r.cohort_size)}</td>
+        <td class="num">${fmt.num(r.retained)}</td>
+        <td class="num"><strong>${r.rate.toFixed(1)}%</strong></td>
+        <td class="num"><span class="muted">${benchTxt}</span></td>
+        <td><span class="${v.cls}">${v.label}</span></td>
+      </tr>`);
+      firstRow = false;
+    }
+  }
+  body.innerHTML = rows.length
+    ? rows.join("")
+    : `<tr><td colspan="${cols.length}" class="empty-state">No retention data yet — needs 7+ days of history</td></tr>`;
 }
 
 // ─── Daily Health: Meta + Adjust + RC side-by-side ──────────
