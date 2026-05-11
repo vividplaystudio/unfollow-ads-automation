@@ -1510,6 +1510,7 @@ function renderDailyHealth() {
     { label: "RC New",      num: true, title: "First-time subscribers across all sources" },
     { label: "RC Renewals", num: true },
     { label: "Match",       num: true, title: "Adj Rev ÷ RC Rev — should be near 100% for Meta-attributed share" },
+    { label: "Net Profit",  num: true, title: "RC revenue − Meta spend (positive = made money today)" },
   ];
   head.innerHTML = "<tr>" + cols.map(c =>
     `<th class="${c.num ? "num" : ""}"${c.title ? ` title="${c.title}"` : ""}>${c.label}</th>`
@@ -1527,6 +1528,17 @@ function renderDailyHealth() {
     const adjSubs = a.weekly + a.monthly + a.yearly;
     const matchPct = (r.revenue || 0) > 0 ? (a.revenue / r.revenue * 100) : 0;
     const matchClass = matchPct === 0 ? "" : matchPct > 80 ? "profit-pos" : matchPct < 30 ? "profit-neg" : "";
+
+    // Net profit: RC revenue (truth) − Meta ad spend. Empty if neither side has data.
+    const hasFinancials = (r.revenue || 0) > 0 || m.spend > 0;
+    const profit = (r.revenue || 0) - (m.spend || 0);
+    let profitCell = "—";
+    if (hasFinancials) {
+      const sign = profit >= 0 ? "+" : "−";
+      const cls = profit >= 0 ? "profit-pos" : "profit-neg";
+      profitCell = `<strong class="${cls}">${sign}${fmt.money(Math.abs(profit))}</strong>`;
+    }
+
     return `<tr>
       <td>${d}</td>
       <td class="num">${m.spend > 0 ? fmt.money(m.spend) : "—"}</td>
@@ -1538,6 +1550,7 @@ function renderDailyHealth() {
       <td class="num">${r.new_subs ? fmt.num(r.new_subs) : "—"}</td>
       <td class="num">${r.renewals ? fmt.num(r.renewals) : "—"}</td>
       <td class="num"><span class="${matchClass}">${matchPct > 0 ? matchPct.toFixed(0) + "%" : "—"}</span></td>
+      <td class="num">${profitCell}</td>
     </tr>`;
   }).join("");
 }
