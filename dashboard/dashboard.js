@@ -1448,6 +1448,25 @@ function renderSubscriptionHealth() {
   document.getElementById("rcTotalSubs").textContent = fmt.num(paidSubs);
   document.getElementById("rcTotalSubsSub").textContent = `${weekly} W · ${monthly} M · ${yearly} Y`;
 
+  // Refund rate (30d). Sum gross revenue for last 30 days from daily_rc
+  // for the denominator; refunds.last_30d_amount is the numerator.
+  const refunds = RC.data.refunds || {};
+  const daily30 = RC.data.daily_rc || [];
+  const grossRev30d = daily30.reduce((s, r) => s + (r.revenue || 0), 0);
+  const refundAmt30d = refunds.last_30d_amount || 0;
+  const refundCount30d = refunds.last_30d_count || 0;
+  const refundRate = grossRev30d > 0 ? refundAmt30d / grossRev30d * 100 : 0;
+  const rateEl = document.getElementById("rcRefundRate");
+  rateEl.textContent = refundRate.toFixed(1) + "%";
+  // Color: green if <2%, neutral 2-5%, red if >5% (industry red flag)
+  rateEl.style.color = refundRate < 2 ? "var(--success, #10b981)"
+    : refundRate > 5 ? "var(--danger, #ef4444)"
+    : "";
+  document.getElementById("rcRefundRateSub").textContent =
+    refundCount30d > 0
+      ? `${refundCount30d} refunds · ${fmt.money(refundAmt30d)} of ${fmt.money(grossRev30d)}`
+      : "no refunds in last 30d";
+
   const lu = RC.data.last_updated ? new Date(RC.data.last_updated) : null;
   if (lu) {
     const mins = Math.round((Date.now() - lu) / 60000);

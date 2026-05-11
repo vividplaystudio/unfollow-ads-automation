@@ -264,6 +264,9 @@ def _classify_product_tier(product_id: str, period_type: str = "") -> str:
     return "other"
 
 
+_LAST_REFUND_SUMMARY = {}  # populated as side effect of fetch_webhook_events()
+
+
 def fetch_webhook_events() -> dict:
     """
     Pull captured RC webhook events from the server endpoint and return a
@@ -273,9 +276,15 @@ def fetch_webhook_events() -> dict:
     Returns empty dict if RC_WEBHOOK_SECRET is not configured — in that case
     we fall back to inference for every customer, which is what the script
     was doing before webhooks existed.
+
+    Side effect: populates _LAST_REFUND_SUMMARY with refund stats from the
+    same fetch, so main() can include it in the output without re-pulling.
     """
+    global _LAST_REFUND_SUMMARY
+
     if not RC_WEBHOOK_SECRET:
         print("  [webhooks] RC_WEBHOOK_SECRET not set — skipping webhook fetch")
+        _LAST_REFUND_SUMMARY = {}
         return {}
 
     url = f"{RC_EVENTS_URL}?limit=50000"
@@ -287,6 +296,7 @@ def fetch_webhook_events() -> dict:
             data = json.loads(resp.read().decode())
     except Exception as e:
         print(f"  [webhooks] fetch failed: {type(e).__name__}: {e}")
+        _LAST_REFUND_SUMMARY = {}
         return {}
 
     events = data.get("events", [])
@@ -296,21 +306,46 @@ def fetch_webhook_events() -> dict:
     by_user = defaultdict(list)
     total_revenue = 0.0
     counted_by_type = defaultdict(int)
+
+    # Refund tracking — RC fires CANCELLATION events with cancel_reason ∈
+    # {REFUND, CUSTOMER_SUPPORT} for refunds, plus standalone REFUND events
+    # in newer schema. Either way we track them as a refund.
+    today = datetime.now(timezone.utc)
+    refunds_total_count = 0
+    refunds_total_amount = 0.0
+    refunds_30d_count = 0
+    refunds_30d_amount = 0.0
+    refunds_by_day = defaultdict(lambda: {"count": 0, "amount": 0.0})
+
     for rec in events:
         ev = rec.get("event") or {}
         etype = ev.get("type")
+        ts = int(ev.get("purchased_at_ms") or ev.get("event_timestamp_ms") or 0)
+        price = float(ev.get("price") or 0)
+
+        # Detect refund events
+        is_refund = etype == "REFUND" or (
+            etype == "CANCELLATION"
+            and (ev.get("cancel_reason") or "").upper() in {"REFUND", "CUSTOMER_SUPPORT"}
+        )
+        if is_refund and ts > 0:
+            amount = abs(price)
+            refunds_total_count += 1
+            refunds_total_amount += amount
+            day_key = datetime.fromtimestamp(ts / 1000, tz=timezone.utc).date().isoformat()
+            refunds_by_day[day_key]["count"] += 1
+            refunds_by_day[day_key]["amount"] += amount
+            ev_dt = datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
+            if (today - ev_dt).days <= 30:
+                refunds_30d_count += 1
+                refunds_30d_amount += amount
+
+        # Standard revenue events
         if etype not in revenue_types:
             continue
         app_user_id = ev.get("app_user_id") or ev.get("original_app_user_id")
-        if not app_user_id:
+        if not app_user_id or price <= 0 or ts <= 0:
             continue
-        price = float(ev.get("price") or 0)
-        if price <= 0:
-            continue
-        ts = int(ev.get("purchased_at_ms") or ev.get("event_timestamp_ms") or 0)
-        if ts <= 0:
-            continue
-
         tier = _classify_product_tier(
             ev.get("product_id", ""), ev.get("period_type", "")
         )
@@ -323,10 +358,34 @@ def fetch_webhook_events() -> dict:
         total_revenue += price
         counted_by_type[etype] += 1
 
+    # Build last-30d daily refunds list
+    refunds_30d_daily = []
+    for offset in range(30):
+        d = (today.date() - timedelta(days=offset)).isoformat()
+        r = refunds_by_day.get(d, {"count": 0, "amount": 0.0})
+        refunds_30d_daily.append({
+            "date": d,
+            "count": r["count"],
+            "amount": round(r["amount"], 2),
+        })
+    refunds_30d_daily.reverse()  # oldest first
+
+    _LAST_REFUND_SUMMARY = {
+        "total_count": refunds_total_count,
+        "total_amount": round(refunds_total_amount, 2),
+        "last_30d_count": refunds_30d_count,
+        "last_30d_amount": round(refunds_30d_amount, 2),
+        "daily_30d": refunds_30d_daily,
+    }
+
     print(
         f"  [webhooks] indexed {sum(len(v) for v in by_user.values())} "
         f"revenue events for {len(by_user)} users — total ${total_revenue:.2f} — "
         f"by type: {dict(counted_by_type)}"
+    )
+    print(
+        f"  [webhooks] refunds: all-time {refunds_total_count} (${refunds_total_amount:.2f}) "
+        f"· 30d {refunds_30d_count} (${refunds_30d_amount:.2f})"
     )
     return dict(by_user)
 
@@ -1320,6 +1379,7 @@ def main() -> None:
         "channels": channels_out,
         "daily_rc": daily_rc,
         "cohort_retention": cohort_retention,
+        "refunds": _LAST_REFUND_SUMMARY,
         "totals": {
             r: {
                 "spend": round(sum(row[f"spend_{r}"] for row in campaigns_out), 2),
