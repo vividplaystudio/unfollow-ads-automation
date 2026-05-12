@@ -23,6 +23,12 @@ jobs:
           python-version: "3.11"
 
       - name: Run dashboard refresher (JSON + FTP)
+        # Don't fail the whole job if the ASA token is briefly stale —
+        # this step is paired with refresh-token.yml on a 30-min cron and
+        # an occasional 401 here is recovered automatically next run.
+        # Failing the job triggers GitHub's email spam; warn-only is
+        # plenty since Meta + Adjust steps still run with if: always().
+        continue-on-error: true
         env:
           SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
