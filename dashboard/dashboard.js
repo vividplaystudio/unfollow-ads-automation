@@ -1224,6 +1224,10 @@ function aggregateMetaAds() {
   });
 }
 
+// Apple takes 15% commission (Small Business Program rate). Net columns
+// reflect what actually lands in your bank after Apple's cut.
+const APPLE_KEEP = 0.85;
+
 // Merge a Meta row with its Adjust counterpart, computing all derived
 // columns (CTR/CPI/CPR/ROAS/profit/yearly mix). Used both per-ad and at
 // every group level (campaign / adset).
@@ -1234,6 +1238,7 @@ function enrichWithAdj(row, adj) {
   const weekly  = adj.weekly  || 0;
   const subs    = yearly + monthly + weekly;
   const adjRev  = adj.revenue || 0;
+  const netRev  = adjRev * APPLE_KEEP;
   return {
     ...row,
     ctr: row.impressions > 0 ? row.clicks / row.impressions * 100 : 0,
@@ -1253,6 +1258,10 @@ function enrichWithAdj(row, adj) {
     cps: subs > 0 ? row.spend / subs : 0,                         // cost per sub (Adjust)
     roas: row.spend > 0 ? adjRev / row.spend * 100 : 0,
     profit: adjRev - row.spend,
+    // After Apple's 15% commission — true take-home
+    net_revenue: netRev,
+    net_roas: row.spend > 0 ? netRev / row.spend * 100 : 0,
+    net_profit: netRev - row.spend,
   };
 }
 
@@ -1260,10 +1269,17 @@ function metaCols() {
   // Adjust columns now respect the active date pill (matched against the
   // per-day per-creative dataset). W/M/Y are the live paywall events
   // (Com_Weekly $4.99, Com_Monthly $9.99, Com_Yearly $22.99).
+  // Net columns are gross × 0.85 (after Apple's 15% commission).
   const adjCols = [
     { key: "adj_revenue",   label: "Revenue",   num: true, fmt: v => v > 0 ? fmt.money(v) : "—" },
+    { key: "net_revenue",   label: "Rev (×0.85)", num: true, fmt: v => v > 0 ? fmt.money(v) : "—",
+      title: "Revenue after Apple's 15% commission" },
     { key: "roas",          label: "ROAS",      num: true, fmt: v => v > 0 ? v.toFixed(0) + "%" : "—" },
+    { key: "net_roas",      label: "Net ROAS",  num: true, fmt: v => v > 0 ? v.toFixed(0) + "%" : "—",
+      title: "ROAS after Apple's 15% commission — true return on ad spend" },
     { key: "profit",        label: "Profit",    num: true, fmt: profitFmt },
+    { key: "net_profit",    label: "Net Profit", num: true, fmt: profitFmt,
+      title: "True take-home: (Revenue × 0.85) − Spend" },
     { key: "adj_subs_total",label: "Subs",      num: true },
     { key: "cps",           label: "Cost/Sub",  num: true, fmt: v => v > 0 ? fmt.money(v) : "—" },
     { key: "adj_weekly",    label: "W",         num: true, title: "Com_Weekly $4.99" },
