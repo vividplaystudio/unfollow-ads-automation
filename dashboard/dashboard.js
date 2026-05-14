@@ -945,13 +945,18 @@ const META = {
 };
 
 // Returns {since, until} ISO date strings (inclusive) for the active range,
-// or null if custom dates are missing.
+// or null if custom dates are missing. Uses the user's LOCAL calendar date
+// for "today/yesterday" (matches what Facebook Ads Manager shows them) and
+// the data window for 7d/14d/30d totals.
+function localTodayIso() {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+}
+
 function metaDateRange() {
-  // Use the latest date present in the per-day data as "today" — Meta's
-  // date_start is in account timezone, which may differ from the user's.
+  const today = localTodayIso();
   const dates = (META.data?.ads || []).map(r => r.date).filter(Boolean).sort();
-  const latest = dates.length ? dates[dates.length - 1] : new Date().toISOString().slice(0, 10);
-  const earliest = dates.length ? dates[0] : latest;
+  const earliest = dates.length ? dates[0] : today;
 
   const sub = (iso, days) => {
     const d = new Date(iso + "T00:00:00Z");
@@ -960,15 +965,15 @@ function metaDateRange() {
   };
 
   switch (META.range) {
-    case "today":     return { since: latest, until: latest };
-    case "yesterday": return { since: sub(latest, 1), until: sub(latest, 1) };
-    case "7d":        return { since: sub(latest, 6),  until: latest };
-    case "14d":       return { since: sub(latest, 13), until: latest };
-    case "30d":       return { since: earliest, until: latest };
+    case "today":     return { since: today, until: today };
+    case "yesterday": return { since: sub(today, 1), until: sub(today, 1) };
+    case "7d":        return { since: sub(today, 6),  until: today };
+    case "14d":       return { since: sub(today, 13), until: today };
+    case "30d":       return { since: earliest, until: today };
     case "custom":
       if (!META.customFrom || !META.customTo) return null;
       return { since: META.customFrom, until: META.customTo };
-    default:          return { since: earliest, until: latest };
+    default:          return { since: earliest, until: today };
   }
 }
 
@@ -1098,8 +1103,28 @@ function metaInstalls(window) {
   return a.mobile_app_install || a.omni_app_install || 0;
 }
 
+function updateMetaPillLabels() {
+  const fmtDate = iso => {
+    const d = new Date(iso + "T00:00:00");
+    return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  };
+  const today = localTodayIso();
+  const sub = (iso, days) => {
+    const d = new Date(iso + "T00:00:00Z");
+    d.setUTCDate(d.getUTCDate() - days);
+    return d.toISOString().slice(0, 10);
+  };
+  const set = (range, txt) => {
+    const el = document.querySelector(`[data-meta-range="${range}"]`);
+    if (el) el.textContent = txt;
+  };
+  set("today", `Today (${fmtDate(today)})`);
+  set("yesterday", `Yesterday (${fmtDate(sub(today, 1))})`);
+}
+
 function renderMeta() {
   if (!META.data) return;
+  updateMetaPillLabels();
   adjRebuildMapsForCurrentWindow();
   renderMetaKpis();
   renderMetaTable();
