@@ -1190,6 +1190,19 @@ function renderMetaKpis() {
     : roas > 0 ? `need ${(100 - roas).toFixed(0)}% more` : "—";
   roasSub.style.color = roas >= 100 ? "var(--success, #10b981)" : "var(--danger, #ef4444)";
 
+  // Net profit after Apple's 15% commission
+  const netRev = adjRev * 0.85;
+  const netProfit = netRev - spend;
+  const netRoas = spend > 0 ? netRev / spend * 100 : 0;
+  const npEl = document.getElementById("metaNetProfit");
+  const npSub = document.getElementById("metaNetProfitSub");
+  const npSign = netProfit >= 0 ? "+" : "−";
+  npEl.textContent = npSign + fmt.money(Math.abs(netProfit));
+  npEl.style.color = netProfit >= 0 ? "var(--success, #10b981)" : "var(--danger, #ef4444)";
+  npSub.textContent = netRoas > 0
+    ? `Net ROAS ${netRoas.toFixed(0)}% · ${rangeLabel}`
+    : rangeLabel;
+
   // "Results" card now reflects Adjust subscribes (real attribution)
   // rather than Meta's app_custom_event.other proxy
   document.getElementById("metaResults").textContent = fmt.num(adjSubs);
