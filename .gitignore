@@ -1,0 +1,28 @@
+# Secret files used by PHP scripts on the dashboard host. These contain
+# tokens/passwords and must never be committed.
+.token
+.rc_webhook_secret
+.env
+.env.*
+*.pem
+*.key
+credentials.json
+service_account*.json
+
+# Python noise
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Editor / OS noise
+.DS_Store
+.vscode/
+.idea/
+*.swp
+
+# Local outputs (the puller writes data.json to /tmp, but defensively
+# block any accidental commit if someone runs it from the repo dir)
+data.json
+meta_ads.json
+adjust.json
