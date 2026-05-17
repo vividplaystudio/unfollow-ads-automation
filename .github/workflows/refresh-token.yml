@@ -2,8 +2,11 @@ name: Refresh Apple Search Ads Token
 
 on:
   schedule:
-    # Every 30 minutes
-    - cron: "*/30 * * * *"
+    # GitHub Actions deprioritizes scheduled runs at top-of-hour
+    # (xx:00 and xx:30) during peak load. Use off-peak minutes
+    # (xx:07 and xx:37) — Actions docs explicitly recommend this
+    # to reduce skipped/delayed runs.
+    - cron: "7,37 * * * *"
   # Also allow manual trigger
   workflow_dispatch:
 
