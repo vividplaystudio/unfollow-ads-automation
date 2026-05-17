@@ -655,3 +655,42 @@ tbody tr.flash-error { animation: flashError 1.4s ease-out; }
 #metaTable td.drill:hover { background: #eef2ff; }
 #metaTable th[data-meta-sort] { cursor: pointer; user-select: none; }
 #metaTable th[data-meta-sort]:hover { background: #f3f4f6; }
+
+/* Status badge — sits before the campaign/adset/ad name */
+.meta-status {
+  display: inline-block;
+  width: 18px;
+  text-align: center;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  padding: 2px 0;
+  border-radius: 3px;
+  margin-right: 6px;
+  vertical-align: middle;
+}
+.meta-status.status-active   { color: #10b981; }
+.meta-status.status-paused   { color: #6b7280; background: #f3f4f6; }
+.meta-status.status-archived { color: #9ca3af; }
+.meta-status.status-deleted  { color: #ef4444; }
+.meta-status.status-issue    { color: #f59e0b; }
+.meta-status.status-pending  { color: #6366f1; }
+.meta-status.status-unknown  { color: #9ca3af; }
+
+/* Inactive rows fade out so active winners pop */
+#metaTable tr.meta-row-inactive { opacity: 0.55; }
+#metaTable tr.meta-row-inactive:hover { opacity: 1; }
+
+/* Active-only toolbar toggle */
+.meta-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text-muted, #6b7280);
+  cursor: pointer;
+  user-select: none;
+  margin-right: 14px;
+}
+.meta-toggle input[type="checkbox"] { cursor: pointer; }
+.meta-toggle:hover { color: var(--text); }

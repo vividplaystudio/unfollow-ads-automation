@@ -194,6 +194,31 @@ def summarize(rows: list) -> dict:
 
 
 # ══════════════════════════════════════════════════════════════════
+# Status (on/off/paused) fetchers
+# ══════════════════════════════════════════════════════════════════
+
+def fetch_statuses(level: str) -> dict:
+    """Fetch id → {status, effective_status, name} for every campaign/
+    adset/ad in the account. Used by the dashboard to flag paused items.
+
+    level: 'campaigns' | 'adsets' | 'ads'
+    """
+    params = {
+        "fields": "id,name,status,effective_status",
+        "limit": 500,
+    }
+    rows = meta_paginated(f"act_{META_AD_ACCOUNT_ID}/{level}", params)
+    out = {}
+    for r in rows:
+        out[r["id"]] = {
+            "name": r.get("name", ""),
+            "status": r.get("status", ""),
+            "effective_status": r.get("effective_status", ""),
+        }
+    return out
+
+
+# ══════════════════════════════════════════════════════════════════
 # FTP upload (mirrors refresh_dashboard_json.py)
 # ══════════════════════════════════════════════════════════════════
 
@@ -259,6 +284,17 @@ def main() -> None:
     print("  Fetching per-campaign 30d totals…")
     campaign_rows = [normalize_row(r) for r in fetch_insights("campaign", d(29), d(0))]
 
+    print("  Fetching on/off status (campaigns + adsets + ads)…")
+    statuses = {
+        "campaigns": fetch_statuses("campaigns"),
+        "adsets":    fetch_statuses("adsets"),
+        "ads":       fetch_statuses("ads"),
+    }
+    n_camp_active = sum(1 for v in statuses["campaigns"].values() if v["effective_status"] == "ACTIVE")
+    n_adset_active = sum(1 for v in statuses["adsets"].values() if v["effective_status"] == "ACTIVE")
+    n_ad_active = sum(1 for v in statuses["ads"].values() if v["effective_status"] == "ACTIVE")
+    print(f"    Active: {n_camp_active} campaigns, {n_adset_active} adsets, {n_ad_active} ads")
+
     payload = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "account_id": META_AD_ACCOUNT_ID,
@@ -266,6 +302,7 @@ def main() -> None:
         "campaigns": campaign_rows,
         "adsets": adset_rows,
         "ads": ad_rows,
+        "statuses": statuses,
     }
 
     with open(OUTPUT_FILE, "w") as f:

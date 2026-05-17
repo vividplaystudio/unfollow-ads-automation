@@ -942,7 +942,38 @@ const META = {
   range: "7d",
   customFrom: null,  // "YYYY-MM-DD"
   customTo: null,
+  activeOnly: false, // when true, hide paused/deleted from table
 };
+
+// Map Meta's effective_status to a compact badge + CSS class.
+function metaStatusBadge(eff) {
+  if (!eff) return '<span class="meta-status status-unknown" title="status unknown">?</span>';
+  switch (eff) {
+    case "ACTIVE":            return '<span class="meta-status status-active"   title="ACTIVE — currently running">●</span>';
+    case "PAUSED":            return '<span class="meta-status status-paused"   title="PAUSED — turned off">⏸</span>';
+    case "CAMPAIGN_PAUSED":   return '<span class="meta-status status-paused"   title="Parent campaign is paused">⏸</span>';
+    case "ADSET_PAUSED":      return '<span class="meta-status status-paused"   title="Parent ad set is paused">⏸</span>';
+    case "ARCHIVED":          return '<span class="meta-status status-archived" title="ARCHIVED">▣</span>';
+    case "DELETED":           return '<span class="meta-status status-deleted"  title="DELETED">✕</span>';
+    case "DISAPPROVED":       return '<span class="meta-status status-issue"    title="DISAPPROVED by Meta">⚠</span>';
+    case "PENDING_REVIEW":    return '<span class="meta-status status-pending"  title="Pending Meta review">…</span>';
+    case "WITH_ISSUES":       return '<span class="meta-status status-issue"    title="Running with issues">⚠</span>';
+    case "PENDING_BILLING_INFO": return '<span class="meta-status status-issue" title="Billing issue">💳</span>';
+    case "IN_PROCESS":        return '<span class="meta-status status-pending"  title="Being created/edited">⟳</span>';
+    case "PREAPPROVED":       return '<span class="meta-status status-pending"  title="Pre-approved, not yet active">…</span>';
+    default:                  return `<span class="meta-status status-unknown" title="${eff}">?</span>`;
+  }
+}
+
+// Look up effective status for a given (id, level) — level: 'campaigns'|'adsets'|'ads'
+function metaEffStatus(id, level) {
+  const m = META.data?.statuses?.[level];
+  return m && m[id] ? m[id].effective_status : null;
+}
+
+function isMetaActive(id, level) {
+  return metaEffStatus(id, level) === "ACTIVE";
+}
 
 // Returns {since, until} ISO date strings (inclusive) for the active range,
 // or null if custom dates are missing. Uses the user's LOCAL calendar date
@@ -1410,6 +1441,15 @@ function renderMetaTable() {
     );
   }
 
+  // "Active only" filter — hide anything paused/deleted/archived
+  if (META.activeOnly) {
+    const idKey = META.tab === "campaigns" ? "campaign_id"
+                : META.tab === "adsets"    ? "adset_id"
+                : "ad_id";
+    const lvlKey = META.tab; // 'campaigns' | 'adsets' | 'ads'
+    rows = rows.filter(r => isMetaActive(r[idKey], lvlKey));
+  }
+
   rows.sort((a, b) => {
     const va = a[META.sortCol], vb = b[META.sortCol];
     if (typeof va === "string" || typeof vb === "string") {
@@ -1430,6 +1470,12 @@ function renderMetaTable() {
     body.innerHTML = `<tr><td colspan="${cols.length}" class="empty-state">No data</td></tr>`;
   } else {
     body.innerHTML = rows.map(r => {
+      // Determine row-level effective status (uses the most specific id for the current tab)
+      const rowStatusId = r.ad_id || r.adset_id || r.campaign_id;
+      const rowStatusLvl = r.ad_id ? "ads" : r.adset_id ? "adsets" : "campaigns";
+      const rowEff = metaEffStatus(rowStatusId, rowStatusLvl);
+      const rowCls = rowEff && rowEff !== "ACTIVE" ? "meta-row-inactive" : "";
+
       const cells = cols.map(c => {
         let v = r[c.key];
         if (v == null || v === "") v = "—";
@@ -1439,9 +1485,18 @@ function renderMetaTable() {
         if (c.drill === "campaign") drill = `data-drill-campaign="${r.campaign_id}"`;
         if (c.drill === "adset")    drill = `data-drill-adset="${r.adset_id}" data-drill-camp="${r.campaign_id}"`;
         const cls = (c.num ? "num " : "") + (c.drill ? "drill" : "");
-        return `<td class="${cls.trim()}" ${drill}>${v}</td>`;
+        // Prepend a status badge to the name column for the current level
+        let prefix = "";
+        if (c.key === "ad_name" && META.tab === "ads") {
+          prefix = metaStatusBadge(metaEffStatus(r.ad_id, "ads")) + " ";
+        } else if (c.key === "adset_name" && META.tab === "adsets") {
+          prefix = metaStatusBadge(metaEffStatus(r.adset_id, "adsets")) + " ";
+        } else if (c.key === "campaign_name" && META.tab === "campaigns") {
+          prefix = metaStatusBadge(metaEffStatus(r.campaign_id, "campaigns")) + " ";
+        }
+        return `<td class="${cls.trim()}" ${drill}>${prefix}${v}</td>`;
       }).join("");
-      return `<tr>${cells}</tr>`;
+      return `<tr class="${rowCls}">${cells}</tr>`;
     }).join("");
   }
 
@@ -1802,6 +1857,14 @@ function initMeta() {
     META.search = e.target.value;
     renderMetaTable();
   });
+
+  const activeOnlyEl = document.getElementById("metaActiveOnly");
+  if (activeOnlyEl) {
+    activeOnlyEl.addEventListener("change", e => {
+      META.activeOnly = e.target.checked;
+      renderMetaTable();
+    });
+  }
 
   loadMetaData();
 }
