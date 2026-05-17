@@ -1,0 +1,51 @@
+name: Fast Refresh (Meta + Adjust only)
+
+# Fast cadence for the ad-side data (Meta + Adjust) without the slow
+# RevenueCat customer loop. Fires between the full refreshes so the
+# dashboard ad metrics never go more than ~15 min stale.
+#
+# Schedule layout (off-peak minutes, so GitHub doesn't deprioritize):
+#   xx:07  → Refresh Token + Full Dashboard (RC + ASA + Meta + Adjust) [~15 min run]
+#   xx:22  → Fast Refresh (Meta + Adjust)                              [~3 min run]
+#   xx:37  → Refresh Token + Full Dashboard                            [~15 min run]
+#   xx:52  → Fast Refresh (Meta + Adjust)                              [~3 min run]
+#
+# Result: Meta/Adjust data refreshed every ~15 min, RC every ~30 min.
+
+on:
+  schedule:
+    - cron: "22,52 * * * *"
+  workflow_dispatch:
+
+jobs:
+  fast:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run Meta Ads refresher (JSON + FTP)
+        if: always()
+        env:
+          META_ACCESS_TOKEN: ${{ secrets.META_ACCESS_TOKEN }}
+          META_AD_ACCOUNT_ID: ${{ secrets.META_AD_ACCOUNT_ID }}
+          FTP_HOST: ${{ secrets.FTP_HOST }}
+          FTP_USER: ${{ secrets.FTP_USER }}
+          FTP_PASS: ${{ secrets.FTP_PASS }}
+          FTP_PATH: ${{ secrets.FTP_PATH }}
+        run: python3 refresh_meta_ads.py
+
+      - name: Run Adjust refresher (JSON + FTP)
+        if: always()
+        env:
+          ADJUST_API_TOKEN: ${{ secrets.ADJUST_API_TOKEN }}
+          ADJUST_APP_TOKEN: ${{ secrets.ADJUST_APP_TOKEN }}
+          FTP_HOST: ${{ secrets.FTP_HOST }}
+          FTP_USER: ${{ secrets.FTP_USER }}
+          FTP_PASS: ${{ secrets.FTP_PASS }}
+          FTP_PATH: ${{ secrets.FTP_PATH }}
+        run: python3 refresh_adjust.py
