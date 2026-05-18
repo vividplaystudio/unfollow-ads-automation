@@ -14,9 +14,6 @@ Outputs:
 
 Runs hourly via GitHub Actions alongside refresh_dashboard_json.py.
 """
-# Defer annotation evaluation so PEP-604 unions (`str | int`) work on
-# Python 3.9 (cPanel's shared hosts often ship 3.9 as the max version).
-from __future__ import annotations
 
 import ftplib
 import json
@@ -24,6 +21,7 @@ import os
 import ssl
 import sys
 import urllib.parse
+from typing import Union
 import urllib.request
 from datetime import datetime, timedelta, timezone
 
@@ -113,7 +111,7 @@ def meta_paginated(path: str, params: dict) -> list:
 # Insights fetchers
 # ══════════════════════════════════════════════════════════════════
 
-def fetch_insights(level: str, since: str, until: str, time_increment: str | int = "all_days") -> list:
+def fetch_insights(level: str, since: str, until: str, time_increment: Union[str, int] = "all_days") -> list:
     """Fetch insights at the given level and date range.
     Use the unified attribution setting + the same windows Ads Manager UI shows
     (7-day click + 1-day view) so 'Results' / 'in-app subscribes' line up with

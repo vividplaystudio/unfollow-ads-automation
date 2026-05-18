@@ -11,8 +11,6 @@ Runs hourly via GitHub Actions.
 5. Outputs data.json
 6. Uploads via FTP to the dashboard folder on cPanel
 """
-# Defer annotation evaluation so future PEP-604 unions work on Python 3.9.
-from __future__ import annotations
 
 import base64
 import ftplib

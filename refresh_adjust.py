@@ -12,9 +12,6 @@ numeric ad_id into the creative dimension when MMP attribution is set up).
 Outputs adjust.json and FTPs it to cPanel alongside data.json / meta_ads.json.
 """
 
-# Defer annotation evaluation so future PEP-604 unions work on Python 3.9.
-from __future__ import annotations
-
 import ftplib
 import json
 import os
