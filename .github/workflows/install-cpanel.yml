@@ -53,32 +53,37 @@ jobs:
           ftp.login(user, pw)
           ftp.prot_p()
           print(f"FTP user root:   {ftp.pwd()}")
+          print("Top-level contents:")
+          ftp.dir()
+          print()
 
-          # Try to navigate to absolute target_dir. If FTP is chroot'd to
-          # public_html (common on shared hosts), this will fail with 550 —
-          # surface that clearly so the user can pick a different path.
-          try:
-              parts = target_dir.strip("/").split("/")
+          # FTP user is chroot'd. Try the absolute path first; if it fails
+          # with "no such directory", strip a common chroot prefix and
+          # treat the path as relative to FTP root.
+          def try_navigate(path):
+              parts = path.strip("/").split("/")
               ftp.cwd("/")
               for p in parts[:-1]:
-                  try:
-                      ftp.cwd(p)
-                  except ftplib.error_perm:
-                      print(f"  Cannot cd to {p}/ — FTP user may be chroot'd")
-                      raise
-              # Try the last part; create if missing
+                  ftp.cwd(p)
               try:
                   ftp.cwd(parts[-1])
               except ftplib.error_perm:
                   ftp.mkd(parts[-1])
                   ftp.cwd(parts[-1])
-              print(f"  Working dir:   {ftp.pwd()}")
-          except ftplib.error_perm as e:
-              print(f"\n❌ Could not reach {target_dir}: {e}")
-              print("   FTP user is likely chroot'd to public_html.")
-              print("   Re-run with target_dir under public_html, e.g.")
-              print(f"   /public_html/unfollow-ads-scripts")
-              raise
+
+          try:
+              try_navigate(target_dir)
+              print(f"  Working dir (absolute): {ftp.pwd()}")
+          except ftplib.error_perm:
+              # Strip "/home/<user>" prefix — FTP root is already the home
+              import re
+              stripped = re.sub(r"^/home/[^/]+", "", target_dir) or "/"
+              if stripped != target_dir:
+                  print(f"  Absolute path failed (chroot). Trying {stripped} relative to FTP root…")
+                  try_navigate(stripped)
+                  print(f"  Working dir (chroot): {ftp.pwd()}")
+              else:
+                  raise
 
           # Upload script files (binary mode to preserve line endings)
           for fname in ["refresh_meta_ads.py", "refresh_adjust.py",
