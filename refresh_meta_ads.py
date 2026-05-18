@@ -14,6 +14,9 @@ Outputs:
 
 Runs hourly via GitHub Actions alongside refresh_dashboard_json.py.
 """
+# Defer annotation evaluation so PEP-604 unions (`str | int`) work on
+# Python 3.9 (cPanel's shared hosts often ship 3.9 as the max version).
+from __future__ import annotations
 
 import ftplib
 import json
