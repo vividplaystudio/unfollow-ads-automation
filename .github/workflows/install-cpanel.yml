@@ -128,6 +128,22 @@ jobs:
           except Exception as e:
               print(f"    (chmod skipped: {e})")
 
+          # Defense in depth: deny ALL web access to this folder so even if
+          # someone bypasses the dashboard basic auth, they can't read the
+          # API tokens in config.sh. Apache 2.4 syntax.
+          htaccess = (
+              "# Block ALL web access — this folder contains API tokens.\n"
+              "# Scripts here are run by cron, never served by Apache.\n"
+              "<RequireAll>\n"
+              "    Require all denied\n"
+              "</RequireAll>\n"
+              "# Fallback for Apache 2.2 (in case the host runs it)\n"
+              "Order Deny,Allow\n"
+              "Deny from all\n"
+          )
+          ftp.storbinary("STOR .htaccess", io.BytesIO(htaccess.encode("utf-8")))
+          print("  ✅ uploaded .htaccess (denies all web access)")
+
           print(f"\nFinal listing of {ftp.pwd()}:")
           ftp.dir()
           ftp.quit()
