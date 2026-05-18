@@ -26,6 +26,11 @@ from datetime import datetime, timedelta, timezone
 ADJUST_API_TOKEN = os.environ["ADJUST_API_TOKEN"]
 ADJUST_APP_TOKEN = os.environ["ADJUST_APP_TOKEN"]
 
+# When running ON the cPanel host, set LOCAL_OUTPUT_DIR to the absolute
+# dashboard folder (e.g., /home/genivox/public_html/ads-dashboard) and
+# the script will write directly there — skipping FTP entirely.
+LOCAL_OUTPUT_DIR = os.environ.get("LOCAL_OUTPUT_DIR", "")
+
 FTP_HOST = os.environ.get("FTP_HOST", "")
 FTP_USER = os.environ.get("FTP_USER", "")
 FTP_PASS = os.environ.get("FTP_PASS", "")
@@ -112,6 +117,20 @@ def fetch_report(since: str, until: str, dimensions: list, extra: dict = None,
 # ══════════════════════════════════════════════════════════════════
 # FTP upload (mirrors refresh_meta_ads.py)
 # ══════════════════════════════════════════════════════════════════
+
+def publish_output(local_file: str, remote_name: str) -> None:
+    """Publish the JSON to the dashboard. When LOCAL_OUTPUT_DIR is set
+    (script is running on the cPanel host), copy directly — no FTP.
+    Otherwise fall back to FTPS upload."""
+    if LOCAL_OUTPUT_DIR:
+        import shutil
+        os.makedirs(LOCAL_OUTPUT_DIR, exist_ok=True)
+        target = os.path.join(LOCAL_OUTPUT_DIR, remote_name)
+        shutil.copyfile(local_file, target)
+        print(f"    ✅ Copied to {target}")
+        return
+    upload_to_ftp(local_file, remote_name)
+
 
 def upload_to_ftp(local_file: str, remote_name: str) -> None:
     if not FTP_HOST:
@@ -223,7 +242,7 @@ def main() -> None:
         json.dump(payload, f, indent=2, default=str)
     print(f"  Wrote {OUTPUT_FILE} ({os.path.getsize(OUTPUT_FILE):,} bytes)")
 
-    upload_to_ftp(OUTPUT_FILE, OUTPUT_FILE)
+    publish_output(OUTPUT_FILE, OUTPUT_FILE)
     print("✅ Done")
 
 

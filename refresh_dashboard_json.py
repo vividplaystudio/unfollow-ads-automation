@@ -38,6 +38,10 @@ RC_EVENTS_URL = os.environ.get(
 )
 ORG_ID = os.environ.get("ASA_ORG_ID", "8868820")
 
+# When running ON the cPanel host, set LOCAL_OUTPUT_DIR to the absolute
+# dashboard folder and the script will write directly there — no FTP.
+LOCAL_OUTPUT_DIR = os.environ.get("LOCAL_OUTPUT_DIR", "")
+
 FTP_HOST = os.environ.get("FTP_HOST", "")
 FTP_USER = os.environ.get("FTP_USER", "")
 FTP_PASS = os.environ.get("FTP_PASS", "")
@@ -1045,6 +1049,19 @@ def compute_cohort_retention(customers) -> dict:
 # FTP upload
 # ══════════════════════════════════════════════════════════════════
 
+def publish_output(local_file: str, remote_name: str) -> None:
+    """Publish JSON to the dashboard. When LOCAL_OUTPUT_DIR is set (script
+    is running on cPanel), copy directly — no FTP. Else FTPS upload."""
+    if LOCAL_OUTPUT_DIR:
+        import shutil
+        os.makedirs(LOCAL_OUTPUT_DIR, exist_ok=True)
+        target = os.path.join(LOCAL_OUTPUT_DIR, remote_name)
+        shutil.copyfile(local_file, target)
+        print(f"    ✅ Copied to {target}")
+        return
+    upload_to_ftp(local_file, remote_name)
+
+
 def upload_to_ftp(local_file: str, remote_name: str) -> None:
     if not FTP_HOST:
         print("  [skip FTP — no credentials]")
@@ -1410,7 +1427,7 @@ def main() -> None:
 
     # Upload
     print("\n--- Uploading to cPanel ---")
-    upload_to_ftp(out_file, "data.json")
+    publish_output(out_file, "data.json")
 
     print("\n🎉 Done!")
 
