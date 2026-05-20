@@ -27,8 +27,12 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
 
-SPREADSHEET_ID = os.environ["SPREADSHEET_ID"]
-GOOGLE_SERVICE_ACCOUNT_JSON = os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"]
+# ASA env vars are now optional — the script can run without them and just
+# skip the ASA fetch (since the cPanel cron is RC-focused; the old GitHub
+# Actions setup needed the ASA token via Google Sheets).
+SPREADSHEET_ID = os.environ.get("SPREADSHEET_ID", "")
+GOOGLE_SERVICE_ACCOUNT_JSON = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "")
+ASA_ENABLED = bool(SPREADSHEET_ID and GOOGLE_SERVICE_ACCOUNT_JSON)
 REVENUECAT_API_KEY = os.environ["REVENUECAT_API_KEY"]
 REVENUECAT_PROJECT_ID = os.environ.get("REVENUECAT_PROJECT_ID", "6afc72a9")
 RC_WEBHOOK_SECRET = os.environ.get("RC_WEBHOOK_SECRET", "").strip()
@@ -1110,17 +1114,24 @@ def upload_to_ftp(local_file: str, remote_name: str) -> None:
 # ══════════════════════════════════════════════════════════════════
 
 def main() -> None:
-    google_token = get_google_access_token()
+    if ASA_ENABLED:
+        google_token = get_google_access_token()
+        config = sheets_read(google_token, "_Config!B1:B1")
+        if not config or not config[0]:
+            print("⚠ ASA token cell empty — running RC-only.")
+            asa_token = None
+        else:
+            asa_token = config[0][0]
+    else:
+        print("⚠ SPREADSHEET_ID / GOOGLE_SERVICE_ACCOUNT_JSON not set — skipping ASA fetch, running RC-only.")
+        asa_token = None
 
-    config = sheets_read(google_token, "_Config!B1:B1")
-    if not config or not config[0]:
-        print("❌ No ASA token in _Config!B1")
-        return
-    asa_token = config[0][0]
-
-    print("Fetching campaigns...")
-    campaigns = asa_get_campaigns(asa_token)
-    print(f"Found {len(campaigns)} campaigns")
+    if asa_token:
+        print("Fetching campaigns...")
+        campaigns = asa_get_campaigns(asa_token)
+        print(f"Found {len(campaigns)} campaigns")
+    else:
+        campaigns = []
 
     campaign_meta = {}
     for c in campaigns:
@@ -1148,6 +1159,8 @@ def main() -> None:
     asa_ad_data = {}  # keyed by (campaign_id, ad_name), multi-range within each
 
     for range_name, (start, end) in ranges.items():
+        if not asa_token:
+            break  # nothing to fetch from ASA, skip the whole loop
         print(f"\n--- Fetching {range_name} ({start} to {end}) ---")
         start_s = start.isoformat()
         end_s = end.isoformat()
