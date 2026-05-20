@@ -1,0 +1,49 @@
+name: Fetch cPanel cron.log
+
+# One-shot debug helper. Connects via FTP, downloads the last 200 lines
+# of cron.log from the unfollow-ads folder, prints to workflow logs.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch cron.log via FTPS
+        env:
+          FTP_HOST: ${{ secrets.FTP_HOST }}
+          FTP_USER: ${{ secrets.FTP_USER }}
+          FTP_PASS: ${{ secrets.FTP_PASS }}
+        run: |
+          python3 << 'PYEOF'
+          import ftplib, ssl, os, io
+          host = os.environ["FTP_HOST"]; user = os.environ["FTP_USER"]; pw = os.environ["FTP_PASS"]
+          ctx = ssl.create_default_context()
+          ctx.check_hostname = False
+          ctx.verify_mode = ssl.CERT_NONE
+          ftp = ftplib.FTP_TLS(host, timeout=60, context=ctx)
+          ftp.login(user, pw)
+          ftp.prot_p()
+          ftp.cwd("/unfollow-ads")
+          print("Directory listing:")
+          ftp.dir()
+          print()
+          print("=" * 80)
+          print("cron.log contents:")
+          print("=" * 80)
+          buf = io.BytesIO()
+          try:
+              ftp.retrbinary("RETR cron.log", buf.write)
+              content = buf.getvalue().decode("utf-8", errors="replace")
+              # Print last 300 lines
+              lines = content.splitlines()
+              tail = lines[-300:] if len(lines) > 300 else lines
+              for line in tail:
+                  print(line)
+              print()
+              print(f"=== Total log lines: {len(lines)} ===")
+          except Exception as e:
+              print(f"Could not fetch cron.log: {e}")
+          ftp.quit()
+          PYEOF
