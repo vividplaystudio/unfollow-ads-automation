@@ -1266,12 +1266,14 @@ function aggregateMetaAds() {
       campaign_id: r.campaign_id, campaign_name: r.campaign_name,
       spend: 0, impressions: 0, clicks: 0, link_clicks: 0,
       installs: 0, purchases: 0,
+      freq_weighted: 0,
     };
     const a = byAd[k];
     a.spend       += r.spend || 0;
     a.impressions += r.impressions || 0;
     a.clicks      += r.clicks || 0;
     a.link_clicks += r.inline_link_clicks || 0;
+    a.freq_weighted += (r.frequency || 0) * (r.impressions || 0);
     a.installs    += (r.action_mobile_app_install || r.action_omni_app_install || 0);
     // Adjust → Meta MMP integration delivers subscribe events that the
     // Insights API buckets as app_custom_event.other (the user has no
@@ -1288,6 +1290,7 @@ function aggregateMetaAds() {
     );
   }
   return Object.values(byAd).map(a => {
+    a.frequency = a.impressions > 0 ? a.freq_weighted / a.impressions : 0;
     const adj = ADJ.byAdId.get(a.ad_id) || {};
     return enrichWithAdj(a, adj);
   });
@@ -1296,6 +1299,187 @@ function aggregateMetaAds() {
 // Apple takes 15% commission (Small Business Program rate). Net columns
 // reflect what actually lands in your bank after Apple's cut.
 const APPLE_KEEP = 0.85;
+
+// ─── Daily aggregation per ad set / ad (last 14 days) ────────────
+// Walks META.data.ads + ADJ.by_creative_daily, returning a sorted array
+// of {date, spend, impr, clicks, link, installs, rev, subs, W, M, Y, net, roas}
+function getDailyForAdset(adsetId) {
+  const days = {};
+  for (const r of META.data?.ads || []) {
+    if (r.adset_id !== adsetId || !r.date) continue;
+    if (!days[r.date]) days[r.date] = dailyBlank(r.date);
+    const d = days[r.date];
+    d.spend += r.spend || 0;
+    d.impr += r.impressions || 0;
+    d.clicks += r.clicks || 0;
+    d.link += r.inline_link_clicks || 0;
+    d.installs += (r.action_mobile_app_install || r.action_omni_app_install || 0);
+  }
+  for (const r of ADJ.data?.by_creative_daily || []) {
+    if (!adjIsMetaNetwork(r.network)) continue;
+    if (adjExtractId(r.adgroup) !== adsetId || !r.day) continue;
+    if (!days[r.day]) days[r.day] = dailyBlank(r.day);
+    const d = days[r.day];
+    d.rev += +(r.all_revenue || 0);
+    d.W   += +(r.com_weekly_events || 0);
+    d.M   += +(r.com_monthly_events || 0);
+    d.Y   += +(r.com_yearly_events || 0);
+  }
+  return finalizeDaily(days);
+}
+
+function getDailyForAd(adId) {
+  const days = {};
+  for (const r of META.data?.ads || []) {
+    if (r.ad_id !== adId || !r.date) continue;
+    if (!days[r.date]) days[r.date] = dailyBlank(r.date);
+    const d = days[r.date];
+    d.spend += r.spend || 0;
+    d.impr += r.impressions || 0;
+    d.clicks += r.clicks || 0;
+    d.link += r.inline_link_clicks || 0;
+    d.installs += (r.action_mobile_app_install || r.action_omni_app_install || 0);
+  }
+  for (const r of ADJ.data?.by_creative_daily || []) {
+    if (!adjIsMetaNetwork(r.network)) continue;
+    if (adjExtractId(r.creative) !== adId || !r.day) continue;
+    if (!days[r.day]) days[r.day] = dailyBlank(r.day);
+    const d = days[r.day];
+    d.rev += +(r.all_revenue || 0);
+    d.W   += +(r.com_weekly_events || 0);
+    d.M   += +(r.com_monthly_events || 0);
+    d.Y   += +(r.com_yearly_events || 0);
+  }
+  return finalizeDaily(days);
+}
+
+function dailyBlank(date) {
+  return { date, spend: 0, impr: 0, clicks: 0, link: 0, installs: 0,
+           rev: 0, W: 0, M: 0, Y: 0 };
+}
+
+function finalizeDaily(daysObj) {
+  return Object.values(daysObj)
+    .sort((a, b) => a.date.localeCompare(b.date))
+    .map(d => ({
+      ...d,
+      subs: d.W + d.M + d.Y,
+      net: d.rev * APPLE_KEEP - d.spend,
+      roas: d.spend > 0 ? d.rev * APPLE_KEEP / d.spend * 100 : 0,
+      link_ctr: d.impr > 0 ? d.link / d.impr * 100 : 0,
+      cpi: d.installs > 0 ? d.spend / d.installs : 0,
+      cps: (d.W + d.M + d.Y) > 0 ? d.spend / (d.W + d.M + d.Y) : 0,
+    }));
+}
+
+// ─── Verdict engine ───────────────────────────────────────────────
+// Looks at the last 7 active days and returns a labeled prediction.
+// Algorithm:
+//   - Trend = linear-regression slope of daily net profit ($/day)
+//   - Avg ROAS over the 7d window (net after Apple)
+//   - Volatility = coefficient of variation of daily net
+//   - Recent (last 3 days) vs prior-4 to detect inflection
+// Rules ranked top-down (first match wins):
+function computeHealthVerdict(daily) {
+  // Take up to last 14 days; verdict uses last 7 active days
+  const recent = daily.slice(-14);
+  const active = recent.filter(d => d.spend > 0.1);
+
+  if (active.length === 0) {
+    return { label: "OFF",   icon: "⏸",  cls: "vd-off",
+             reason: "No spend in window — likely paused." };
+  }
+  if (active.length < 3) {
+    return { label: "NEW",   icon: "🔵", cls: "vd-new",
+             reason: `Only ${active.length} active day(s) — need 3+ to call it.` };
+  }
+
+  // Check if effectively dead now (last 3 days all $0 spend)
+  const last3 = recent.slice(-3);
+  const last3Spend = last3.reduce((s, d) => s + d.spend, 0);
+  if (last3Spend < 1) {
+    return { label: "DEAD",  icon: "❌", cls: "vd-dead",
+             reason: "$0 spend last 3 days — paused/archived." };
+  }
+
+  // Focus on last 7 active days for the score
+  const window = active.slice(-7);
+  const nets   = window.map(d => d.net);
+  const spends = window.map(d => d.spend);
+  const totalSpend = spends.reduce((s, v) => s + v, 0);
+  const totalRev   = window.reduce((s, d) => s + d.rev, 0);
+  const totalNet   = totalRev * APPLE_KEEP - totalSpend;
+  const avgRoas    = totalSpend > 0 ? totalRev * APPLE_KEEP / totalSpend * 100 : 0;
+  const avgDailyNet= totalNet / window.length;
+  const totalSubs  = window.reduce((s, d) => s + d.subs, 0);
+  const totalInst  = window.reduce((s, d) => s + d.installs, 0);
+
+  // Trend slope (linear regression) of net profit over the window
+  const n = nets.length;
+  const xMean = (n - 1) / 2;
+  const yMean = nets.reduce((s, v) => s + v, 0) / n;
+  let num = 0, den = 0;
+  for (let i = 0; i < n; i++) {
+    num += (i - xMean) * (nets[i] - yMean);
+    den += (i - xMean) ** 2;
+  }
+  const trend = den > 0 ? num / den : 0;  // $/day change
+
+  // Volatility (std-dev / abs(mean), clipped)
+  const variance = nets.reduce((s, v) => s + (v - yMean) ** 2, 0) / n;
+  const stdDev = Math.sqrt(variance);
+  const volatility = Math.abs(yMean) > 1 ? stdDev / Math.abs(yMean) : (stdDev > 8 ? 5 : 0);
+
+  // Recent 3 vs prior 4
+  const last3Net = last3.reduce((s, d) => s + d.net, 0);
+  const recent3Avg = last3Net / 3;
+
+  const fmtRoas = `${avgRoas.toFixed(0)}%`;
+  const fmtNet  = `${avgDailyNet >= 0 ? "+" : ""}$${avgDailyNet.toFixed(0)}/day`;
+  const fmtTrend = `${trend >= 0 ? "+" : ""}$${trend.toFixed(0)}/day`;
+  const stats = { avgRoas, totalNet, avgDailyNet, trend, volatility, totalSubs, totalInst, window: window.length };
+
+  // ── Decision tree ──
+  if (avgRoas >= 150 && recent3Avg > 5 && trend >= -5) {
+    return { label: "SCALE",     icon: "🚀", cls: "vd-scale",
+             reason: `Strong winner: ROAS ${fmtRoas}, ${fmtNet} avg. Trend ${fmtTrend}. Scale +20-40%.`,
+             stats };
+  }
+  if (avgRoas >= 110 && recent3Avg > 0) {
+    return { label: "KEEP",      icon: "🟢", cls: "vd-keep",
+             reason: `Profitable: ROAS ${fmtRoas}, ${fmtNet} avg. Hold current budget.`,
+             stats };
+  }
+  if (trend >= 5 && recent3Avg > avgDailyNet) {
+    return { label: "IMPROVING", icon: "📈", cls: "vd-improving",
+             reason: `Upward trend: ${fmtTrend} improvement. Last 3d better than prior. Give time.`,
+             stats };
+  }
+  // STABLE BREAK-EVEN (user's rule: brings installs, not losing much)
+  if (avgRoas >= 80 && volatility < 0.8 && avgDailyNet > -5 && totalInst >= 5) {
+    return { label: "STABLE",    icon: "⚖",  cls: "vd-stable",
+             reason: `Break-even (${fmtNet}) but stable — brings ${totalInst} installs. Keep, low risk.`,
+             stats };
+  }
+  if (trend <= -5 && avgDailyNet < 0) {
+    return { label: "DYING",     icon: "📉", cls: "vd-dying",
+             reason: `Declining: ${fmtTrend}, ${fmtNet}. Fix creative or pause.`,
+             stats };
+  }
+  if (avgRoas < 70 && avgDailyNet < -5) {
+    return { label: "KILL",      icon: "🔴", cls: "vd-kill",
+             reason: `Bleeding: ROAS ${fmtRoas}, losing $${Math.abs(avgDailyNet).toFixed(0)}/day. Kill.`,
+             stats };
+  }
+  if (volatility > 1.5) {
+    return { label: "VOLATILE",  icon: "⚠",  cls: "vd-volatile",
+             reason: `Unpredictable: high day-to-day swings. ROAS ${fmtRoas}. Watch closely.`,
+             stats };
+  }
+  return { label: "WATCH",       icon: "🟡", cls: "vd-watch",
+           reason: `ROAS ${fmtRoas}, ${fmtNet}. Marginal — needs 2-3 more days.`,
+           stats };
+}
 
 // Merge a Meta row with its Adjust counterpart, computing all derived
 // columns (CTR/CPI/CPR/ROAS/profit/yearly mix). Used both per-ad and at
@@ -1365,6 +1549,7 @@ function metaCols() {
     { key: "installs",    label: "Meta Inst",  num: true },
     { key: "cpi",         label: "CPI",        num: true, fmt: fmt.money },
     { key: "link_ctr",    label: "CTR (link)", num: true, fmt: v => v.toFixed(2) + "%" },
+    { key: "frequency",   label: "Freq",       num: true, fmt: freqFmt, title: "Avg times each reached user saw the ad. <1.5 fresh · 1.5-2 watch · 2-2.5 approaching fatigue · 2.5+ rotate creative" },
     { key: "cpm",         label: "CPM",        num: true, fmt: fmt.money },
   ];
   if (META.tab === "adsets") return [
@@ -1374,6 +1559,7 @@ function metaCols() {
     ...adjCols,
     { key: "cpi",         label: "CPI",        num: true, fmt: fmt.money },
     { key: "link_ctr",    label: "CTR (link)", num: true, fmt: v => v.toFixed(2) + "%" },
+    { key: "frequency",   label: "Freq",       num: true, fmt: freqFmt, title: "Avg times each reached user saw the ad. <1.5 fresh · 1.5-2 watch · 2-2.5 approaching fatigue · 2.5+ rotate creative" },
   ];
   return [
     { key: "ad_name",       label: "Ad" },
@@ -1383,6 +1569,7 @@ function metaCols() {
     ...adjCols,
     { key: "cpi",         label: "CPI",        num: true, fmt: fmt.money },
     { key: "link_ctr",    label: "CTR (link)", num: true, fmt: v => v.toFixed(2) + "%" },
+    { key: "frequency",   label: "Freq",       num: true, fmt: freqFmt, title: "Avg times each reached user saw the ad. <1.5 fresh · 1.5-2 watch · 2-2.5 approaching fatigue · 2.5+ rotate creative" },
   ];
 }
 
@@ -1390,6 +1577,19 @@ function profitFmt(v) {
   if (v == null || v === 0) return "—";
   if (v > 0) return `<span class="profit-pos">+${fmt.money(v)}</span>`;
   return `<span class="profit-neg">${fmt.money(v)}</span>`;
+}
+
+// Frequency = avg times each reached user has seen the ad in the window.
+// <1.5 fresh · 1.5-2.0 watch · 2.0-2.5 approaching fatigue · 2.5+ rotate creative.
+function freqFmt(v) {
+  if (v == null || v === 0) return "—";
+  let color, title;
+  if      (v < 1.5)  { color = "#16a34a"; title = "Fresh — scale freely"; }
+  else if (v < 2.0)  { color = "#ca8a04"; title = "Watch — audience saturation starting"; }
+  else if (v < 2.5)  { color = "#ea580c"; title = "Approaching fatigue — prep fresh creative"; }
+  else if (v < 3.0)  { color = "#dc2626"; title = "Fatigue confirmed — rotate creative"; }
+  else               { color = "#991b1b"; title = "Severe fatigue — kill or refresh now"; }
+  return `<span style="color:${color};font-weight:600" title="${title}">${v.toFixed(2)}x</span>`;
 }
 
 function metaRowsForTab() {
@@ -1411,6 +1611,7 @@ function metaRowsForTab() {
       adset_id: a.adset_id, adset_name: a.adset_name,
       spend: 0, impressions: 0, clicks: 0, link_clicks: 0,
       installs: 0, purchases: 0,
+      freq_weighted: 0,
     };
     agg[k].spend       += a.spend;
     agg[k].impressions += a.impressions;
@@ -1418,8 +1619,10 @@ function metaRowsForTab() {
     agg[k].link_clicks += a.link_clicks || 0;
     agg[k].installs    += a.installs;
     agg[k].purchases   += a.purchases || 0;
+    agg[k].freq_weighted += (a.frequency || 0) * (a.impressions || 0);
   }
   return Object.values(agg).map(r => {
+    r.frequency = r.impressions > 0 ? r.freq_weighted / r.impressions : 0;
     const adjMap = META.tab === "campaigns" ? ADJ.byCampaignId : ADJ.byAdsetId;
     const adjKey = META.tab === "campaigns" ? r.campaign_id : r.adset_id;
     return enrichWithAdj(r, adjMap.get(adjKey));

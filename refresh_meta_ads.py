@@ -178,12 +178,16 @@ def summarize(rows: list) -> dict:
     """Aggregate a list of insight rows into one summary dict."""
     s = {"spend": 0.0, "impressions": 0, "clicks": 0, "reach": 0, "link_clicks": 0}
     actions = {}
+    freq_weighted = 0.0
     for r in rows:
-        s["spend"] += float(r.get("spend", 0) or 0)
-        s["impressions"] += int(r.get("impressions", 0) or 0)
+        spend = float(r.get("spend", 0) or 0)
+        impr = int(r.get("impressions", 0) or 0)
+        s["spend"] += spend
+        s["impressions"] += impr
         s["clicks"] += int(r.get("clicks", 0) or 0)
         s["reach"] += int(r.get("reach", 0) or 0)
         s["link_clicks"] += int(r.get("inline_link_clicks", 0) or 0)
+        freq_weighted += float(r.get("frequency", 0) or 0) * impr
         for a in r.get("actions", []) or []:
             t = a.get("action_type")
             if not t:
@@ -196,6 +200,7 @@ def summarize(rows: list) -> dict:
     s["ctr"] = (s["clicks"] / s["impressions"] * 100) if s["impressions"] else 0
     s["link_ctr"] = (s["link_clicks"] / s["impressions"] * 100) if s["impressions"] else 0
     s["cost_per_link_click"] = (s["spend"] / s["link_clicks"]) if s["link_clicks"] else 0
+    s["frequency"] = (freq_weighted / s["impressions"]) if s["impressions"] else 0
     return s
 
 
