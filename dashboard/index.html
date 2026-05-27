@@ -278,6 +278,34 @@
       </table>
     </div>
 
+    <!-- ─── TRUE Daily Profit (RC truth - ALL revenue, not just Meta-attributed) ──── -->
+    <div class="meta-header" style="margin-top:32px">
+      <h2>True Daily Profit</h2>
+      <span class="meta-updated">Total RC revenue (incl. renewals + organic + ASA) − all ad spend</span>
+    </div>
+    <div class="kpi-grid">
+      <div class="kpi-card kpi-highlight" title="Yesterday's TRUE net profit: (RC total revenue × 0.85) − Meta ad spend. This is the real business profit, not just ad-attributed.">
+        <div class="kpi-label">True Net Profit (Yesterday)</div>
+        <div class="kpi-value" id="trueNetYday">$0</div>
+        <div class="kpi-sub" id="trueNetYdaySub">RC rev × 0.85 − ad spend</div>
+      </div>
+      <div class="kpi-card" title="Total RevenueCat revenue yesterday (all sources: new subs, renewals, organic, ASA)">
+        <div class="kpi-label">Total Revenue (Yesterday)</div>
+        <div class="kpi-value" id="rcRevYday">$0</div>
+        <div class="kpi-sub" id="rcRevYdaySub">all sources</div>
+      </div>
+      <div class="kpi-card" title="Revenue NOT attributed to Meta ads — comes from renewals of past subscribers, organic, ASA, and yearly subs from previous months">
+        <div class="kpi-label">Non-Ad Revenue (Yesterday)</div>
+        <div class="kpi-value" id="nonAdRevYday">$0</div>
+        <div class="kpi-sub" id="nonAdRevYdaySub">renewals + organic + ASA</div>
+      </div>
+      <div class="kpi-card" title="7-day TRUE net profit: (RC total × 0.85) − all ad spend. This is what your business is actually making.">
+        <div class="kpi-label">True Net Profit (7d)</div>
+        <div class="kpi-value" id="trueNet7d">$0</div>
+        <div class="kpi-sub" id="trueNet7dSub">vs ad-only net</div>
+      </div>
+    </div>
+
     <!-- ─── Subscription Health (global, from RevenueCat) ──── -->
     <div class="meta-header" style="margin-top:32px">
       <h2>Subscription Health</h2>

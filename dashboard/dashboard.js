@@ -1720,9 +1720,100 @@ function renderMetaTable() {
   document.getElementById("metaTableInfo").textContent = `${rows.length} rows`;
 }
 
+// ─── True Daily Profit (RC truth - all revenue minus all ad spend) ─────
+// This is the REAL business profit, not just Meta-attributed.
+// Includes renewals from past cohorts, organic, ASA, yearly subs.
+function renderTrueDailyProfit() {
+  if (!RC.data || !RC.data.daily_rc) return;
+  const APPLE_KEEP = 0.85;
+
+  // Helper: get YYYY-MM-DD for N days ago (UTC)
+  const dateNDaysAgo = (n) => {
+    const d = new Date();
+    d.setUTCDate(d.getUTCDate() - n);
+    return d.toISOString().slice(0, 10);
+  };
+  const yday = dateNDaysAgo(1);
+
+  // Build daily-keyed maps
+  const rcByDay = new Map((RC.data.daily_rc || []).map(r => [r.date, r]));
+  const metaSpendByDay = new Map();
+  for (const r of (META.data?.ads || [])) {
+    metaSpendByDay.set(r.date, (metaSpendByDay.get(r.date) || 0) + (r.spend || 0));
+  }
+  const adjByDay = new Map();
+  for (const r of (ADJ.data?.by_creative_daily || [])) {
+    const net = (r.network || "").toLowerCase();
+    if (!(net.includes("meta") || net.includes("facebook") || net.includes("instagram"))) continue;
+    const day = r.day;
+    if (!day) continue;
+    const rev = (+r.com_weekly_revenue || 0) + (+r.com_monthly_revenue || 0) + (+r.com_yearly_revenue || 0);
+    adjByDay.set(day, (adjByDay.get(day) || 0) + rev);
+  }
+
+  // Yesterday metrics
+  const rcYday = rcByDay.get(yday) || { revenue: 0 };
+  const spendYday = metaSpendByDay.get(yday) || 0;
+  const adjYday = adjByDay.get(yday) || 0;
+  const nonAdYday = (rcYday.revenue || 0) - adjYday;
+  const trueNetYday = (rcYday.revenue || 0) * APPLE_KEEP - spendYday;
+  const adOnlyNetYday = adjYday * APPLE_KEEP - spendYday;
+
+  // 7-day totals
+  let rc7 = 0, spend7 = 0, adj7 = 0;
+  for (let i = 1; i <= 7; i++) {
+    const d = dateNDaysAgo(i);
+    rc7 += (rcByDay.get(d)?.revenue || 0);
+    spend7 += (metaSpendByDay.get(d) || 0);
+    adj7 += (adjByDay.get(d) || 0);
+  }
+  const trueNet7 = rc7 * APPLE_KEEP - spend7;
+  const adOnlyNet7 = adj7 * APPLE_KEEP - spend7;
+  const hiddenProfit7 = trueNet7 - adOnlyNet7;
+
+  // Render
+  const colorFor = (v) => v > 0 ? "var(--success, #10b981)" : v < 0 ? "var(--danger, #ef4444)" : "";
+  const signed = (v) => (v >= 0 ? "+" : "−") + fmt.money(Math.abs(v));
+
+  const trueNetEl = document.getElementById("trueNetYday");
+  if (trueNetEl) {
+    trueNetEl.textContent = signed(trueNetYday);
+    trueNetEl.style.color = colorFor(trueNetYday);
+    const diff = trueNetYday - adOnlyNetYday;
+    document.getElementById("trueNetYdaySub").textContent =
+      `vs ad-only ${signed(adOnlyNetYday)} (+${fmt.money(diff)} hidden)`;
+  }
+
+  const rcRevEl = document.getElementById("rcRevYday");
+  if (rcRevEl) {
+    rcRevEl.textContent = fmt.money(rcYday.revenue || 0);
+    document.getElementById("rcRevYdaySub").textContent =
+      `${rcYday.new_subs || 0} new · ${rcYday.renewals || 0} renewals`;
+  }
+
+  const nonAdEl = document.getElementById("nonAdRevYday");
+  if (nonAdEl) {
+    nonAdEl.textContent = fmt.money(nonAdYday);
+    const pct = (rcYday.revenue || 0) > 0 ? (nonAdYday / rcYday.revenue * 100) : 0;
+    nonAdEl.style.color = "var(--success, #10b981)";
+    document.getElementById("nonAdRevYdaySub").textContent =
+      `${pct.toFixed(0)}% of total revenue · pure profit (no ad cost)`;
+  }
+
+  const trueNet7El = document.getElementById("trueNet7d");
+  if (trueNet7El) {
+    trueNet7El.textContent = signed(trueNet7);
+    trueNet7El.style.color = colorFor(trueNet7);
+    document.getElementById("trueNet7dSub").textContent =
+      `ad-only would be ${signed(adOnlyNet7)} · ${signed(hiddenProfit7)} extra you weren't seeing`;
+  }
+}
+
 // ─── Subscription Health (global, from RevenueCat) ──────────
 function renderSubscriptionHealth() {
   if (!RC.data) return;
+  // Also refresh the True Daily Profit cards (they share the same data)
+  renderTrueDailyProfit();
   const channels = RC.data.channels || [];
   let revenue = 0, paidSubs = 0, active = 0, canceled = 0, renewals = 0;
   let weekly = 0, monthly = 0, yearly = 0;
