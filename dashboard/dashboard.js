@@ -1807,6 +1807,37 @@ function renderTrueDailyProfit() {
     document.getElementById("trueNet7dSub").textContent =
       `ad-only would be ${signed(adOnlyNet7)} · ${signed(hiddenProfit7)} extra you weren't seeing`;
   }
+
+  // ─── Daily breakdown table (newest first) ───
+  const tbody = document.getElementById("trueDailyTableBody");
+  if (tbody) {
+    // All days that have RC data, newest first
+    const days = [...rcByDay.keys()].sort().reverse();
+    if (!days.length) {
+      tbody.innerHTML = `<tr><td colspan="7" class="empty-state">No daily data yet</td></tr>`;
+    } else {
+      tbody.innerHTML = days.map(d => {
+        const rc = rcByDay.get(d) || { revenue: 0, new_subs: 0, renewals: 0 };
+        const spend = metaSpendByDay.get(d) || 0;
+        const adjRev = adjByDay.get(d) || 0;
+        const rcRev = rc.revenue || 0;
+        const nonAd = rcRev - adjRev;
+        const trueNet = rcRev * APPLE_KEEP - spend;       // after Apple 15% − ad spend
+        const adOnlyNet = adjRev * APPLE_KEEP - spend;
+        const cls = trueNet > 0 ? "profit-pos" : trueNet < 0 ? "profit-neg" : "";
+        const adCls = adOnlyNet > 0 ? "profit-pos" : adOnlyNet < 0 ? "profit-neg" : "";
+        return `<tr>
+          <td>${d}</td>
+          <td class="num">${fmt.money(rcRev)}</td>
+          <td class="num">${fmt.money(adjRev)}</td>
+          <td class="num" style="color:var(--success,#10b981)">${fmt.money(nonAd)}</td>
+          <td class="num">${spend > 0 ? fmt.money(spend) : "—"}</td>
+          <td class="num"><span class="${adCls}">${signed(adOnlyNet)}</span></td>
+          <td class="num"><strong class="${cls}">${signed(trueNet)}</strong></td>
+        </tr>`;
+      }).join("");
+    }
+  }
 }
 
 // ─── Subscription Health (global, from RevenueCat) ──────────

@@ -306,6 +306,26 @@
       </div>
     </div>
 
+    <!-- Daily breakdown table for True Daily Profit -->
+    <div class="table-wrap" style="margin-top:16px">
+      <table>
+        <thead>
+          <tr>
+            <th>Date</th>
+            <th class="num" title="Total RevenueCat revenue (all sources)">RC Total Rev</th>
+            <th class="num" title="Meta-ad-attributed revenue (from Adjust)">Ad-Attributed Rev</th>
+            <th class="num" title="Revenue not from ads — renewals, organic, ASA, past yearly subs">Non-Ad Rev</th>
+            <th class="num" title="Meta ad spend">Ad Spend</th>
+            <th class="num" title="Ad-only net: (ad-attributed rev × 0.85) − ad spend">Ad-Only Net</th>
+            <th class="num" title="TRUE net profit: (RC total rev × 0.85) − ad spend. After Apple's 15%.">TRUE Net (after 15%)</th>
+          </tr>
+        </thead>
+        <tbody id="trueDailyTableBody">
+          <tr><td colspan="7" class="empty-state">Loading…</td></tr>
+        </tbody>
+      </table>
+    </div>
+
     <!-- ─── Subscription Health (global, from RevenueCat) ──── -->
     <div class="meta-header" style="margin-top:32px">
       <h2>Subscription Health</h2>
