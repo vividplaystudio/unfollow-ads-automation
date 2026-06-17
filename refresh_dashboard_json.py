@@ -295,7 +295,12 @@ def fetch_webhook_events() -> dict:
         _LAST_REFUND_SUMMARY = {}
         return {}
 
-    url = f"{RC_EVENTS_URL}?limit=50000"
+    # Only fetch the last ~60 days of events. Without since_ms the PHP endpoint
+    # streams the log from the OLDEST line forward and cuts at limit=50000 —
+    # once the log exceeds 50k events the most recent days silently fall off
+    # the end, causing daily_rc to undercount newer days.
+    since_ms = int((datetime.now(timezone.utc) - timedelta(days=60)).timestamp() * 1000)
+    url = f"{RC_EVENTS_URL}?since_ms={since_ms}&limit=50000"
     req = urllib.request.Request(
         url, headers={"Authorization": f"Bearer {RC_WEBHOOK_SECRET}"},
     )
@@ -308,7 +313,8 @@ def fetch_webhook_events() -> dict:
         return {}
 
     events = data.get("events", [])
-    print(f"  [webhooks] fetched {len(events)} events")
+    skipped = data.get("skipped_before_since", 0)
+    print(f"  [webhooks] fetched {len(events)} events (skipped {skipped} older than 60d)")
 
     revenue_types = {"INITIAL_PURCHASE", "RENEWAL", "NON_RENEWING_PURCHASE", "PRODUCT_CHANGE"}
     by_user = defaultdict(list)
