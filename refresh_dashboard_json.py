@@ -19,6 +19,7 @@ import json
 import os
 import ssl
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.parse
@@ -33,7 +34,12 @@ from datetime import datetime, timedelta, timezone
 SPREADSHEET_ID = os.environ.get("SPREADSHEET_ID", "")
 GOOGLE_SERVICE_ACCOUNT_JSON = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "")
 ASA_ENABLED = bool(SPREADSHEET_ID and GOOGLE_SERVICE_ACCOUNT_JSON)
-REVENUECAT_API_KEY = os.environ["REVENUECAT_API_KEY"]
+# REVENUECAT_API_KEY is required by the full refresh (rc_get_all_customers
+# and rc_enrich_customers), but the fast daily_rc path imports from this
+# module without needing the API key (it reads webhook events instead).
+# Use .get() so the import succeeds; the full-refresh main() validates
+# below.
+REVENUECAT_API_KEY = os.environ.get("REVENUECAT_API_KEY", "")
 REVENUECAT_PROJECT_ID = os.environ.get("REVENUECAT_PROJECT_ID", "6afc72a9")
 RC_WEBHOOK_SECRET = os.environ.get("RC_WEBHOOK_SECRET", "").strip()
 RC_EVENTS_URL = os.environ.get(
@@ -1150,6 +1156,18 @@ def upload_to_ftp(local_file: str, remote_name: str) -> None:
 # ══════════════════════════════════════════════════════════════════
 
 def main() -> None:
+    # Validate REVENUECAT_API_KEY here (not at module load) so the fast
+    # daily_rc path — which imports from this module but doesn't hit RC's
+    # v2 API — can run on a host that hasn't set this env var.
+    if not REVENUECAT_API_KEY:
+        print(
+            "ERROR: REVENUECAT_API_KEY env var is not set. "
+            "Full refresh cannot run; use refresh_daily_rc_fast.py for the "
+            "webhook-only path.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     if ASA_ENABLED:
         google_token = get_google_access_token()
         config = sheets_read(google_token, "_Config!B1:B1")
