@@ -326,31 +326,77 @@ def fetch_webhook_events() -> dict:
     """
     global _LAST_REFUND_SUMMARY
 
-    if not RC_WEBHOOK_SECRET:
-        print("  [webhooks] RC_WEBHOOK_SECRET not set — skipping webhook fetch")
-        _LAST_REFUND_SUMMARY = {}
-        return {}
-
     # Only fetch the last ~60 days of events. Without since_ms the PHP endpoint
     # streams the log from the OLDEST line forward and cuts at limit=50000 —
     # once the log exceeds 50k events the most recent days silently fall off
     # the end, causing daily_rc to undercount newer days.
     since_ms = int((datetime.now(timezone.utc) - timedelta(days=60)).timestamp() * 1000)
-    url = f"{RC_EVENTS_URL}?since_ms={since_ms}&limit=50000"
-    req = urllib.request.Request(
-        url, headers={"Authorization": f"Bearer {RC_WEBHOOK_SECRET}"},
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            data = json.loads(resp.read().decode())
-    except Exception as e:
-        print(f"  [webhooks] fetch failed: {type(e).__name__}: {e}")
-        _LAST_REFUND_SUMMARY = {}
-        return {}
 
-    events = data.get("events", [])
-    skipped = data.get("skipped_before_since", 0)
-    print(f"  [webhooks] fetched {len(events)} events (skipped {skipped} older than 60d)")
+    # PREFERRED PATH: read rc_events.jsonl from disk directly when this script
+    # is running on the cPanel host (LOCAL_OUTPUT_DIR is set and the log file
+    # is in that directory). This skips Apache entirely, which is important
+    # because the /ads-upload folder is behind HTTP Basic Auth and HTTP only
+    # allows a single Authorization header per request — we can't carry both
+    # basic auth (folder) and bearer (PHP-level) at the same time. Reading
+    # from disk has neither problem.
+    events = None
+    skipped_count = 0
+    if LOCAL_OUTPUT_DIR:
+        local_log = os.path.join(LOCAL_OUTPUT_DIR, "rc_events.jsonl")
+        if os.path.exists(local_log):
+            try:
+                events = []
+                with open(local_log, "r") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            rec = json.loads(line)
+                        except Exception:
+                            continue
+                        ev = rec.get("event") or {}
+                        ts = int(ev.get("purchased_at_ms")
+                                 or ev.get("event_timestamp_ms")
+                                 or 0)
+                        if ts > 0 and ts < since_ms:
+                            skipped_count += 1
+                            continue
+                        events.append(rec)
+                print(f"  [webhooks] read {len(events)} events from local "
+                      f"{local_log} (skipped {skipped_count} older than 60d)")
+            except Exception as e:
+                print(f"  [webhooks] local read failed ({type(e).__name__}: {e}); "
+                      "falling back to HTTP")
+                events = None
+
+    # HTTP fallback for when not running on cPanel.
+    if events is None:
+        if not RC_WEBHOOK_SECRET:
+            print("  [webhooks] RC_WEBHOOK_SECRET not set and no local log — "
+                  "skipping webhook fetch")
+            _LAST_REFUND_SUMMARY = {}
+            return {}
+
+        # Pass the bearer via ?token=... so the basic-auth Authorization
+        # header (when set by an HTTP client middleware) doesn't collide.
+        url = f"{RC_EVENTS_URL}?since_ms={since_ms}&limit=50000" \
+              f"&token={urllib.parse.quote(RC_WEBHOOK_SECRET, safe='')}"
+        req = urllib.request.Request(
+            url, headers={"Authorization": f"Bearer {RC_WEBHOOK_SECRET}"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                data = json.loads(resp.read().decode())
+        except Exception as e:
+            print(f"  [webhooks] fetch failed: {type(e).__name__}: {e}")
+            _LAST_REFUND_SUMMARY = {}
+            return {}
+
+        events = data.get("events", [])
+        skipped_count = data.get("skipped_before_since", 0)
+        print(f"  [webhooks] fetched {len(events)} events over HTTP "
+              f"(skipped {skipped_count} older than 60d)")
 
     revenue_types = {"INITIAL_PURCHASE", "RENEWAL", "NON_RENEWING_PURCHASE", "PRODUCT_CHANGE"}
     by_user = defaultdict(list)

@@ -14,6 +14,11 @@ header("Content-Type: application/json");
 header("X-Content-Type-Options: nosniff");
 
 // ── Auth ────────────────────────────────────────────────────────────────────
+// We accept the bearer token via EITHER the Authorization header OR a ?token=
+// query string. The folder is also protected by Apache basic auth, and HTTP
+// allows only one Authorization header per request, so callers that need to
+// authenticate at both layers (basic auth + this bearer) pass the bearer in
+// the URL while Authorization carries the basic credentials.
 $secret_file = __DIR__ . '/.rc_webhook_secret';
 if (!file_exists($secret_file)) {
     http_response_code(503);
@@ -22,11 +27,25 @@ if (!file_exists($secret_file)) {
 }
 $expected = trim(@file_get_contents($secret_file));
 
+// 1. Try Authorization header (Bearer or raw)
 $got = $_SERVER['HTTP_AUTHORIZATION'] ?? '';
 if (stripos($got, 'Bearer ') === 0) {
     $got = trim(substr($got, 7));
+} elseif (stripos($got, 'Basic ') === 0) {
+    // The Authorization header is basic — caller can't put the bearer here.
+    // Fall through to URL-param check below.
+    $got = '';
 }
-if ($expected === '' || !hash_equals($expected, $got)) {
+
+// 2. Fallback to ?token= query string (length-bounded to avoid log bloat).
+if ($got === '' && isset($_GET['token'])) {
+    $tok = (string) $_GET['token'];
+    if (strlen($tok) > 0 && strlen($tok) < 512) {
+        $got = $tok;
+    }
+}
+
+if ($expected === '' || $got === '' || !hash_equals($expected, $got)) {
     http_response_code(401);
     echo json_encode(['error' => 'Unauthorized']);
     exit;
