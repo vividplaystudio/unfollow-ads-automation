@@ -210,12 +210,42 @@ def rc_get_all_customers() -> list:
         req = urllib.request.Request(
             url, headers={"Authorization": f"Bearer {REVENUECAT_API_KEY}"},
         )
-        try:
-            with urllib.request.urlopen(req, timeout=60) as resp:
-                data = json.loads(resp.read().decode())
-        except urllib.error.HTTPError as e:
-            print(f"RC API error: {e.code}")
-            break
+        # Retry up to 3 times on transient errors (timeout, 5xx, connection
+        # reset). RC's v2 customers endpoint occasionally hangs >60s and
+        # without retries the whole refresh aborts, leaving the dashboard
+        # frozen for hours until the next cron tick recovers — or doesn't.
+        data = None
+        last_err = None
+        for attempt in range(3):
+            try:
+                with urllib.request.urlopen(req, timeout=120) as resp:
+                    data = json.loads(resp.read().decode())
+                break
+            except urllib.error.HTTPError as e:
+                if e.code in (500, 502, 503, 504) and attempt < 2:
+                    last_err = f"HTTP {e.code}"
+                    print(f"  RC API {last_err} on page {page}, retry {attempt+1}/3")
+                    time.sleep(2 ** attempt)
+                    continue
+                print(f"  RC API error: {e.code} on page {page}")
+                last_err = f"HTTP {e.code}"
+                break
+            except (TimeoutError, urllib.error.URLError, ConnectionResetError) as e:
+                last_err = f"{type(e).__name__}: {e}"
+                if attempt < 2:
+                    print(f"  RC API {last_err} on page {page}, retry {attempt+1}/3")
+                    time.sleep(2 ** attempt)
+                    continue
+                print(f"  RC API timeout on page {page} after 3 retries: {last_err}")
+                break
+        if data is None:
+            # Hard failure after retries — surface a clear error so the
+            # caller can decide what to do instead of silently producing a
+            # partial customer list that under-counts daily_rc.
+            raise RuntimeError(
+                f"rc_get_all_customers: gave up at page {page} after retries ({last_err}). "
+                f"Got {len(all_customers)} customers so far."
+            )
         items = data.get("items", [])
         all_customers.extend(items)
         next_page = data.get("next_page")
