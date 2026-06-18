@@ -107,6 +107,25 @@ def main() -> int:
         {"_transactions": txns} for txns in webhook_events.values()
     ]
 
+    # ── DEBUG (will remove once verified): inspect a sample transaction so
+    # we can confirm timestamps, amounts, and tier are present in the form
+    # compute_daily_rc expects.
+    if synthetic_customers and synthetic_customers[0].get("_transactions"):
+        sample = synthetic_customers[0]["_transactions"][0]
+        from datetime import datetime, timezone
+        sample_ts = sample.get("ts")
+        try:
+            sample_day = datetime.fromtimestamp(sample_ts / 1000, tz=timezone.utc).date().isoformat()
+        except Exception:
+            sample_day = "<bad ts>"
+        print(
+            f"  [debug] sample txn: ts={sample_ts} → day={sample_day}, "
+            f"amount={sample.get('amount')}, tier={sample.get('tier')}, "
+            f"is_renewal={sample.get('is_renewal')}"
+        )
+        today_iso = datetime.now(timezone.utc).date().isoformat()
+        print(f"  [debug] today (UTC) = {today_iso}")
+
     # 3. Compute daily_rc using the EXACT same logic the full refresh uses.
     print("→ Computing daily_rc...")
     daily_rc = compute_daily_rc(synthetic_customers, days=30)
