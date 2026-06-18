@@ -59,18 +59,38 @@ PY="$(find_python)"
 LOG="$SCRIPT_DIR/cron.log"
 TS="$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
 
+# Acquire a flock-style lock per job so a slow run (e.g. RC, which can
+# take 10+ minutes when RC's API is sluggish) does not get its output
+# interleaved with the next cron tick spawning a duplicate instance.
+# Skip with a clear log line if the previous run is still going.
+LOCK_DIR="$SCRIPT_DIR/locks"
+mkdir -p "$LOCK_DIR"
+LOCK="$LOCK_DIR/$1.lock"
+exec 9>"$LOCK"
+if ! flock -n 9; then
+    holder="$(cat "$LOCK" 2>/dev/null || echo "?")"
+    echo "[$TS] === $1 refresh SKIPPED: previous run still in progress (pid $holder) ===" >> "$LOG"
+    exit 0
+fi
+echo "$$" >&9
+
+# Run Python unbuffered (-u) so progress prints appear in cron.log in real
+# time — without this, prints stay in stdout buffer until the script exits
+# and we can't tell a hung run apart from a slow one.
+PYFLAGS="-u"
+
 case "$1" in
     meta)
         echo "[$TS] === Meta refresh (using $PY) ===" >> "$LOG"
-        "$PY" "$SCRIPT_DIR/refresh_meta_ads.py" >> "$LOG" 2>&1
+        "$PY" $PYFLAGS "$SCRIPT_DIR/refresh_meta_ads.py" >> "$LOG" 2>&1
         ;;
     adjust)
         echo "[$TS] === Adjust refresh (using $PY) ===" >> "$LOG"
-        "$PY" "$SCRIPT_DIR/refresh_adjust.py" >> "$LOG" 2>&1
+        "$PY" $PYFLAGS "$SCRIPT_DIR/refresh_adjust.py" >> "$LOG" 2>&1
         ;;
     rc)
         echo "[$TS] === RC dashboard refresh (using $PY) ===" >> "$LOG"
-        "$PY" "$SCRIPT_DIR/refresh_dashboard_json.py" >> "$LOG" 2>&1
+        "$PY" $PYFLAGS "$SCRIPT_DIR/refresh_dashboard_json.py" >> "$LOG" 2>&1
         ;;
     *)
         echo "Usage: $0 {meta|adjust|rc}" >&2
