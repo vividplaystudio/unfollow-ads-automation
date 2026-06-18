@@ -87,7 +87,8 @@ jobs:
 
           # Upload script files (binary mode to preserve line endings)
           for fname in ["refresh_meta_ads.py", "refresh_adjust.py",
-                        "refresh_dashboard_json.py"]:
+                        "refresh_dashboard_json.py",
+                        "refresh_daily_rc_fast.py"]:
               with open(fname, "rb") as f:
                   ftp.storbinary(f"STOR {fname}", f)
                   print(f"  ✅ uploaded {fname}")
