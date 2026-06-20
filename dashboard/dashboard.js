@@ -253,6 +253,68 @@ function computeStaleness(timestamp) {
   return { status, ageMin, label, emoji, iso: ts.toISOString(), local: ts.toLocaleString() };
 }
 
+// Cross-source divergence check: when RC daily revenue and Adjust
+// daily revenue disagree by >20% on the same settled day, surface it.
+// This catches the regional-pricing problem (Adjust uses static USD,
+// RC uses what Apple actually collected) AND general pipeline staleness.
+// Returns null if there's no concerning divergence in the trailing
+// window; otherwise returns a short string describing the worst case.
+function computeRcAdjustDivergence() {
+  if (!RC.data || !Array.isArray(RC.data.daily_rc)) return null;
+  if (!ADJ.data || !Array.isArray(ADJ.data.by_creative_daily)) return null;
+
+  // Adjust events per day (all networks summed — gives the total revenue
+  // Adjust thinks it tracked that day, which should approximate RC's
+  // new-sub revenue but in static USD prices)
+  const adjByDay = new Map();
+  for (const r of ADJ.data.by_creative_daily) {
+    const d = r.day;
+    if (!d) continue;
+    const rev = (+r.com_weekly_revenue || 0)
+              + (+r.com_monthly_revenue || 0)
+              + (+r.com_yearly_revenue || 0);
+    adjByDay.set(d, (adjByDay.get(d) || 0) + rev);
+  }
+
+  // Check the last 7 SETTLED days (skip yesterday + today, RC still settles)
+  const today = new Date();
+  const minus = n => {
+    const d = new Date(today);
+    d.setUTCDate(d.getUTCDate() - n);
+    return d.toISOString().slice(0, 10);
+  };
+  const settled = [];
+  for (let n = 2; n <= 8; n++) settled.push(minus(n));
+
+  const rcByDay = new Map(RC.data.daily_rc.map(r => [r.date, +r.revenue || 0]));
+
+  const divergent = [];
+  for (const d of settled) {
+    const rc = rcByDay.get(d);
+    const adj = adjByDay.get(d);
+    if (!rc || !adj) continue;
+    if (rc <= 50 && adj <= 50) continue; // ignore noise days (low-volume)
+    const ratio = rc / adj;
+    // RC should usually be >= Adjust (includes renewals). A ratio <0.8
+    // means Adjust over-reported by >20%; >1.4 means RC dramatically
+    // higher — either is worth flagging.
+    if (ratio < 0.8 || ratio > 1.4) {
+      const pct = ((ratio - 1) * 100).toFixed(0);
+      divergent.push({ date: d, rc, adj, pct });
+    }
+  }
+
+  if (!divergent.length) return null;
+  // Report the worst one
+  divergent.sort((a, b) => Math.abs(b.pct) - Math.abs(a.pct));
+  const w = divergent[0];
+  return {
+    summary: `RC vs Adjust diverge on ${w.date}: RC $${Math.round(w.rc)} vs Adjust $${Math.round(w.adj)} (${w.pct}%)`,
+    count: divergent.length,
+    all: divergent,
+  };
+}
+
 // Render the global staleness banner across the top of the page. Hidden
 // when everything is fresh; turns yellow/red when any source ages out.
 function renderStalenessBanner() {
@@ -277,29 +339,45 @@ function renderStalenessBanner() {
     sources.push({ name: "Adjust", ...computeStaleness(ADJ.data.generated_at) });
   }
 
+  // Cross-source check (Step 6): RC vs Adjust divergence
+  const div = computeRcAdjustDivergence();
+
   // Worst status drives the banner color
-  const worst = sources.reduce((acc, s) => {
+  let worst = sources.reduce((acc, s) => {
     const order = { fresh: 0, warn: 1, stale: 2, unknown: 1 };
     return (order[s.status] || 0) > (order[acc] || 0) ? s.status : acc;
   }, "fresh");
+  if (div) {
+    // Treat divergence as at least a "warn" — it's not necessarily a hard
+    // failure but it deserves attention.
+    if (worst === "fresh") worst = "warn";
+  }
 
-  if (worst === "fresh" || sources.length === 0) {
+  if (worst === "fresh" || (sources.length === 0 && !div)) {
     banner.style.display = "none";
     return;
   }
 
   banner.style.display = "";
   banner.className = "staleness-banner staleness-" + worst;
-  const headline = worst === "stale"
-    ? "⚠ Dashboard data is stale — some refreshes have not completed in over 2 hours."
-    : "⚡ Some data sources haven't refreshed recently.";
-  const list = sources
+  let headline;
+  if (worst === "stale") {
+    headline = "⚠ Dashboard data is stale — some refreshes have not completed in over 2 hours.";
+  } else if (div && sources.every(s => s.status === "fresh")) {
+    headline = "⚡ RC and Adjust disagree on a recent day — verify which source is right.";
+  } else {
+    headline = "⚡ Some data sources haven't refreshed recently.";
+  }
+  const staleList = sources
     .filter(s => s.status !== "fresh")
     .map(s => `<li><strong>${s.name}</strong>: ${s.emoji} ${s.label} <span class="staleness-iso">(${s.local})</span></li>`)
     .join("");
+  const divList = div
+    ? `<li><strong>RC vs Adjust:</strong> ${div.summary}${div.count > 1 ? ` <span class="staleness-iso">(+${div.count - 1} more day(s))</span>` : ""}</li>`
+    : "";
   banner.innerHTML = `
     <div class="staleness-headline">${headline}</div>
-    <ul class="staleness-list">${list}</ul>
+    <ul class="staleness-list">${staleList}${divList}</ul>
   `;
 }
 
