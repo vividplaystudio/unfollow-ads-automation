@@ -217,21 +217,90 @@ function initFilters() {
       campSel.innerHTML += `<option value="${c.name}" ${c.name === currentCamp ? "selected" : ""}>${c.name}</option>`;
     });
 
-  const lu = STATE.data.last_updated ? new Date(STATE.data.last_updated) : null;
   const luEl = document.getElementById("lastUpdated");
-  if (lu) {
-    const now = new Date();
-    const mins = Math.round((now - lu) / 60000);
-    let text;
-    if (mins < 1) text = "just now";
-    else if (mins < 60) text = `${mins} min ago`;
-    else if (mins < 1440) text = `${Math.round(mins / 60)}h ago`;
-    else text = `${Math.round(mins / 1440)}d ago`;
-    luEl.textContent = text;
-    luEl.title = lu.toLocaleString();
+  if (STATE.data.last_updated) {
+    const s = computeStaleness(STATE.data.last_updated);
+    luEl.textContent = `${s.emoji} ${s.label}`;
+    luEl.title = s.local;
+    luEl.className = "staleness-" + s.status;
   } else {
     luEl.textContent = "unknown";
+    luEl.className = "staleness-unknown";
   }
+  renderStalenessBanner();
+}
+
+// ─── Staleness helpers ─────────────────────────────────────────
+// Tell the user when a data source has gone stale instead of silently
+// showing old numbers. Every refresh path stamps its result with a
+// timestamp; we compute age vs Date.now() and bucket into three states.
+const STALE_THRESHOLDS_MIN = { fresh: 30, warn: 120 }; // <30m fresh, 30-120m warn, >120m stale
+
+function computeStaleness(timestamp) {
+  if (!timestamp) return { status: "unknown", ageMin: null, label: "no data", emoji: "?" };
+  const ts = new Date(timestamp);
+  if (isNaN(ts.getTime())) return { status: "unknown", ageMin: null, label: "bad ts", emoji: "?" };
+  const ageMin = Math.round((Date.now() - ts.getTime()) / 60000);
+  let label;
+  if (ageMin < 1) label = "just now";
+  else if (ageMin < 60) label = `${ageMin}m ago`;
+  else if (ageMin < 1440) label = `${Math.round(ageMin / 60)}h ago`;
+  else label = `${Math.round(ageMin / 1440)}d ago`;
+  let status, emoji;
+  if (ageMin <= STALE_THRESHOLDS_MIN.fresh) { status = "fresh"; emoji = "🟢"; }
+  else if (ageMin <= STALE_THRESHOLDS_MIN.warn) { status = "warn"; emoji = "🟡"; }
+  else { status = "stale"; emoji = "🔴"; }
+  return { status, ageMin, label, emoji, iso: ts.toISOString(), local: ts.toLocaleString() };
+}
+
+// Render the global staleness banner across the top of the page. Hidden
+// when everything is fresh; turns yellow/red when any source ages out.
+function renderStalenessBanner() {
+  const banner = document.getElementById("stalenessBanner");
+  if (!banner) return;
+
+  const sources = [];
+  // Full refresh of data.json (campaigns/keywords/channels + daily_rc fallback)
+  if (STATE.data && STATE.data.last_updated) {
+    sources.push({ name: "Full RC refresh", ...computeStaleness(STATE.data.last_updated) });
+  }
+  // Fast refresh of just daily_rc (only set when the fast path actually ran;
+  // its absence is normal right after a full refresh, so we don't flag it
+  // unless the full refresh is ALSO stale)
+  if (STATE.data && STATE.data.daily_rc_updated_at) {
+    sources.push({ name: "True Daily Profit (fast)", ...computeStaleness(STATE.data.daily_rc_updated_at) });
+  }
+  if (META.data && META.data.generated_at) {
+    sources.push({ name: "Meta Ads", ...computeStaleness(META.data.generated_at) });
+  }
+  if (ADJ.data && ADJ.data.generated_at) {
+    sources.push({ name: "Adjust", ...computeStaleness(ADJ.data.generated_at) });
+  }
+
+  // Worst status drives the banner color
+  const worst = sources.reduce((acc, s) => {
+    const order = { fresh: 0, warn: 1, stale: 2, unknown: 1 };
+    return (order[s.status] || 0) > (order[acc] || 0) ? s.status : acc;
+  }, "fresh");
+
+  if (worst === "fresh" || sources.length === 0) {
+    banner.style.display = "none";
+    return;
+  }
+
+  banner.style.display = "";
+  banner.className = "staleness-banner staleness-" + worst;
+  const headline = worst === "stale"
+    ? "⚠ Dashboard data is stale — some refreshes have not completed in over 2 hours."
+    : "⚡ Some data sources haven't refreshed recently.";
+  const list = sources
+    .filter(s => s.status !== "fresh")
+    .map(s => `<li><strong>${s.name}</strong>: ${s.emoji} ${s.label} <span class="staleness-iso">(${s.local})</span></li>`)
+    .join("");
+  banner.innerHTML = `
+    <div class="staleness-headline">${headline}</div>
+    <ul class="staleness-list">${list}</ul>
+  `;
 }
 
 // ─── Helpers ───────────────────────────────────────────────────
@@ -1072,6 +1141,8 @@ async function loadAdjustData() {
     console.warn("Adjust data not available:", e.message);
     ADJ.data = null;
   }
+  // Re-evaluate the global staleness banner now that ADJ data state has changed.
+  if (typeof renderStalenessBanner === "function") renderStalenessBanner();
 }
 
 // Rebuild ADJ maps for the current Meta date window. Cheap (<2ms for ~700 rows).
@@ -1160,19 +1231,16 @@ function renderMeta() {
   renderMetaKpis();
   renderMetaTable();
 
-  const lu = META.data.generated_at ? new Date(META.data.generated_at) : null;
   const el = document.getElementById("metaUpdated");
-  if (lu) {
-    const mins = Math.round((Date.now() - lu) / 60000);
-    let text;
-    if (mins < 1) text = "just now";
-    else if (mins < 60) text = `${mins} min ago`;
-    else text = `${Math.round(mins / 60)}h ago`;
-    el.textContent = "updated " + text;
-    el.title = lu.toLocaleString();
+  if (META.data.generated_at) {
+    const s = computeStaleness(META.data.generated_at);
+    el.textContent = `updated ${s.emoji} ${s.label}`;
+    el.title = s.local;
+    el.className = "staleness-" + s.status;
   } else {
     el.textContent = "—";
   }
+  renderStalenessBanner();
 }
 
 function renderMetaKpis() {

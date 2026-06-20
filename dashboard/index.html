@@ -37,6 +37,11 @@
 
 <main class="container">
 
+  <!-- Staleness banner — hidden when every data source is fresh. JS
+       populates the body and toggles its class to "staleness-warn"
+       (yellow) or "staleness-stale" (red) based on the oldest source. -->
+  <div id="stalenessBanner" class="staleness-banner" style="display:none"></div>
+
   <!-- Filter bar -->
   <section class="filter-bar">
     <div class="filter-group">
