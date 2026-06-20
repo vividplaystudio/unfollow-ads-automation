@@ -1,0 +1,190 @@
+name: Fix webhook .htaccess (allow RC bearer POSTs)
+
+# One-shot fix: append an exemption for rc_webhook.php to the dashboard
+# .htaccess so RC's bearer-auth POSTs aren't blocked by the folder-level
+# HTTP Basic Auth that cPanel's Directory Privacy applies. PHP-level
+# bearer check inside rc_webhook.php still enforces the shared secret —
+# this only relaxes the Apache auth, not the application auth.
+#
+# Safe-by-design:
+#   1. Download current .htaccess
+#   2. Refuse to proceed if it doesn't look like the cPanel pattern we
+#      expect (avoid clobbering a manually-customized file)
+#   3. Refuse to add the rule twice (idempotent)
+#   4. Append the rule below cPanel's "End section" marker
+#   5. Upload only the new file (FTP STOR replaces, no half-write)
+#   6. Verify rc_webhook.php now accepts bearer-only POST
+
+on:
+  workflow_dispatch:
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Patch .htaccess to allow webhook POSTs
+        env:
+          FTP_HOST: ${{ secrets.FTP_HOST }}
+          FTP_USER: ${{ secrets.FTP_USER }}
+          FTP_PASS: ${{ secrets.FTP_PASS }}
+          FTP_PATH: ${{ secrets.FTP_PATH }}
+          RC_WEBHOOK_SECRET: ${{ secrets.RC_WEBHOOK_SECRET }}
+        run: |
+          python3 << 'PYEOF'
+          import ftplib, ssl, os, io, sys, urllib.request, json
+          from datetime import datetime, timezone
+
+          host = os.environ["FTP_HOST"]
+          user = os.environ["FTP_USER"]
+          pw = os.environ["FTP_PASS"]
+          path = os.environ["FTP_PATH"]
+          rc_secret = os.environ.get("RC_WEBHOOK_SECRET", "").strip()
+
+          ctx = ssl.create_default_context()
+          ctx.check_hostname = False
+          ctx.verify_mode = ssl.CERT_NONE
+
+          ftp = ftplib.FTP_TLS(host, timeout=60, context=ctx)
+          ftp.login(user, pw)
+          ftp.prot_p()
+
+          # Navigate (handle chroot fallback)
+          try:
+              ftp.cwd(path)
+          except ftplib.error_perm:
+              import re
+              stripped = re.sub(r"^/home/[^/]+", "", path) or "/"
+              ftp.cwd(stripped)
+          print(f"cwd: {ftp.pwd()}")
+
+          # 1. Read current .htaccess
+          buf = io.BytesIO()
+          ftp.retrbinary("RETR .htaccess", buf.write)
+          current = buf.getvalue().decode("utf-8", errors="replace")
+          print(f"\nCurrent .htaccess ({len(current)} bytes):")
+          print(current)
+
+          # 2. Validate we're working with the cPanel-managed pattern. If
+          # something unexpected is in there (e.g. custom directives we
+          # didn't anticipate), bail out so we don't clobber it.
+          must_have = [
+              "Section managed by cPanel: Password Protected Directories",
+              "End section managed by cPanel: Password Protected Directories",
+              "AuthType Basic",
+              "Require valid-user",
+          ]
+          for marker in must_have:
+              if marker not in current:
+              # ^ note: must_have is the EXPECTED cPanel layout. Missing any
+              #   of these means the file has been customized — refuse.
+                  print(f"\nERROR: expected marker not found: {marker!r}")
+                  print("Refusing to patch — file looks customized.")
+                  sys.exit(1)
+
+          # 3. Idempotency check
+          exemption_marker = "# BEGIN: rc_webhook.php exemption"
+          if exemption_marker in current:
+              print("\nException already present — nothing to do.")
+              sys.exit(0)
+
+          # 4. Build the exemption block and append after the cPanel-managed
+          # section (which ends with the cp:ppd "End section" marker).
+          exemption = (
+              "\n"
+              "# BEGIN: rc_webhook.php exemption (added by fix-webhook-htaccess.yml)\n"
+              "# RevenueCat POSTs to rc_webhook.php with an Authorization: Bearer\n"
+              "# <secret> header. HTTP allows only one Authorization header per\n"
+              "# request, so the folder's HTTP Basic Auth requirement above\n"
+              "# blocks RC's bearer-only POST with a 401 before PHP can run.\n"
+              "# Allow Apache to skip the Basic Auth check for this one file —\n"
+              "# PHP still validates the bearer token against .rc_webhook_secret.\n"
+              "<Files \"rc_webhook.php\">\n"
+              "    # Apache 2.4 (LiteSpeed / modern cPanel hosts)\n"
+              "    <RequireAny>\n"
+              "        Require all granted\n"
+              "    </RequireAny>\n"
+              "    # Apache 2.2 fallback\n"
+              "    Satisfy Any\n"
+              "    Order Allow,Deny\n"
+              "    Allow from all\n"
+              "</Files>\n"
+              "# Same treatment for rc_events.php so off-host callers (e.g. the\n"
+              "# old workflow path) can still hit it with bearer-only auth.\n"
+              "<Files \"rc_events.php\">\n"
+              "    <RequireAny>\n"
+              "        Require all granted\n"
+              "    </RequireAny>\n"
+              "    Satisfy Any\n"
+              "    Order Allow,Deny\n"
+              "    Allow from all\n"
+              "</Files>\n"
+              "# END: rc_webhook.php exemption\n"
+          )
+
+          new_content = current.rstrip() + "\n" + exemption
+
+          # 5. Show the new content for the workflow log so we have a
+          # paper trail of what was uploaded.
+          print(f"\nNew .htaccess ({len(new_content)} bytes):")
+          print(new_content)
+
+          # 6. Upload atomically (FTP STOR replaces in one op; if the upload
+          # is interrupted mid-transfer the server may still see a partial
+          # file — but at FTP-protocol level, STOR is the standard way).
+          new_buf = io.BytesIO(new_content.encode("utf-8"))
+          ftp.storbinary("STOR .htaccess", new_buf)
+          print("\n✅ Uploaded patched .htaccess")
+
+          # 7. Verify by reading it back
+          verify = io.BytesIO()
+          ftp.retrbinary("RETR .htaccess", verify.write)
+          if verify.getvalue() != new_content.encode("utf-8"):
+              print("\n⚠ Upload mismatch — re-uploaded file differs from intended content.")
+              sys.exit(1)
+          print("✅ Verified .htaccess content matches expected")
+
+          ftp.quit()
+
+          # 8. Smoke test: hit rc_webhook.php with a bearer header (no basic auth)
+          # and confirm we get a non-401 response. We expect 400 or 405 since
+          # the bearer is set but body is missing — that's success because it
+          # means we reached PHP, not Apache's auth wall.
+          if rc_secret:
+              print("\nSmoke test: POST rc_webhook.php with bearer only…")
+              req = urllib.request.Request(
+                  f"https://genivox.com/ads-upload/rc_webhook.php",
+                  data=b'{"event": {"environment": "PRODUCTION", "type": "TEST"}}',
+                  method="POST",
+                  headers={
+                      "Authorization": f"Bearer {rc_secret}",
+                      "Content-Type": "application/json",
+                  },
+              )
+              ssl_ctx = ssl.create_default_context()
+              ssl_ctx.check_hostname = False
+              ssl_ctx.verify_mode = ssl.CERT_NONE
+              try:
+                  with urllib.request.urlopen(req, timeout=30, context=ssl_ctx) as r:
+                      body = r.read(500).decode("utf-8", errors="replace")
+                      print(f"  HTTP {r.status}: {body}")
+                      if r.status == 401:
+                          print("\n⚠ Still got 401 — exemption may not have taken effect (LiteSpeed cache?).")
+                          sys.exit(1)
+                      print("\n✅ Reached PHP — exemption works.")
+              except urllib.error.HTTPError as e:
+                  body = e.read(500).decode("utf-8", errors="replace")
+                  print(f"  HTTPError {e.code}: {body}")
+                  if e.code == 401:
+                      # Look at the WWW-Authenticate to distinguish Apache vs PHP
+                      auth_hdr = e.headers.get("WWW-Authenticate", "")
+                      if "Basic" in auth_hdr:
+                          print("\n⚠ Apache basic-auth still blocking. Exemption did NOT apply.")
+                          sys.exit(1)
+                      else:
+                          print("\n✅ Got 401 but from PHP (bearer didn't match) — Apache exemption works.")
+                  else:
+                      # 400, 405, 200 etc. — all mean we reached PHP
+                      print(f"\n✅ Reached PHP (HTTP {e.code}) — exemption works.")
+          PYEOF
