@@ -1138,6 +1138,141 @@ def compute_cohort_retention(customers) -> dict:
 
 
 # ══════════════════════════════════════════════════════════════════
+# Pre-flight validation — refuse to publish obviously broken data
+# ══════════════════════════════════════════════════════════════════
+
+def validate_daily_rc(new_daily_rc, prev_daily_rc, *, source="unknown"):
+    """
+    Sanity-check a freshly computed daily_rc against the previous published
+    version. Used by both the full and fast refresh paths to refuse writes
+    that would silently corrupt the dashboard.
+
+    Returns (is_ok: bool, reason: str).
+
+    Rules (any one fails → reject):
+      1. new_daily_rc must be a non-empty list
+      2. Each entry must have the required fields
+      3. For days >= 3 days old ("settled"), revenue MUST NOT drop more
+         than 30% vs the previous version — settled days can have small
+         refund-driven dips but not large drops
+      4. For settled days where prev revenue was > $50, new revenue MUST
+         NOT be exactly $0 — that pattern is what we just fought to fix
+         (compute_daily_rc returning zeros after a webhook auth failure)
+
+    First-run (no prev_daily_rc) passes through so a fresh setup isn't
+    blocked. Days <= 3 days old are not compared because RC's webhook
+    delivery lags ~24h and small revenue differences are expected.
+    """
+    if not isinstance(new_daily_rc, list) or len(new_daily_rc) == 0:
+        return False, f"[{source}] daily_rc is empty or not a list"
+
+    required_fields = {"date", "revenue", "new_subs", "renewals"}
+    for i, entry in enumerate(new_daily_rc):
+        if not isinstance(entry, dict):
+            return False, f"[{source}] daily_rc[{i}] is not a dict"
+        missing = required_fields - set(entry.keys())
+        if missing:
+            return False, (
+                f"[{source}] daily_rc[{i}] (date={entry.get('date','?')}) "
+                f"missing fields: {sorted(missing)}"
+            )
+
+    if not prev_daily_rc:
+        return True, f"[{source}] no previous daily_rc — first-run, passing"
+
+    prev_by_date = {e["date"]: e for e in prev_daily_rc if e.get("date")}
+    today = datetime.now(timezone.utc).date()
+    settled_cutoff = (today - timedelta(days=3)).isoformat()
+
+    big_drops = []
+    suspicious_zeros = []
+    for entry in new_daily_rc:
+        date = entry.get("date")
+        if not date or date > settled_cutoff:
+            continue
+        prev_entry = prev_by_date.get(date)
+        if not prev_entry:
+            continue
+        new_rev = float(entry.get("revenue") or 0)
+        prev_rev = float(prev_entry.get("revenue") or 0)
+        if prev_rev <= 0:
+            continue
+        if new_rev == 0 and prev_rev > 50:
+            suspicious_zeros.append(f"{date}: new=$0, prev=${prev_rev:.0f}")
+        elif new_rev < prev_rev * 0.70:
+            pct = (new_rev / prev_rev - 1) * 100
+            big_drops.append(f"{date}: ${prev_rev:.0f} → ${new_rev:.0f} ({pct:+.0f}%)")
+
+    if suspicious_zeros:
+        return False, (
+            f"[{source}] settled days dropped to $0 (prev was non-zero): "
+            + "; ".join(suspicious_zeros[:5])
+        )
+    if big_drops:
+        return False, (
+            f"[{source}] settled days dropped >30%: "
+            + "; ".join(big_drops[:5])
+        )
+
+    return True, (
+        f"[{source}] daily_rc validation passed "
+        f"({len(new_daily_rc)} days, no settled-day regressions)"
+    )
+
+
+def load_existing_data_json():
+    """Load the previously-published data.json so we can validate against it.
+    Returns None if it doesn't exist or is unparseable — both are treated as
+    'first run' by the validator."""
+    if not LOCAL_OUTPUT_DIR:
+        return None
+    path = os.path.join(LOCAL_OUTPUT_DIR, "data.json")
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r") as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"  [validate] could not read existing data.json: {e}")
+        return None
+
+
+def validate_full_data(new_data, prev_data):
+    """
+    Validate the FULL data.json output before publishing. Returns
+    (is_ok, reason).
+
+    Catches:
+      - missing top-level fields
+      - daily_rc failing validate_daily_rc()
+      - total JSON size shrinking >50% vs previous (which would mean
+        most arrays are empty — typically a fetch failure)
+    """
+    if not isinstance(new_data, dict):
+        return False, "new data is not a dict"
+    if "last_updated" not in new_data:
+        return False, "missing last_updated field"
+
+    for field in ("campaigns", "channels"):
+        if field in new_data and not isinstance(new_data[field], list):
+            return False, f"{field} is not a list"
+
+    new_daily = new_data.get("daily_rc") or []
+    prev_daily = (prev_data or {}).get("daily_rc") or []
+    ok, reason = validate_daily_rc(new_daily, prev_daily, source="full-refresh")
+    if not ok:
+        return False, reason
+
+    if prev_data:
+        new_size = len(json.dumps(new_data, separators=(",", ":")))
+        prev_size = len(json.dumps(prev_data, separators=(",", ":")))
+        if new_size < prev_size * 0.5 and prev_size > 1000:
+            return False, f"new size {new_size:,} < 50% of prev {prev_size:,}"
+
+    return True, reason  # includes the daily_rc validation passed message
+
+
+# ══════════════════════════════════════════════════════════════════
 # FTP upload
 # ══════════════════════════════════════════════════════════════════
 
@@ -1537,6 +1672,23 @@ def main() -> None:
     print(f"  Campaigns: {len(campaigns_out)}")
     print(f"  Keywords: {len(keywords_out)}")
     print(f"  Ads: {len(ads_out)}")
+
+    # Pre-flight validation: refuse to publish data.json if it looks broken
+    # (zero revenue on settled days, missing fields, dramatic size shrink).
+    # The previous good data.json stays in place — the dashboard keeps
+    # showing the last-known-good numbers until the next refresh succeeds.
+    print("\n--- Pre-flight validation ---")
+    prev_data = load_existing_data_json()
+    ok, reason = validate_full_data(output, prev_data)
+    print(f"  {reason}")
+    if not ok:
+        print(
+            "\n❌ REFUSING TO PUBLISH — validation failed. "
+            "Existing data.json left untouched. Investigate the source "
+            "and re-run.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     # Upload
     print("\n--- Uploading to cPanel ---")

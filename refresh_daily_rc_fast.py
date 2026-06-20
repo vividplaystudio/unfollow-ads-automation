@@ -50,6 +50,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from refresh_dashboard_json import (  # noqa: E402
     fetch_webhook_events,
     compute_daily_rc,
+    validate_daily_rc,
     LOCAL_OUTPUT_DIR,
     RC_WEBHOOK_SECRET,
 )
@@ -107,25 +108,6 @@ def main() -> int:
         {"_transactions": txns} for txns in webhook_events.values()
     ]
 
-    # ── DEBUG (will remove once verified): inspect a sample transaction so
-    # we can confirm timestamps, amounts, and tier are present in the form
-    # compute_daily_rc expects.
-    if synthetic_customers and synthetic_customers[0].get("_transactions"):
-        sample = synthetic_customers[0]["_transactions"][0]
-        from datetime import datetime, timezone
-        sample_ts = sample.get("ts")
-        try:
-            sample_day = datetime.fromtimestamp(sample_ts / 1000, tz=timezone.utc).date().isoformat()
-        except Exception:
-            sample_day = "<bad ts>"
-        print(
-            f"  [debug] sample txn: ts={sample_ts} → day={sample_day}, "
-            f"amount={sample.get('amount')}, tier={sample.get('tier')}, "
-            f"is_renewal={sample.get('is_renewal')}"
-        )
-        today_iso = datetime.now(timezone.utc).date().isoformat()
-        print(f"  [debug] today (UTC) = {today_iso}")
-
     # 3. Compute daily_rc using the EXACT same logic the full refresh uses.
     print("→ Computing daily_rc...")
     daily_rc = compute_daily_rc(synthetic_customers, days=30)
@@ -149,6 +131,22 @@ def main() -> int:
     print("→ Patching data.json...")
     with open(data_path, "r") as f:
         data = json.load(f)
+
+    # 4a. Validate the new daily_rc against the existing one BEFORE we
+    # patch. If it would regress (zeros on settled days, big drops), keep
+    # the existing daily_rc and exit non-zero so the cron log shows the
+    # rejection. This is the gate that stopped earlier today's bug
+    # (compute_daily_rc returning zeros) from reaching the dashboard.
+    prev_daily_rc = data.get("daily_rc") or []
+    ok, reason = validate_daily_rc(daily_rc, prev_daily_rc, source="rc-fast")
+    print(f"  validate: {reason}")
+    if not ok:
+        print(
+            "ERROR: refusing to overwrite daily_rc with broken data. "
+            "Existing data.json left untouched.",
+            file=sys.stderr,
+        )
+        return 1
 
     data["daily_rc"] = daily_rc
     data["daily_rc_updated_at"] = ts
