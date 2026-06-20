@@ -51,49 +51,61 @@ if ($expected === '' || $got === '' || !hash_equals($expected, $got)) {
     exit;
 }
 
-// ── Read the log, stream line-by-line to avoid loading everything ───────────
-$log_file = __DIR__ . '/rc_events.jsonl';
-if (!file_exists($log_file)) {
+// ── Read the log(s), stream line-by-line to avoid loading everything ───────
+// Step 4 rotation means there may be multiple files:
+//   - rc_events.jsonl                          (live, currently being appended)
+//   - rc_events-YYYYMMDD-HHMMSS.jsonl.archive  (zero or more rotated)
+// We scan archives oldest-first, then the live file, so the chronological
+// ordering of the returned events matches what they had before rotation.
+$since_ms = isset($_GET['since_ms']) ? (int) $_GET['since_ms'] : 0;
+$limit    = isset($_GET['limit'])    ? max(1, (int) $_GET['limit']) : 50000;
+
+$log_files = [];
+$archives = @glob(__DIR__ . '/rc_events-*.jsonl.archive');
+if (is_array($archives)) {
+    sort($archives);  // lexicographic == chronological for YYYYMMDD-HHMMSS
+    $log_files = $archives;
+}
+$live = __DIR__ . '/rc_events.jsonl';
+if (file_exists($live)) {
+    $log_files[] = $live;
+}
+if (!$log_files) {
     echo json_encode(['events' => [], 'count' => 0]);
     exit;
 }
 
-$since_ms = isset($_GET['since_ms']) ? (int) $_GET['since_ms'] : 0;
-$limit = isset($_GET['limit']) ? max(1, (int) $_GET['limit']) : 50000;
-
 $out = [];
 $skipped = 0;
-$fp = @fopen($log_file, 'rb');
-if (!$fp) {
-    http_response_code(500);
-    echo json_encode(['error' => 'Cannot open log file']);
-    exit;
-}
-while (($line = fgets($fp)) !== false) {
-    $line = trim($line);
-    if ($line === '') continue;
-    $rec = json_decode($line, true);
-    if (!is_array($rec)) continue;
-    $ev = $rec['event'] ?? null;
-    if (!is_array($ev)) continue;
+foreach ($log_files as $log_file) {
+    $fp = @fopen($log_file, 'rb');
+    if (!$fp) continue;  // missing/permission — skip; don't fail whole request
+    while (($line = fgets($fp)) !== false) {
+        $line = trim($line);
+        if ($line === '') continue;
+        $rec = json_decode($line, true);
+        if (!is_array($rec)) continue;
+        $ev = $rec['event'] ?? null;
+        if (!is_array($ev)) continue;
 
-    $ts = 0;
-    foreach (['purchased_at_ms', 'event_timestamp_ms'] as $k) {
-        if (isset($ev[$k])) {
-            $ts = (int) $ev[$k];
-            break;
+        $ts = 0;
+        foreach (['purchased_at_ms', 'event_timestamp_ms'] as $k) {
+            if (isset($ev[$k])) {
+                $ts = (int) $ev[$k];
+                break;
+            }
         }
-    }
 
-    if ($since_ms > 0 && $ts > 0 && $ts < $since_ms) {
-        $skipped++;
-        continue;
-    }
+        if ($since_ms > 0 && $ts > 0 && $ts < $since_ms) {
+            $skipped++;
+            continue;
+        }
 
-    $out[] = $rec;
-    if (count($out) >= $limit) break;
+        $out[] = $rec;
+        if (count($out) >= $limit) break 2;
+    }
+    fclose($fp);
 }
-fclose($fp);
 
 echo json_encode([
     'events' => $out,

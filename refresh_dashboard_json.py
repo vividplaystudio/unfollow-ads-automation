@@ -339,32 +339,51 @@ def fetch_webhook_events() -> dict:
     # allows a single Authorization header per request — we can't carry both
     # basic auth (folder) and bearer (PHP-level) at the same time. Reading
     # from disk has neither problem.
+    #
+    # Step 4 added rotation: when the live file crosses 10 MB, the webhook
+    # receiver atomically renames it to rc_events-YYYYMMDD-HHMMSS.jsonl.archive
+    # so the file stays small. The reader walks ALL rotated archives
+    # oldest-first then the live file, so the data stream is uninterrupted
+    # across rotations. Events older than since_ms in the archives are
+    # skipped at parse time.
     events = None
     skipped_count = 0
     if LOCAL_OUTPUT_DIR:
-        local_log = os.path.join(LOCAL_OUTPUT_DIR, "rc_events.jsonl")
-        if os.path.exists(local_log):
+        import glob as _glob
+        live_path = os.path.join(LOCAL_OUTPUT_DIR, "rc_events.jsonl")
+        archive_pattern = os.path.join(LOCAL_OUTPUT_DIR, "rc_events-*.jsonl.archive")
+        archive_files = sorted(_glob.glob(archive_pattern))  # chronological
+        log_files = list(archive_files)
+        if os.path.exists(live_path):
+            log_files.append(live_path)
+
+        if log_files:
             try:
                 events = []
-                with open(local_log, "r") as f:
-                    for line in f:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            rec = json.loads(line)
-                        except Exception:
-                            continue
-                        ev = rec.get("event") or {}
-                        ts = int(ev.get("purchased_at_ms")
-                                 or ev.get("event_timestamp_ms")
-                                 or 0)
-                        if ts > 0 and ts < since_ms:
-                            skipped_count += 1
-                            continue
-                        events.append(rec)
+                for path in log_files:
+                    with open(path, "r") as f:
+                        for line in f:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            try:
+                                rec = json.loads(line)
+                            except Exception:
+                                continue
+                            ev = rec.get("event") or {}
+                            ts = int(ev.get("purchased_at_ms")
+                                     or ev.get("event_timestamp_ms")
+                                     or 0)
+                            if ts > 0 and ts < since_ms:
+                                skipped_count += 1
+                                continue
+                            events.append(rec)
+                file_summary = (
+                    f"live + {len(archive_files)} archive(s)"
+                    if archive_files else "live only"
+                )
                 print(f"  [webhooks] read {len(events)} events from local "
-                      f"{local_log} (skipped {skipped_count} older than 60d)")
+                      f"({file_summary}, skipped {skipped_count} older than 60d)")
             except Exception as e:
                 print(f"  [webhooks] local read failed ({type(e).__name__}: {e}); "
                       "falling back to HTTP")

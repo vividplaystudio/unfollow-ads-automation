@@ -98,11 +98,46 @@ fflush($fp);
 flock($fp, LOCK_UN);
 fclose($fp);
 
-// Optional file-size safety: if the file grows huge, rotate.
-// ~50 MB cap keeps us well under most shared-host disk quotas.
+// ── Log rotation (Step 4: keep rc_events.jsonl bounded) ────────────────────
+// When the live log crosses ROTATE_SIZE, atomically rename it to a dated
+// archive. The dashboard refresher (refresh_dashboard_json.py and
+// refresh_daily_rc_fast.py) read the live file PLUS any matching archives
+// within their since_ms window, so the data stream is uninterrupted.
+//
+// Naming convention: rc_events-YYYYMMDD-HHMMSS.jsonl.archive
+// (.archive suffix is so Apache doesn't accidentally serve it as a public
+// download. The Python reader matches on the date prefix.)
+//
+// Auto-cleanup: archives older than KEEP_DAYS are unlinked. The fast
+// path only needs 60d of history; 90d gives a comfortable margin in
+// case we tune the window down the road.
+$ROTATE_SIZE = 10 * 1024 * 1024;   // 10 MB
+$KEEP_DAYS   = 90;
+
 clearstatcache();
-if (@filesize($log_file) > 50 * 1024 * 1024) {
-    @rename($log_file, $log_file . '.' . date('Ymd-His'));
+$live_size = @filesize($log_file);
+if ($live_size !== false && $live_size > $ROTATE_SIZE) {
+    $archive_name = __DIR__
+        . '/rc_events-' . date('Ymd-His') . '.jsonl.archive';
+    // Atomic rename: writers between us and the next call to fopen above
+    // start a fresh empty live file when they open in append mode.
+    if (@rename($log_file, $archive_name)) {
+        error_log("rc_webhook: rotated $live_size bytes to $archive_name");
+    }
+}
+
+// Best-effort: delete archives older than KEEP_DAYS. Cheap (no scan of
+// archive contents — just mtime). Skip silently on shared hosts that
+// disable scandir/unlink for unusual reasons.
+$cutoff = time() - ($KEEP_DAYS * 86400);
+$archives = @glob(__DIR__ . '/rc_events-*.jsonl.archive');
+if (is_array($archives)) {
+    foreach ($archives as $arc) {
+        $mt = @filemtime($arc);
+        if ($mt !== false && $mt < $cutoff) {
+            @unlink($arc);
+        }
+    }
 }
 
 echo json_encode(['ok' => true]);
