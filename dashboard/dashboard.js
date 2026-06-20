@@ -1289,8 +1289,39 @@ function renderMetaKpis() {
     : roas > 0 ? `need ${(100 - roas).toFixed(0)}% more` : "—";
   roasSub.style.color = roas >= 100 ? "var(--success, #10b981)" : "var(--danger, #ef4444)";
 
-  // Net profit after Apple's 15% commission
-  const netRev = adjRev * 0.85;
+  // Net profit after Apple's 15% commission.
+  // ── Step 5: source-of-truth unification ──
+  // Previously this used Adjust's reported Meta-attributed revenue.
+  // Adjust's event prices are static USD values, so non-US conversions
+  // (CA/AU/etc., paid in local currency at regional Apple prices) get
+  // counted at the wrong amount — making the card disagree with the
+  // True Net card by hundreds of dollars on the same day.
+  //
+  // New behaviour: when the date range is "today"/"yesterday" (the True
+  // Net card's window) we use RC's daily_rc revenue × Apple 0.85 − spend,
+  // which is the same formula True Net uses. For longer ranges we sum
+  // daily_rc over the range. This guarantees the Meta Net Profit card
+  // ALWAYS matches the True Net card for any overlapping day, and the
+  // numbers shown are real money collected by Apple (not list-price
+  // estimates).
+  let netRev = 0;
+  let netSourceLabel = "";
+  if (RC.data && Array.isArray(RC.data.daily_rc) && r) {
+    let rcSumForRange = 0;
+    for (const entry of RC.data.daily_rc) {
+      const d = entry?.date;
+      if (!d) continue;
+      if (d >= r.since && d <= r.until) {
+        rcSumForRange += Number(entry.revenue || 0);
+      }
+    }
+    netRev = rcSumForRange * 0.85;
+    netSourceLabel = "RC ✓";  // real money
+  } else {
+    // Fallback to Adjust-derived value if daily_rc isn't loaded yet.
+    netRev = adjRev * 0.85;
+    netSourceLabel = "Adjust (estimate)";
+  }
   const netProfit = netRev - spend;
   const netRoas = spend > 0 ? netRev / spend * 100 : 0;
   const npEl = document.getElementById("metaNetProfit");
@@ -1299,8 +1330,8 @@ function renderMetaKpis() {
   npEl.textContent = npSign + fmt.money(Math.abs(netProfit));
   npEl.style.color = netProfit >= 0 ? "var(--success, #10b981)" : "var(--danger, #ef4444)";
   npSub.textContent = netRoas > 0
-    ? `Net ROAS ${netRoas.toFixed(0)}% · ${rangeLabel}`
-    : rangeLabel;
+    ? `Net ROAS ${netRoas.toFixed(0)}% · ${netSourceLabel} · ${rangeLabel}`
+    : `${netSourceLabel} · ${rangeLabel}`;
 
   // "Results" card now reflects Adjust subscribes (real attribution)
   // rather than Meta's app_custom_event.other proxy
