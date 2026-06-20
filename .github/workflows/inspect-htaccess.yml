@@ -1,0 +1,88 @@
+name: Inspect dashboard .htaccess
+
+# One-shot: download the .htaccess from the dashboard folder so we can
+# see what basic-auth rules cPanel set up before we touch it. Prints the
+# contents to the workflow log (no secrets in there — .htaccess refers
+# to .htpasswd by path, doesn't embed the password). Manually triggered.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download .htaccess from dashboard folder
+        env:
+          FTP_HOST: ${{ secrets.FTP_HOST }}
+          FTP_USER: ${{ secrets.FTP_USER }}
+          FTP_PASS: ${{ secrets.FTP_PASS }}
+          FTP_PATH: ${{ secrets.FTP_PATH }}
+        run: |
+          python3 << 'PYEOF'
+          import ftplib, ssl, os, io
+
+          host = os.environ["FTP_HOST"]
+          user = os.environ["FTP_USER"]
+          pw = os.environ["FTP_PASS"]
+          path = os.environ["FTP_PATH"]
+
+          ctx = ssl.create_default_context()
+          ctx.check_hostname = False
+          ctx.verify_mode = ssl.CERT_NONE
+
+          ftp = ftplib.FTP_TLS(host, timeout=60, context=ctx)
+          ftp.login(user, pw)
+          ftp.prot_p()
+          print(f"FTP login OK; FTP user root: {ftp.pwd()}")
+
+          # Navigate to dashboard path
+          try:
+              ftp.cwd(path)
+              print(f"  cwd: {ftp.pwd()}")
+          except ftplib.error_perm as e:
+              print(f"  cwd({path}) failed: {e}")
+              # Try chroot'd path
+              import re
+              stripped = re.sub(r"^/home/[^/]+", "", path) or "/"
+              if stripped != path:
+                  print(f"  Trying chroot path {stripped}")
+                  ftp.cwd(stripped)
+                  print(f"  cwd: {ftp.pwd()}")
+              else:
+                  raise
+
+          # List all files including hidden
+          print("\nDirectory listing:")
+          listing = []
+          ftp.dir(listing.append)
+          for line in listing:
+              print(f"  {line}")
+
+          # Attempt to read .htaccess. Use RETR into BytesIO.
+          print("\n--- .htaccess contents ---")
+          buf = io.BytesIO()
+          try:
+              ftp.retrbinary("RETR .htaccess", buf.write)
+              print(buf.getvalue().decode("utf-8", errors="replace"))
+          except Exception as e:
+              print(f"  Could not read .htaccess: {e}")
+
+          # Also check parent for an inherited .htaccess
+          print("\n--- parent .htaccess (if any) ---")
+          try:
+              ftp.cwd("..")
+              print(f"  parent: {ftp.pwd()}")
+              buf2 = io.BytesIO()
+              try:
+                  ftp.retrbinary("RETR .htaccess", buf2.write)
+                  print(buf2.getvalue().decode("utf-8", errors="replace"))
+              except Exception as e:
+                  print(f"  Could not read parent .htaccess: {e}")
+          except Exception as e:
+              print(f"  Could not cd to parent: {e}")
+
+          ftp.quit()
+          PYEOF
