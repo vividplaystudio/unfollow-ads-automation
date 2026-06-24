@@ -293,12 +293,16 @@ function computeRcAdjustDivergence() {
     const rc = rcByDay.get(d);
     const adj = adjByDay.get(d);
     if (!rc || !adj) continue;
-    if (rc <= 50 && adj <= 50) continue; // ignore noise days (low-volume)
+    if (rc <= 200 && adj <= 200) continue; // ignore low-volume noise days
     const ratio = rc / adj;
-    // RC should usually be >= Adjust (includes renewals). A ratio <0.8
-    // means Adjust over-reported by >20%; >1.4 means RC dramatically
-    // higher — either is worth flagging.
-    if (ratio < 0.8 || ratio > 1.4) {
+    // RC includes renewals; Adjust counts new subs only. For this business
+    // a typical day sees 50+ renewals = ~$300-500 of "RC-only" revenue
+    // on top of ~$1000-1400 of new-sub revenue both sources track. That
+    // alone produces a ratio of ~1.3-1.7, which is normal and not worth
+    // flagging. We only fire on truly anomalous gaps:
+    //   ratio < 0.7  → Adjust over-reports by >30% (the Jun 15 bug pattern)
+    //   ratio > 2.0  → RC dramatically higher (Adjust pipeline likely broken)
+    if (ratio < 0.7 || ratio > 2.0) {
       const pct = ((ratio - 1) * 100).toFixed(0);
       divergent.push({ date: d, rc, adj, pct });
     }
