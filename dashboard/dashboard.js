@@ -1952,6 +1952,23 @@ function renderTrueDailyProfit() {
   const adOnlyNet7 = adj7 * APPLE_KEEP - spend7;
   const hiddenProfit7 = trueNet7 - adOnlyNet7;
 
+  // 30-day totals (excluding today which is partial). Backed by the
+  // 31-day daily_rc window — days 1..30 give us a complete trailing-30
+  // view that mirrors the 7d card. Any missing day silently contributes
+  // zero (and is reflected in the "days covered" sub-label so the user
+  // sees if the window is short).
+  let rc30 = 0, spend30 = 0, daysCovered = 0;
+  for (let i = 1; i <= 30; i++) {
+    const d = dateNDaysAgo(i);
+    const rcDay = rcByDay.get(d);
+    if (rcDay) {
+      rc30 += (rcDay.revenue || 0);
+      daysCovered++;
+    }
+    spend30 += (metaSpendByDay.get(d) || 0);
+  }
+  const trueNet30 = rc30 * APPLE_KEEP - spend30;
+
   // Render
   const colorFor = (v) => v > 0 ? "var(--success, #10b981)" : v < 0 ? "var(--danger, #ef4444)" : "";
   const signed = (v) => (v >= 0 ? "+" : "−") + fmt.money(Math.abs(v));
@@ -1987,6 +2004,17 @@ function renderTrueDailyProfit() {
     trueNet7El.style.color = colorFor(trueNet7);
     document.getElementById("trueNet7dSub").textContent =
       `ad-only would be ${signed(adOnlyNet7)} · ${signed(hiddenProfit7)} extra you weren't seeing`;
+  }
+
+  const trueNet30El = document.getElementById("trueNet30d");
+  if (trueNet30El) {
+    trueNet30El.textContent = signed(trueNet30);
+    trueNet30El.style.color = colorFor(trueNet30);
+    // Sub-label: avg per day + days covered (so the user knows if RC's
+    // 30-day window is short — e.g. fresh setup or after rotation).
+    const avgPerDay = daysCovered > 0 ? trueNet30 / daysCovered : 0;
+    document.getElementById("trueNet30dSub").textContent =
+      `${daysCovered} day(s) covered · ${signed(avgPerDay)}/day avg`;
   }
 
   // ─── Daily breakdown table (newest first) ───

@@ -110,7 +110,9 @@ def main() -> int:
 
     # 3. Compute daily_rc using the EXACT same logic the full refresh uses.
     print("→ Computing daily_rc...")
-    daily_rc = compute_daily_rc(synthetic_customers, days=30)
+    # 31 days = today + 30 prior days, so the dashboard's "last 30 days
+    # excluding today" card has a complete window.
+    daily_rc = compute_daily_rc(synthetic_customers, days=31)
     if not daily_rc:
         print(
             "ERROR: compute_daily_rc returned empty. Refusing to write.",

@@ -1491,7 +1491,9 @@ def main() -> None:
     customers = rc_get_all_customers()
     customers = rc_enrich_customers(customers)
     rev_index = build_revenue_index(customers)
-    daily_rc = compute_daily_rc(customers, days=30)
+    # 31 days = today + 30 days back, so a "last 30 days excluding today"
+    # view on the dashboard has all the data it needs.
+    daily_rc = compute_daily_rc(customers, days=31)
     print(f"  Daily RC: {len(daily_rc)} days, "
           f"latest revenue ${daily_rc[-1]['revenue']:.2f}")
     cohort_retention = compute_cohort_retention(customers)
