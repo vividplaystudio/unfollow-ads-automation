@@ -1079,6 +1079,75 @@ def compute_daily_rc(customers, days: int = 30) -> list:
     return out
 
 
+def fetch_rc_authoritative_revenue(days: int = 31) -> dict:
+    """Pull per-day revenue from RC's /v2/.../metrics/revenue endpoint.
+
+    The webhook-log + inference path we use elsewhere can undercount when
+    RC's webhook delivery was failing (we saw this with the May 16 → Jun 19
+    Basic-Auth outage — even after RC retried, some events were dropped
+    after retention expired). This endpoint returns the same number RC's
+    UI shows on its Revenue chart, so it's authoritative.
+
+    Strategy: query one day at a time so we get a per-day dict
+    {date_iso: usd_value}. RC accepts a date range and returns the SUM,
+    not a series, so 30 calls is the simplest correct way. Cheap because
+    each call is ~150-300 ms and we run them in 8 parallel workers.
+
+    Returns {} on any failure so the caller can fall back to the
+    webhook-derived value (we never want the full refresh to abort
+    because of this enrichment step).
+    """
+    if not REVENUECAT_API_KEY:
+        return {}
+
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    today = datetime.now(timezone.utc).date()
+    dates = [(today - timedelta(days=i)).isoformat() for i in range(days)]
+
+    def fetch_one(d):
+        url = (
+            f"https://api.revenuecat.com/v2/projects/"
+            f"{REVENUECAT_PROJECT_ID}/metrics/revenue"
+            f"?start_date={d}&end_date={d}"
+        )
+        try:
+            data = _rc_get_json(url, timeout=20, max_retries=2)
+            return d, float(data.get("value") or 0)
+        except Exception as e:
+            print(f"  [rc-revenue] {d}: skipped ({type(e).__name__})")
+            return d, None
+
+    result = {}
+    with ThreadPoolExecutor(max_workers=8) as exe:
+        for fut in as_completed([exe.submit(fetch_one, d) for d in dates]):
+            d, v = fut.result()
+            if v is not None:
+                result[d] = v
+    total = sum(result.values())
+    print(
+        f"  [rc-revenue] fetched authoritative daily revenue for "
+        f"{len(result)}/{days} days, sum ${total:,.2f}"
+    )
+    return result
+
+
+def apply_authoritative_revenue(daily_rc, authoritative):
+    """Overwrite each daily_rc entry's `revenue` with RC's authoritative
+    per-day value. Leaves new_subs / renewals / tier counts alone (those
+    still come from webhook events and are useful for the dashboard's
+    breakdown columns).
+
+    Days where the authoritative fetch failed keep their webhook-derived
+    value so we never zero out good data on a transient API error."""
+    if not authoritative:
+        return daily_rc
+    for entry in daily_rc:
+        d = entry.get("date")
+        if d in authoritative:
+            entry["revenue"] = round(authoritative[d], 2)
+    return daily_rc
+
+
 def compute_cohort_retention(customers) -> dict:
     """Per-tier subscription retention curves.
 
@@ -1494,8 +1563,17 @@ def main() -> None:
     # 31 days = today + 30 days back, so a "last 30 days excluding today"
     # view on the dashboard has all the data it needs.
     daily_rc = compute_daily_rc(customers, days=31)
-    print(f"  Daily RC: {len(daily_rc)} days, "
+    print(f"  Daily RC (webhook-derived): {len(daily_rc)} days, "
           f"latest revenue ${daily_rc[-1]['revenue']:.2f}")
+
+    # Overwrite the webhook-derived revenue with RC's authoritative
+    # per-day metrics. This matches what RC's own UI shows on the Revenue
+    # chart, and it eliminates the silent undercount we get when webhook
+    # delivery has been intermittent (the May 16 → Jun 19 outage was
+    # leaving ~$200-300/day off the dashboard).
+    authoritative = fetch_rc_authoritative_revenue(days=31)
+    apply_authoritative_revenue(daily_rc, authoritative)
+    print(f"  Daily RC (authoritative): latest revenue ${daily_rc[-1]['revenue']:.2f}")
     cohort_retention = compute_cohort_retention(customers)
     if cohort_retention.get("weekly", {}).get("D7"):
         d7 = cohort_retention["weekly"]["D7"]

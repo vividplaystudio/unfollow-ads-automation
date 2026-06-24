@@ -150,7 +150,34 @@ def main() -> int:
         )
         return 1
 
-    data["daily_rc"] = daily_rc
+    # Step 7 (RC authoritative revenue) — the full refresh now overwrites
+    # each daily_rc.revenue with RC's per-day metrics value, which is the
+    # truth. The fast path only sees webhooks; it doesn't query RC's
+    # metrics API (too slow for a 5-minute cron). To avoid clobbering the
+    # authoritative historical values with our webhook-derived numbers,
+    # we merge instead of replace:
+    #   * Today's row is replaced (webhook captures TODAY accurately; RC
+    #     metrics has a multi-hour lag, so webhooks are actually better
+    #     for today).
+    #   * Older rows are merged: we update new_subs / renewals / tier
+    #     counts (those reflect fresh webhook activity for older days
+    #     too — e.g. a renewal that arrived this morning for yesterday's
+    #     anniversary), but we KEEP the existing `revenue` field that
+    #     came from the last full refresh's authoritative call.
+    from datetime import datetime as _dt, timezone as _tz
+    today_iso = _dt.now(_tz.utc).date().isoformat()
+    by_date = {e["date"]: e for e in (data.get("daily_rc") or [])}
+    for new_entry in daily_rc:
+        d = new_entry["date"]
+        if d == today_iso or d not in by_date:
+            by_date[d] = new_entry
+        else:
+            # Merge: keep authoritative revenue, refresh the rest
+            authoritative_rev = by_date[d].get("revenue")
+            by_date[d] = new_entry
+            if authoritative_rev is not None:
+                by_date[d]["revenue"] = authoritative_rev
+    data["daily_rc"] = sorted(by_date.values(), key=lambda x: x["date"])
     data["daily_rc_updated_at"] = ts
 
     # 5. Atomic write: temp file + rename. Avoids leaving a partial JSON
