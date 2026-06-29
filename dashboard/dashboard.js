@@ -1372,38 +1372,20 @@ function renderMetaKpis() {
   roasSub.style.color = roas >= 100 ? "var(--success, #10b981)" : "var(--danger, #ef4444)";
 
   // Net profit after Apple's 15% commission.
-  // ── Step 5: source-of-truth unification ──
-  // Previously this used Adjust's reported Meta-attributed revenue.
-  // Adjust's event prices are static USD values, so non-US conversions
-  // (CA/AU/etc., paid in local currency at regional Apple prices) get
-  // counted at the wrong amount — making the card disagree with the
-  // True Net card by hundreds of dollars on the same day.
+  // ── Meta Net Profit — Meta-attributed only (reverted from Step 5) ──
+  // Step 5 made this card use TOTAL RC revenue × 0.85 - Meta spend so it
+  // would match the True Net card. That was wrong: this card sits inside
+  // the Meta Ads section, so it should answer "what did Meta ads earn me
+  // minus what I paid Meta?" — not "what's the whole business profit?"
+  // The True Net card already exists for the all-channels view.
   //
-  // New behaviour: when the date range is "today"/"yesterday" (the True
-  // Net card's window) we use RC's daily_rc revenue × Apple 0.85 − spend,
-  // which is the same formula True Net uses. For longer ranges we sum
-  // daily_rc over the range. This guarantees the Meta Net Profit card
-  // ALWAYS matches the True Net card for any overlapping day, and the
-  // numbers shown are real money collected by Apple (not list-price
-  // estimates).
-  let netRev = 0;
-  let netSourceLabel = "";
-  if (RC.data && Array.isArray(RC.data.daily_rc) && r) {
-    let rcSumForRange = 0;
-    for (const entry of RC.data.daily_rc) {
-      const d = entry?.date;
-      if (!d) continue;
-      if (d >= r.since && d <= r.until) {
-        rcSumForRange += Number(entry.revenue || 0);
-      }
-    }
-    netRev = rcSumForRange * 0.85;
-    netSourceLabel = "RC ✓";  // real money
-  } else {
-    // Fallback to Adjust-derived value if daily_rc isn't loaded yet.
-    netRev = adjRev * 0.85;
-    netSourceLabel = "Adjust (estimate)";
-  }
+  // Correct formula: (Adjust Meta-attributed revenue × 0.85) − Meta spend.
+  // For a more accurate view (Adjust uses static USD prices, so non-US
+  // conversions are off), the True Daily Profit table below shows BOTH
+  // the Ad-Only Net (this number) and the True Net side-by-side, so the
+  // user can see the difference at a glance.
+  const netRev = adjRev * 0.85;
+  const netSourceLabel = "Meta-attributed";
   const netProfit = netRev - spend;
   const netRoas = spend > 0 ? netRev / spend * 100 : 0;
   const npEl = document.getElementById("metaNetProfit");
