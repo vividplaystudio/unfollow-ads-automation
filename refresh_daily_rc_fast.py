@@ -134,36 +134,27 @@ def main() -> int:
     with open(data_path, "r") as f:
         data = json.load(f)
 
-    # 4a. Validate the new daily_rc against the existing one BEFORE we
-    # patch. If it would regress (zeros on settled days, big drops), keep
-    # the existing daily_rc and exit non-zero so the cron log shows the
-    # rejection. This is the gate that stopped earlier today's bug
-    # (compute_daily_rc returning zeros) from reaching the dashboard.
-    prev_daily_rc = data.get("daily_rc") or []
-    ok, reason = validate_daily_rc(daily_rc, prev_daily_rc, source="rc-fast")
-    print(f"  validate: {reason}")
-    if not ok:
-        print(
-            "ERROR: refusing to overwrite daily_rc with broken data. "
-            "Existing data.json left untouched.",
-            file=sys.stderr,
-        )
-        return 1
-
-    # Step 7 (RC authoritative revenue) — the full refresh now overwrites
-    # each daily_rc.revenue with RC's per-day metrics value, which is the
-    # truth. The fast path only sees webhooks; it doesn't query RC's
-    # metrics API (too slow for a 5-minute cron). To avoid clobbering the
-    # authoritative historical values with our webhook-derived numbers,
-    # we merge instead of replace:
+    # Step 7 (RC authoritative revenue) — the full refresh overwrites each
+    # daily_rc.revenue with RC's per-day metrics value, which is the truth.
+    # The fast path only sees webhooks; it doesn't query RC's metrics API
+    # (too slow for a 5-minute cron). To avoid clobbering authoritative
+    # historical values with webhook-derived numbers, we MERGE instead of
+    # replace:
     #   * Today's row is replaced (webhook captures TODAY accurately; RC
     #     metrics has a multi-hour lag, so webhooks are actually better
     #     for today).
-    #   * Older rows are merged: we update new_subs / renewals / tier
-    #     counts (those reflect fresh webhook activity for older days
-    #     too — e.g. a renewal that arrived this morning for yesterday's
-    #     anniversary), but we KEEP the existing `revenue` field that
-    #     came from the last full refresh's authoritative call.
+    #   * Older rows are merged: update new_subs / renewals / tier counts
+    #     (fresh webhook activity applies to older days too — e.g. a
+    #     renewal that arrived this morning for yesterday's anniversary),
+    #     but KEEP the existing `revenue` field that came from the last
+    #     full refresh's authoritative call.
+    #
+    # IMPORTANT: validation runs AFTER this merge, not before. Reason: the
+    # raw compute_daily_rc(webhook_events) has $0 for any day older than
+    # the webhook lookback window (~30 days), which would spuriously fail
+    # validate_daily_rc's "settled days dropped to $0" check. The MERGED
+    # daily_rc — which preserves authoritative revenue on old days — is
+    # what we actually intend to write, so it's what we should validate.
     from datetime import datetime as _dt, timezone as _tz
     today_iso = _dt.now(_tz.utc).date().isoformat()
     by_date = {e["date"]: e for e in (data.get("daily_rc") or [])}
@@ -177,7 +168,25 @@ def main() -> int:
             by_date[d] = new_entry
             if authoritative_rev is not None:
                 by_date[d]["revenue"] = authoritative_rev
-    data["daily_rc"] = sorted(by_date.values(), key=lambda x: x["date"])
+    merged_daily_rc = sorted(by_date.values(), key=lambda x: x["date"])
+
+    # Validate the merged result — the thing we're actually about to
+    # write. Catches real regressions (recent-day revenue drops, missing
+    # today's row) without false-positive-ing on webhook lookback horizon.
+    prev_daily_rc = data.get("daily_rc") or []
+    ok, reason = validate_daily_rc(
+        merged_daily_rc, prev_daily_rc, source="rc-fast"
+    )
+    print(f"  validate: {reason}")
+    if not ok:
+        print(
+            "ERROR: refusing to overwrite daily_rc with broken data. "
+            "Existing data.json left untouched.",
+            file=sys.stderr,
+        )
+        return 1
+
+    data["daily_rc"] = merged_daily_rc
     data["daily_rc_updated_at"] = ts
 
     # 5. Atomic write: temp file + rename. Avoids leaving a partial JSON
