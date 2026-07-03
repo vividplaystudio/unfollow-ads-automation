@@ -325,16 +325,33 @@ function renderStalenessBanner() {
   const banner = document.getElementById("stalenessBanner");
   if (!banner) return;
 
+  // Full RC refresh (last_updated) enriches customer graph / cohort tables.
+  // daily_rc_updated_at (rc-fast) feeds the revenue KPIs the user actually
+  // watches — True Daily Profit cards, RC daily table, everything money.
+  // When daily_rc is fresh, the revenue data on screen IS accurate even if
+  // the full walk is stuck. Report both, but demote "Full RC refresh" from
+  // "stale" to "warn" whenever rc-fast is keeping revenue current — the
+  // KPIs shouldn't drive the user into a panic when the numbers are right.
+  const fullSt  = (STATE.data && STATE.data.last_updated)         ? computeStaleness(STATE.data.last_updated)         : null;
+  const fastSt  = (STATE.data && STATE.data.daily_rc_updated_at)  ? computeStaleness(STATE.data.daily_rc_updated_at)  : null;
+  const revIsFresh = fastSt && fastSt.status === "fresh";
+
   const sources = [];
-  // Full refresh of data.json (campaigns/keywords/channels + daily_rc fallback)
-  if (STATE.data && STATE.data.last_updated) {
-    sources.push({ name: "Full RC refresh", ...computeStaleness(STATE.data.last_updated) });
+  if (fullSt) {
+    // Demote full-refresh staleness when rc-fast is holding the fort. The
+    // customer walk being late is a cosmetic problem — cohort/retention
+    // tables are stale, but the KPI cards are correct.
+    const effectiveStatus = (revIsFresh && fullSt.status === "stale") ? "warn" : fullSt.status;
+    sources.push({
+      name: revIsFresh
+        ? "Full RC refresh (cosmetic — revenue KPIs are fresh)"
+        : "Full RC refresh",
+      ...fullSt,
+      status: effectiveStatus,
+    });
   }
-  // Fast refresh of just daily_rc (only set when the fast path actually ran;
-  // its absence is normal right after a full refresh, so we don't flag it
-  // unless the full refresh is ALSO stale)
-  if (STATE.data && STATE.data.daily_rc_updated_at) {
-    sources.push({ name: "True Daily Profit (fast)", ...computeStaleness(STATE.data.daily_rc_updated_at) });
+  if (fastSt) {
+    sources.push({ name: "True Daily Profit (fast)", ...fastSt });
   }
   if (META.data && META.data.generated_at) {
     sources.push({ name: "Meta Ads", ...computeStaleness(META.data.generated_at) });
