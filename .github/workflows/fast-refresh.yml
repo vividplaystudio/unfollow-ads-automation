@@ -33,6 +33,12 @@ jobs:
         env:
           META_ACCESS_TOKEN: ${{ secrets.META_ACCESS_TOKEN }}
           META_AD_ACCOUNT_ID: ${{ secrets.META_AD_ACCOUNT_ID }}
+          # Comma-separated list of every ad account under the same BM.
+          # Falls back to the singular META_AD_ACCOUNT_ID env if unset —
+          # the value below is the explicit default so both accounts get
+          # pulled even when the secret isn't configured (account IDs
+          # aren't secret; they're just identifiers).
+          META_AD_ACCOUNT_IDS: ${{ secrets.META_AD_ACCOUNT_IDS || '2399779997191076,1306431168140247' }}
           FTP_HOST: ${{ secrets.FTP_HOST }}
           FTP_USER: ${{ secrets.FTP_USER }}
           FTP_PASS: ${{ secrets.FTP_PASS }}

@@ -47,6 +47,8 @@ jobs:
         env:
           META_ACCESS_TOKEN: ${{ secrets.META_ACCESS_TOKEN }}
           META_AD_ACCOUNT_ID: ${{ secrets.META_AD_ACCOUNT_ID }}
+          # Comma-separated list of every ad account under the same BM.
+          META_AD_ACCOUNT_IDS: ${{ secrets.META_AD_ACCOUNT_IDS || '2399779997191076,1306431168140247' }}
           FTP_HOST: ${{ secrets.FTP_HOST }}
           FTP_USER: ${{ secrets.FTP_USER }}
           FTP_PASS: ${{ secrets.FTP_PASS }}
