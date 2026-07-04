@@ -118,7 +118,10 @@ jobs:
               # the same Business Manager, so the single META_ACCESS_TOKEN works
               # for all of them. The refresh script splits this and pulls each
               # account independently, tagging every row with its `account_id`.
-              f'export META_AD_ACCOUNT_IDS="{os.environ.get("META_AD_ACCOUNT_IDS","2399779997191076,1306431168140247")}"\n'
+              # `or` (not .get default) so an empty-string env from an unset
+              # secret still falls back — GH Actions sets missing secrets to ""
+              # rather than leaving them undefined.
+              f'export META_AD_ACCOUNT_IDS="{os.environ.get("META_AD_ACCOUNT_IDS") or "2399779997191076,1306431168140247"}"\n'
               # Kept for backward compat with any script that still reads the
               # singular name — points at the primary account.
               f'export META_AD_ACCOUNT_ID="{os.environ.get("META_AD_ACCOUNT_ID","2399779997191076")}"\n'
