@@ -200,6 +200,14 @@
           <button class="pill" data-meta-range="custom">Custom</button>
         </div>
       </div>
+      <!-- Multi-account toggle. renderMetaAccountToggle() populates the
+           pills from META.data.account_ids at load. Hidden when only one
+           account is present so it doesn't clutter the UI on single-
+           account installs. -->
+      <div class="filter-group" id="metaAccountGroup" style="display:none">
+        <span class="filter-label">Account</span>
+        <div class="pill-group" id="metaAccountPills"></div>
+      </div>
       <div class="filter-group meta-custom-range" id="metaCustomRange" style="display:none">
         <span class="filter-label">From</span>
         <input type="date" id="metaCustomFrom" class="select" />

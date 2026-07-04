@@ -1111,7 +1111,29 @@ const META = {
   customFrom: null,  // "YYYY-MM-DD"
   customTo: null,
   activeOnly: false, // when true, hide paused/deleted from table
+  // Multi-account filter — "all" shows blended, or a specific account_id.
+  // The refresh script tags every row with account_id and exposes
+  // summary_by_account + statuses_by_account so this filter is trivial.
+  accountFilter: "all",
 };
+
+// Names shown next to each account ID in the toggle. Fallback = the ID.
+// Update these when you add a new account.
+const META_ACCOUNT_LABELS = {
+  "2399779997191076": "Account 1",
+  "1306431168140247": "Account 2",
+};
+
+// Rows in `campaigns`, `adsets`, `ads` are tagged with account_id by the
+// refresh script. This filter is applied everywhere those rows are read,
+// so switching the toggle instantly recomputes every table + card.
+function metaAccountMatch(row) {
+  if (META.accountFilter === "all" || !META.accountFilter) return true;
+  return String(row?.account_id ?? "") === String(META.accountFilter);
+}
+function metaFilterRows(rows) {
+  return (rows || []).filter(metaAccountMatch);
+}
 
 // Map Meta's effective_status to a compact badge + CSS class.
 function metaStatusBadge(eff) {
@@ -1133,8 +1155,24 @@ function metaStatusBadge(eff) {
   }
 }
 
-// Look up effective status for a given (id, level) — level: 'campaigns'|'adsets'|'ads'
+// Look up effective status for a given (id, level) — level: 'campaigns'|'adsets'|'ads'.
+// Multi-account aware: when a specific account is selected we only look at that
+// account's status map. On "all" we merge across accounts — first hit wins,
+// which is fine because IDs are globally unique in Meta.
 function metaEffStatus(id, level) {
+  const byAccount = META.data?.statuses_by_account;
+  if (byAccount) {
+    if (META.accountFilter !== "all") {
+      const m = byAccount[META.accountFilter]?.[level];
+      return m && m[id] ? m[id].effective_status : null;
+    }
+    for (const aid of Object.keys(byAccount)) {
+      const m = byAccount[aid]?.[level];
+      if (m && m[id]) return m[id].effective_status;
+    }
+    return null;
+  }
+  // Legacy single-account shape (before multi-account refactor)
   const m = META.data?.statuses?.[level];
   return m && m[id] ? m[id].effective_status : null;
 }
@@ -1299,8 +1337,19 @@ function adjRebuildMapsForCurrentWindow() {
   }
 }
 
+// Get the correct Meta summary block for the currently-selected account.
+// Falls back to the blended `summary` when accountFilter is "all" or when
+// the per-account map isn't present (legacy single-account files).
+function metaSummaryFor(window) {
+  if (META.accountFilter !== "all") {
+    const perAcct = META.data?.summary_by_account?.[META.accountFilter]?.[window];
+    if (perAcct) return perAcct;
+  }
+  return META.data?.summary?.[window] || null;
+}
+
 function metaInstalls(window) {
-  const a = META.data?.summary?.[window]?.actions || {};
+  const a = metaSummaryFor(window)?.actions || {};
   return a.mobile_app_install || a.omni_app_install || 0;
 }
 
@@ -1325,6 +1374,7 @@ function updateMetaPillLabels() {
 
 function renderMeta() {
   if (!META.data) return;
+  renderMetaAccountToggle();
   updateMetaPillLabels();
   adjRebuildMapsForCurrentWindow();
   renderMetaKpis();
@@ -1340,6 +1390,49 @@ function renderMeta() {
     el.textContent = "—";
   }
   renderStalenessBanner();
+}
+
+// Build the account toggle from META.data.account_ids. Hidden when only
+// one account is present. Clicking a pill sets META.accountFilter and
+// re-renders — cheap because every downstream reader goes through
+// metaFilterRows() or metaSummaryFor().
+function renderMetaAccountToggle() {
+  const wrap  = document.getElementById("metaAccountGroup");
+  const pills = document.getElementById("metaAccountPills");
+  if (!wrap || !pills) return;
+
+  const ids = META.data?.account_ids || (META.data?.account_id ? [META.data.account_id] : []);
+  if (ids.length < 2) {
+    wrap.style.display = "none";
+    return;
+  }
+
+  // If the current filter isn't one we can show, reset to "all"
+  if (META.accountFilter !== "all" && !ids.includes(META.accountFilter)) {
+    META.accountFilter = "all";
+  }
+
+  wrap.style.display = "";
+  const items = [{ id: "all", label: "All" }].concat(
+    ids.map(id => ({ id, label: META_ACCOUNT_LABELS[id] || `act_${id}` }))
+  );
+  pills.innerHTML = items.map(it => {
+    const active = String(META.accountFilter) === String(it.id) ? " active" : "";
+    return `<button class="pill${active}" data-meta-account="${it.id}" title="act_${it.id}">${it.label}</button>`;
+  }).join("");
+
+  pills.querySelectorAll("[data-meta-account]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const id = btn.getAttribute("data-meta-account");
+      if (String(id) === String(META.accountFilter)) return;
+      META.accountFilter = id;
+      // Nuke the drill-down filters — those IDs may belong to the other
+      // account and would otherwise leave the table empty after a switch.
+      META.filterCampaignId = null;
+      META.filterAdsetId = null;
+      renderMeta();
+    });
+  });
 }
 
 function renderMetaKpis() {
@@ -1434,7 +1527,7 @@ function renderMetaKpis() {
 }
 
 function aggregateMetaAds() {
-  const ads = META.data?.ads || [];
+  const ads = metaFilterRows(META.data?.ads);
   const range = metaDateRange();
   const byAd = {};
   for (const r of ads) {

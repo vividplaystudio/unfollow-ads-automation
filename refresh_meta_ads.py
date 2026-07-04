@@ -27,7 +27,30 @@ from datetime import datetime, timedelta, timezone
 
 
 META_ACCESS_TOKEN = os.environ["META_ACCESS_TOKEN"]
-META_AD_ACCOUNT_ID = os.environ.get("META_AD_ACCOUNT_ID", "2399779997191076")
+
+# Support one OR many ad accounts under the same Business Manager. Set
+# META_AD_ACCOUNT_IDS to a comma-separated list ("acc1,acc2,acc3") to pull
+# all of them into one meta_ads.json. Falls back to the single-account
+# META_AD_ACCOUNT_ID env for backward compat with the pre-multi-account
+# install. Both env vars accept IDs with or without the "act_" prefix —
+# whitespace is trimmed.
+def _parse_account_ids() -> list:
+    raw = os.environ.get("META_AD_ACCOUNT_IDS") or os.environ.get("META_AD_ACCOUNT_ID", "2399779997191076")
+    ids = []
+    for item in raw.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        if item.startswith("act_"):
+            item = item[4:]
+        ids.append(item)
+    if not ids:
+        raise RuntimeError("No Meta ad account IDs configured")
+    return ids
+
+META_AD_ACCOUNT_IDS = _parse_account_ids()
+# Kept for any downstream code that still references the singular name.
+META_AD_ACCOUNT_ID = META_AD_ACCOUNT_IDS[0]
 META_API_VERSION = os.environ.get("META_API_VERSION", "v19.0")
 
 # When running ON the cPanel host, set LOCAL_OUTPUT_DIR to the absolute
@@ -111,8 +134,8 @@ def meta_paginated(path: str, params: dict) -> list:
 # Insights fetchers
 # ══════════════════════════════════════════════════════════════════
 
-def fetch_insights(level: str, since: str, until: str, time_increment: Union[str, int] = "all_days") -> list:
-    """Fetch insights at the given level and date range.
+def fetch_insights(account_id: str, level: str, since: str, until: str, time_increment: Union[str, int] = "all_days") -> list:
+    """Fetch insights at the given level and date range for one ad account.
     Use the unified attribution setting + the same windows Ads Manager UI shows
     (7-day click + 1-day view) so 'Results' / 'in-app subscribes' line up with
     what the user sees in Meta Ads Manager."""
@@ -126,7 +149,7 @@ def fetch_insights(level: str, since: str, until: str, time_increment: Union[str
         "action_attribution_windows": json.dumps(["7d_click", "1d_view"]),
         "action_report_time": "conversion",
     }
-    return meta_paginated(f"act_{META_AD_ACCOUNT_ID}/insights", params)
+    return meta_paginated(f"act_{account_id}/insights", params)
 
 
 def normalize_actions(row: dict) -> dict:
@@ -208,9 +231,9 @@ def summarize(rows: list) -> dict:
 # Status (on/off/paused) fetchers
 # ══════════════════════════════════════════════════════════════════
 
-def fetch_statuses(level: str) -> dict:
+def fetch_statuses(account_id: str, level: str) -> dict:
     """Fetch id → {status, effective_status, name} for every campaign/
-    adset/ad in the account. Used by the dashboard to flag paused items.
+    adset/ad in ONE account. Used by the dashboard to flag paused items.
 
     level: 'campaigns' | 'adsets' | 'ads'
     """
@@ -218,7 +241,7 @@ def fetch_statuses(level: str) -> dict:
         "fields": "id,name,status,effective_status",
         "limit": 500,
     }
-    rows = meta_paginated(f"act_{META_AD_ACCOUNT_ID}/{level}", params)
+    rows = meta_paginated(f"act_{account_id}/{level}", params)
     out = {}
     for r in rows:
         out[r["id"]] = {
@@ -288,46 +311,109 @@ def main() -> None:
     today = datetime.now(timezone.utc).date()
     d = lambda offset: (today - timedelta(days=offset)).isoformat()
 
-    print(f"▶ Meta Ads refresh for act_{META_AD_ACCOUNT_ID}")
+    # Per-account pulls collected here, then merged into one payload so
+    # the dashboard can show a single view or filter by account_id.
+    # Every row is tagged with `account_id` at normalize time so downstream
+    # can filter/group without needing a separate index.
+    combined_campaigns: list = []
+    combined_adsets: list = []
+    combined_ads: list = []
+    combined_statuses: dict = {}  # { <account_id>: {campaigns:{}, adsets:{}, ads:{}} }
+    per_account_summary: dict = {}  # { <account_id>: {today, yesterday, ...} }
 
-    print("  Fetching summary windows…")
-    summary = {
-        "today": summarize(fetch_insights("account", d(0), d(0))),
-        "yesterday": summarize(fetch_insights("account", d(1), d(1))),
-        "last_7_days": summarize(fetch_insights("account", d(6), d(0))),
-        "last_30_days": summarize(fetch_insights("account", d(29), d(0))),
+    print(f"▶ Meta Ads refresh for {len(META_AD_ACCOUNT_IDS)} account(s): {META_AD_ACCOUNT_IDS}")
+
+    for aid in META_AD_ACCOUNT_IDS:
+        print(f"\n── Account act_{aid} ──")
+
+        print("  Fetching summary windows…")
+        per_account_summary[aid] = {
+            "today":        summarize(fetch_insights(aid, "account", d(0),  d(0))),
+            "yesterday":    summarize(fetch_insights(aid, "account", d(1),  d(1))),
+            "last_7_days":  summarize(fetch_insights(aid, "account", d(6),  d(0))),
+            "last_30_days": summarize(fetch_insights(aid, "account", d(29), d(0))),
+        }
+
+        print("  Fetching per-ad daily breakdown (last 30d)…")
+        ad_rows_raw = fetch_insights(aid, "ad", d(29), d(0), time_increment=1)
+        ad_rows = [normalize_row(r) for r in ad_rows_raw]
+        for r in ad_rows:
+            r["account_id"] = aid
+        print(f"    {len(ad_rows)} ad-day rows")
+        combined_ads.extend(ad_rows)
+
+        print("  Fetching per-adset 30d totals…")
+        adset_rows = [normalize_row(r) for r in fetch_insights(aid, "adset", d(29), d(0))]
+        for r in adset_rows:
+            r["account_id"] = aid
+        combined_adsets.extend(adset_rows)
+
+        print("  Fetching per-campaign 30d totals…")
+        campaign_rows = [normalize_row(r) for r in fetch_insights(aid, "campaign", d(29), d(0))]
+        for r in campaign_rows:
+            r["account_id"] = aid
+        combined_campaigns.extend(campaign_rows)
+
+        print("  Fetching on/off status (campaigns + adsets + ads)…")
+        acct_statuses = {
+            "campaigns": fetch_statuses(aid, "campaigns"),
+            "adsets":    fetch_statuses(aid, "adsets"),
+            "ads":       fetch_statuses(aid, "ads"),
+        }
+        combined_statuses[aid] = acct_statuses
+        n_camp_active  = sum(1 for v in acct_statuses["campaigns"].values() if v["effective_status"] == "ACTIVE")
+        n_adset_active = sum(1 for v in acct_statuses["adsets"].values()    if v["effective_status"] == "ACTIVE")
+        n_ad_active    = sum(1 for v in acct_statuses["ads"].values()       if v["effective_status"] == "ACTIVE")
+        print(f"    Active: {n_camp_active} campaigns, {n_adset_active} adsets, {n_ad_active} ads")
+
+    # Blended totals — "All" view in the dashboard. Just add up the
+    # already-computed per-account summary dicts. Rates (CTR, CPM, CPC,
+    # frequency) get re-derived from the summed primitives so they stay
+    # correct after aggregation.
+    def _blend_summaries(dicts: list) -> dict:
+        s = {"spend": 0.0, "impressions": 0, "clicks": 0, "reach": 0, "link_clicks": 0}
+        actions: dict = {}
+        freq_weighted = 0.0
+        for d_ in dicts:
+            s["spend"]       += d_.get("spend", 0.0)
+            s["impressions"] += d_.get("impressions", 0)
+            s["clicks"]      += d_.get("clicks", 0)
+            s["reach"]       += d_.get("reach", 0)
+            s["link_clicks"] += d_.get("link_clicks", 0)
+            freq_weighted    += d_.get("frequency", 0.0) * d_.get("impressions", 0)
+            for k, v in (d_.get("actions") or {}).items():
+                actions[k] = actions.get(k, 0.0) + v
+        s["actions"]              = actions
+        s["cpm"]                  = (s["spend"] / s["impressions"] * 1000) if s["impressions"] else 0
+        s["cpc"]                  = (s["spend"] / s["clicks"])              if s["clicks"]      else 0
+        s["ctr"]                  = (s["clicks"] / s["impressions"] * 100)  if s["impressions"] else 0
+        s["link_ctr"]             = (s["link_clicks"] / s["impressions"] * 100) if s["impressions"] else 0
+        s["cost_per_link_click"]  = (s["spend"] / s["link_clicks"])         if s["link_clicks"] else 0
+        s["frequency"]            = (freq_weighted / s["impressions"])      if s["impressions"] else 0
+        return s
+
+    blended_summary = {
+        window: _blend_summaries([per_account_summary[aid][window] for aid in META_AD_ACCOUNT_IDS])
+        for window in ("today", "yesterday", "last_7_days", "last_30_days")
     }
-
-    print("  Fetching per-ad daily breakdown (last 30d)…")
-    ad_rows_raw = fetch_insights("ad", d(29), d(0), time_increment=1)
-    ad_rows = [normalize_row(r) for r in ad_rows_raw]
-    print(f"    {len(ad_rows)} ad-day rows")
-
-    print("  Fetching per-adset 30d totals…")
-    adset_rows = [normalize_row(r) for r in fetch_insights("adset", d(29), d(0))]
-
-    print("  Fetching per-campaign 30d totals…")
-    campaign_rows = [normalize_row(r) for r in fetch_insights("campaign", d(29), d(0))]
-
-    print("  Fetching on/off status (campaigns + adsets + ads)…")
-    statuses = {
-        "campaigns": fetch_statuses("campaigns"),
-        "adsets":    fetch_statuses("adsets"),
-        "ads":       fetch_statuses("ads"),
-    }
-    n_camp_active = sum(1 for v in statuses["campaigns"].values() if v["effective_status"] == "ACTIVE")
-    n_adset_active = sum(1 for v in statuses["adsets"].values() if v["effective_status"] == "ACTIVE")
-    n_ad_active = sum(1 for v in statuses["ads"].values() if v["effective_status"] == "ACTIVE")
-    print(f"    Active: {n_camp_active} campaigns, {n_adset_active} adsets, {n_ad_active} ads")
 
     payload = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
+        # New multi-account fields — the dashboard should read these.
+        "account_ids": META_AD_ACCOUNT_IDS,
+        "summary": blended_summary,             # blended across all accounts (the "All" view)
+        "summary_by_account": per_account_summary,  # per-account KPI cards
+        "statuses_by_account": combined_statuses,   # { <account_id>: { campaigns:{}, adsets:{}, ads:{} } }
+        # Row-level tables — every row has `account_id`, dashboard filters.
+        "campaigns": combined_campaigns,
+        "adsets":    combined_adsets,
+        "ads":       combined_ads,
+        # Backward-compat fields for any consumer still reading the
+        # single-account shape. Points at the first (primary) account so
+        # existing dashboard code that hasn't been updated yet still
+        # shows something sensible.
         "account_id": META_AD_ACCOUNT_ID,
-        "summary": summary,
-        "campaigns": campaign_rows,
-        "adsets": adset_rows,
-        "ads": ad_rows,
-        "statuses": statuses,
+        "statuses": combined_statuses.get(META_AD_ACCOUNT_ID, {}),
     }
 
     with open(OUTPUT_FILE, "w") as f:

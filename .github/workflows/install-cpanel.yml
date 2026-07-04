@@ -28,6 +28,9 @@ jobs:
           FTP_PASS: ${{ secrets.FTP_PASS }}
           META_ACCESS_TOKEN: ${{ secrets.META_ACCESS_TOKEN }}
           META_AD_ACCOUNT_ID: ${{ secrets.META_AD_ACCOUNT_ID }}
+          # Comma-separated list of every ad account under the same Meta BM.
+          # Optional — if unset the default in the install script hardcodes both.
+          META_AD_ACCOUNT_IDS: ${{ secrets.META_AD_ACCOUNT_IDS }}
           ADJUST_API_TOKEN: ${{ secrets.ADJUST_API_TOKEN }}
           ADJUST_APP_TOKEN: ${{ secrets.ADJUST_APP_TOKEN }}
           REVENUECAT_API_KEY: ${{ secrets.REVENUECAT_API_KEY }}
@@ -111,6 +114,13 @@ jobs:
               f'export LOCAL_OUTPUT_DIR="{dashboard_dir}"\n'
               "\n# Meta\n"
               f'export META_ACCESS_TOKEN="{os.environ["META_ACCESS_TOKEN"]}"\n'
+              # Comma-separated list of ad account IDs. Both accounts live under
+              # the same Business Manager, so the single META_ACCESS_TOKEN works
+              # for all of them. The refresh script splits this and pulls each
+              # account independently, tagging every row with its `account_id`.
+              f'export META_AD_ACCOUNT_IDS="{os.environ.get("META_AD_ACCOUNT_IDS","2399779997191076,1306431168140247")}"\n'
+              # Kept for backward compat with any script that still reads the
+              # singular name — points at the primary account.
               f'export META_AD_ACCOUNT_ID="{os.environ.get("META_AD_ACCOUNT_ID","2399779997191076")}"\n'
               "\n# Adjust\n"
               f'export ADJUST_API_TOKEN="{os.environ["ADJUST_API_TOKEN"]}"\n'
