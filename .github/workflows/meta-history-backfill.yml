@@ -1,0 +1,45 @@
+name: Meta History Backfill
+
+# One-off historical pull of per-ad-set + per-campaign DAILY insights back to
+# BACKFILL_SINCE, INCLUDING ad sets that were later paused/archived/deleted
+# (the account insights edge retains their rows). Writes meta_history.json to
+# cPanel — fetch at https://genivox.com/ads-upload/meta_history.json
+#
+# Run on demand from the Actions tab → "Meta History Backfill" → Run workflow.
+
+on:
+  workflow_dispatch:
+    inputs:
+      since:
+        description: "Backfill start date (YYYY-MM-DD)"
+        required: false
+        default: "2026-03-01"
+      levels:
+        description: "Insight levels (comma-separated: adset,campaign[,ad])"
+        required: false
+        default: "adset,campaign"
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run Meta history backfill
+        env:
+          META_ACCESS_TOKEN: ${{ secrets.META_ACCESS_TOKEN }}
+          META_AD_ACCOUNT_ID: ${{ secrets.META_AD_ACCOUNT_ID }}
+          META_AD_ACCOUNT_IDS: ${{ secrets.META_AD_ACCOUNT_IDS || '2399779997191076,1306431168140247' }}
+          FTP_HOST: ${{ secrets.FTP_HOST }}
+          FTP_USER: ${{ secrets.FTP_USER }}
+          FTP_PASS: ${{ secrets.FTP_PASS }}
+          FTP_PATH: ${{ secrets.FTP_PATH }}
+          BACKFILL_SINCE: ${{ github.event.inputs.since }}
+          BACKFILL_LEVELS: ${{ github.event.inputs.levels }}
+        run: python3 -u backfill_meta_history.py
