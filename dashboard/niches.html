@@ -94,7 +94,11 @@ a:hover{text-decoration:underline}
     so “didn’t chart” is not the same as “didn’t work”. Recent entrants are found via App Store
     search, so they appear here even when they rank nowhere near the charts.
     Use the <b>Ads</b> link on each entrant to check whether its traction was bought.<br><br>
-    Terms come from app names, so expect some junk — the app lists are there so you can judge.
+    <b>Known limits.</b> Terms come from app <i>names</i>, so a shared word is not always a shared
+    business — a Pokémon app called “Remote Raid” lands in the “remote” cluster. Clusters covering
+    substantially the same apps are merged automatically (shown as <i>also:</i>), but same-niche apps
+    with unrelated names are still missed entirely. Treat this as a lead generator, not a taxonomy;
+    the app list under each niche is there so you can throw out what doesn’t belong.
   </div>
 
   <div class="cards" id="cards"></div>
@@ -178,6 +182,9 @@ function render(){
         <div class="nhead">
           <span class="nterm">${esc(n.term)}</span>
           <span class="ncat">${esc(n.category)}</span>
+          ${n.aliases?.length
+            ? `<span class="ncat muted" title="Merged — these terms cover the same apps">also: ${esc(n.aliases.join(", "))}</span>`
+            : ""}
           ${verdictBadge(n)}
         </div>
         <div class="nstats">

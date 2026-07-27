@@ -402,10 +402,40 @@ def build_niches(all_charting: dict, new_ids: set) -> list:
             if a["publisher"]:
                 c["publishers"].add(a["publisher"])
 
+    # DEDUPE OVERLAPPING CLUSTERS. Token matching produces the same niche under
+    # several words — "storage", "clean storage" and "storage cleaner" were
+    # three separate entries covering an identical app set, and 22 of 35 niches
+    # in one test were near-duplicates of another. Greedily keep the strongest
+    # cluster and absorb anything that substantially overlaps it.
+    #
+    # Strongest = most publishers, tie-broken by the LONGER term, so "remote
+    # control" survives over the vaguer "control" and "screen mirroring" over
+    # bare "screen" — the bigram is nearly always the more meaningful niche.
+    survivors = []
+    order = sorted(
+        (c for c in clusters.values() if len(c["publishers"]) >= MIN_NICHE_PUBLISHERS),
+        key=lambda c: (-len(c["publishers"]), -len(c["term"])),
+    )
+    for c in order:
+        ids = {a["app_id"] for a in c["apps"]}
+        dup_of = None
+        for s in survivors:
+            if s["category"] != c["category"]:
+                continue
+            overlap = len(ids & s["_ids"]) / min(len(ids), len(s["_ids"]))
+            if overlap >= 0.7:
+                dup_of = s
+                break
+        if dup_of:
+            dup_of["_aliases"].append(c["term"])
+        else:
+            c["_ids"] = ids
+            c["_aliases"] = []
+            survivors.append(c)
+
     out = []
-    for (genre, term), c in clusters.items():
-        if len(c["publishers"]) < MIN_NICHE_PUBLISHERS:
-            continue
+    for c in survivors:
+        genre, term = c["category"], c["term"]
         apps = c["apps"]
         grossing = [a["grossing"] for a in apps if a["grossing"]]
         new_entrants = [a for a in apps if a["app_id"] in new_ids]
@@ -421,6 +451,7 @@ def build_niches(all_charting: dict, new_ids: set) -> list:
 
         out.append({
             "term": term,
+            "aliases": sorted(set(c["_aliases"]))[:6],
             "category": genre,
             "app_count": len(apps),
             "publisher_count": len(c["publishers"]),
