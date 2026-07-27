@@ -9,10 +9,18 @@ consecutive IDs turned up "Alkebulan", "QUIERO CASARME CONTIGO" and
 "BYTHEDØZEN" — none of which any keyword list would have reached.
 
 THE COST ASYMMETRY THAT SHAPES THIS SCRIPT. Discovery is expensive; monitoring
-is nearly free. Scanning the ~40M IDs covering 180 days takes ~11 hours, but
-re-checking 90,000 apps you already know about takes ~90 seconds (400 IDs per
-lookup call). So the engine is not the scan — it is the WATCHLIST. Discover an
-app once, then track it daily for almost nothing.
+is nearly free. Re-checking apps you already know costs ~2.4s per 400, so tens
+of thousands take a couple of minutes. Scanning to FIND them is the slow part.
+So the engine is not the scan — it is the WATCHLIST: discover an app once, then
+track it daily for almost nothing.
+
+⚠️ A FULL 180-DAY BACKFILL IS NOT PRACTICAL. Real throughput is ~22 calls/min
+(a 400-ID lookup costs ~2.4s of request time, not the 0.35s throttle I first
+sized against), so the ~40M IDs covering 180 days would need ~75 hours of
+scanning, not the ~11 I originally estimated. The FRONTIER is what pays:
+~350k new IDs/day is ~15 min, so scanning forward from today accumulates a
+complete window over time. Backfill runs only with whatever budget is left and
+should be treated as a bonus, not a plan.
 
 MEASURED FACTS THIS RELIES ON (all verified against the live API):
   - Lookup accepts 400 IDs per call. 800 returns a 502.
@@ -59,10 +67,12 @@ LOOKUP_BATCH = 400            # measured ceiling; 800 -> 502
 SCAN_COUNTRY = (os.environ.get("DISCOVERY_COUNTRY") or "us").lower()
 THROTTLE = float(os.environ.get("DISCOVERY_THROTTLE") or 0.35)
 
-# Total lookup calls per run, split between frontier and backfill. 3000 calls
-# x 400 IDs = 1.2M IDs, roughly 20 minutes at the default throttle.
-SCAN_CALLS = int(os.environ.get("DISCOVERY_SCAN_CALLS") or 3000)
-FRONTIER_CALLS = int(os.environ.get("DISCOVERY_FRONTIER_CALLS") or 900)
+# Sized from MEASURED latency: a 400-ID lookup costs ~2.4s of request time, so
+# real throughput is ~22 calls/min, not the ~170/min the throttle alone implies.
+# The wall-clock budget is the real limit; the call counts are just ceilings.
+SCAN_CALLS = int(os.environ.get("DISCOVERY_SCAN_CALLS") or 1200)
+FRONTIER_CALLS = int(os.environ.get("DISCOVERY_FRONTIER_CALLS") or 700)
+SCAN_MINUTES = float(os.environ.get("DISCOVERY_SCAN_MINUTES") or 25)
 
 MAX_AGE_DAYS = int(os.environ.get("DISCOVERY_MAX_AGE_DAYS") or 180)
 # Consecutive empty blocks before declaring a dead zone and jumping. 3 blocks
@@ -103,19 +113,34 @@ def lookup_ids(ids: list) -> tuple:
     url = ("https://itunes.apple.com/lookup?id=" + ",".join(map(str, ids))
            + f"&country={SCAN_COUNTRY}&entity=software")
     try:
-        res = get_json(url).get("results", [])
+        # retries=1 deliberately. ~12% of sparse ID blocks return HTTP 500, and
+        # that is a property of the block, not a transient fault — retrying wins
+        # nothing while the default 3 retries add ~7s of exponential backoff
+        # each. At scale that was the difference between a 30-minute run and a
+        # 3-hour one. A failed block is simply treated as empty.
+        res = get_json(url, retries=1).get("results", [])
     except Exception:  # noqa: BLE001 — a bad block must not stop the sweep
         return [], 0
     return [r for r in res if r.get("kind") == "software" and r.get("trackId")], len(res)
 
 
-def scan_range(start: int, direction: int, calls: int, now, label: str) -> tuple:
+def scan_range(start: int, direction: int, calls: int, now, label: str,
+               deadline: float = None) -> tuple:
     """Walk IDs in blocks, skipping dead zones. Returns (apps, calls_used, end_id).
 
     direction: +1 scans upward (frontier, newest), -1 downward (backfill).
+
+    A WALL-CLOCK DEADLINE bounds this, not just the call count. A 400-ID lookup
+    takes ~2.4s of real request time — I originally sized the budget on the
+    0.35s throttle alone and a 3000-call run took over 90 minutes and was killed
+    by the job timeout, uploading nothing. Call counts cannot predict runtime
+    when per-call latency varies by an order of magnitude; a deadline can.
     """
     found, used, cursor, empty_run = {}, 0, start, 0
     while used < calls:
+        if deadline and time.time() > deadline:
+            print(f"  {label}: stopping at time budget")
+            break
         lo = cursor if direction > 0 else cursor - LOOKUP_BATCH
         block, total = lookup_ids(range(lo, lo + LOOKUP_BATCH))
         used += 1
@@ -227,14 +252,15 @@ def main() -> None:
     # ── Frontier: newest IDs first, so brand-new apps appear immediately
     # rather than waiting for the backfill to finish ──
     print("\n▶ Frontier scan (newest IDs)")
-    fresh, used_f, new_top = scan_range(top_id, +1, FRONTIER_CALLS, now, "frontier")
+    deadline = time.time() + SCAN_MINUTES * 60
+    fresh, used_f, new_top = scan_range(top_id, +1, FRONTIER_CALLS, now, "frontier", deadline)
 
     # ── Backfill: walk downward through the live region ──
     print("\n▶ Backfill scan (older IDs)")
     remaining = max(SCAN_CALLS - used_f, 0)
     older, used_b, new_cursor = ({}, 0, cursor)
     if remaining and cursor > floor:
-        older, used_b, new_cursor = scan_range(cursor, -1, remaining, now, "backfill")
+        older, used_b, new_cursor = scan_range(cursor, -1, remaining, now, "backfill", deadline)
     elif cursor <= floor:
         print("  backfill complete — nothing older to cover")
 
