@@ -63,5 +63,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: opportunity-radar
-          path: opportunity_radar.json
+          path: |
+            opportunity_radar.json
+            niche_clusters.json
           retention-days: 30
