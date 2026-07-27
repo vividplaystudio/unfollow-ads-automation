@@ -748,7 +748,7 @@ def main() -> None:
     # ratings/day computed from lifetime totals is an average — an app that was
     # hot six months ago and is flat now scores the same as one growing today.
     # This delta is actual movement since the last run.
-    prev_index = {}
+    prev_index, pj = {}, {}
     prev_at = None
     try:
         pj = get_json(PREV_URL.rsplit("/", 1)[0] + "/" + INDEX_OUTPUT,
@@ -759,35 +759,54 @@ def main() -> None:
     except Exception as e:  # noqa: BLE001 — first run has none
         print(f"  no previous index ({e})")
 
-    # Normalise the delta to per-day so an off-schedule or re-run day doesn't
-    # masquerade as a spike.
-    span_days = 1.0
-    if prev_at:
+    # The baseline is held SEPARATE from the current reading and only rolls
+    # forward once enough time has passed. Naively diffing against "whatever
+    # the last run wrote" breaks the moment you run twice in an evening: Apple
+    # refreshes userRatingCount periodically, not live (30 of the 30 largest
+    # apps — YouTube included — gained exactly zero over 18 minutes), so a
+    # short re-run produces an all-zero diff AND overwrites the only useful
+    # baseline. Carrying the older baseline through short gaps means manual
+    # re-runs no longer destroy the comparison window.
+    MIN_BASELINE_DAYS = 0.5
+    prev_baseline_at = (pj.get("baseline_at") or prev_at) if prev_index else None
+    span_days = None
+    if prev_baseline_at:
         try:
-            span = (now - datetime.fromisoformat(prev_at.replace("Z", "+00:00"))).total_seconds() / 86400
-            span_days = max(span, 0.25)  # floor guards against a double-run divide blow-up
+            span_days = (now - datetime.fromisoformat(
+                prev_baseline_at.replace("Z", "+00:00"))).total_seconds() / 86400
         except ValueError:
-            pass
+            span_days = None
+
+    roll = span_days is None or span_days >= MIN_BASELINE_DAYS
+    baseline_at = now.isoformat() if roll else prev_baseline_at
 
     index, gained = {}, 0
     for aid, a in all_charting.items():
+        cur = a["ratings_count"]
         rec = {"g": a["grossing"], "f": a["free"], "c": len(a["countries"]),
-               "n": a["name"], "r": a["ratings_count"]}
-        p = prev_index.get(aid)
-        if p and p.get("r") is not None:
-            delta = a["ratings_count"] - p["r"]
+               "n": a["name"], "r": cur}
+        p = prev_index.get(aid) or {}
+        # Prefer the explicit baseline; fall back to the previous reading for
+        # indexes written before this field existed.
+        base = p.get("b", p.get("r"))
+        rec["b"] = cur if roll else (base if base is not None else cur)
+        if base is not None and span_days:
+            delta = cur - base
             if delta > 0:
-                rec["d"] = round(delta / span_days, 1)  # ratings gained per day, NOW
+                rec["d"] = round(delta / max(span_days, 0.25), 1)
                 gained += 1
         index[aid] = rec
 
     with open(INDEX_OUTPUT, "w") as f:
-        json.dump({"generated_at": now.isoformat(), "countries": COUNTRIES,
-                   "span_days": round(span_days, 2), "count": len(index),
-                   "with_velocity": gained, "apps": index},
+        json.dump({"generated_at": now.isoformat(), "baseline_at": baseline_at,
+                   "countries": COUNTRIES,
+                   "span_days": round(span_days, 2) if span_days else None,
+                   "count": len(index), "with_velocity": gained, "apps": index},
                   f, separators=(",", ":"), default=str)
+    span_txt = f"{span_days:.2f}d" if span_days else "no baseline yet"
     print(f"✓ {INDEX_OUTPUT}: {len(index)} charting apps indexed "
-          f"({gained} with live velocity over {span_days:.1f}d)")
+          f"({gained} with velocity over {span_txt}"
+          f"{'' if roll else ' — baseline carried, gap too short to roll'})")
 
     # ── Niche clusters (separate deliverable, same run) ──────────────
     print(f"\n▶ Clustering niches across {len(all_charting)} charting apps "
