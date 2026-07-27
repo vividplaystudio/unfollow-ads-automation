@@ -1,0 +1,344 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Niche Search</title>
+<style>
+/* LIVE tool — unlike radar.html and niches.html this reads no JSON and waits
+   for no cron. Apple's Search API sends Access-Control-Allow-Origin, so the
+   browser calls it directly and results are instant. No backend involved. */
+:root{
+  --bg:#f7f8fb; --surface:#fff; --surface-hover:#f3f4f7; --border:#e4e7ed;
+  --text:#1d2230; --text-muted:#6b7280; --text-subtle:#9ca3af;
+  --accent:#4f46e5; --accent-soft:#eef2ff; --success:#10b981; --success-soft:#d1fae5;
+  --warning:#f59e0b; --warning-soft:#fef3c7; --danger:#ef4444; --danger-soft:#fee2e2;
+  --neutral-soft:#f3f4f6; --radius:10px; --radius-sm:6px;
+  --shadow-sm:0 1px 2px rgba(0,0,0,.04);
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);
+  font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+.wrap{max-width:1400px;margin:0 auto;padding:28px 20px 64px}
+h1{font-size:22px;margin:0 0 4px}
+.sub{color:var(--text-muted);font-size:13px;margin-bottom:6px}
+.nav{margin-bottom:18px;font-size:13px}
+.nav a{margin-right:14px}
+.searchbar{display:flex;gap:10px;flex-wrap:wrap;align-items:center;
+  background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
+  padding:14px 16px;box-shadow:var(--shadow-sm);margin-bottom:16px}
+input,select{font:inherit;padding:9px 12px;border:1px solid var(--border);
+  border-radius:var(--radius-sm);background:var(--surface);color:var(--text)}
+input:focus,select:focus{outline:2px solid var(--accent-soft);border-color:var(--accent)}
+#term{flex:1;min-width:230px;font-size:15px}
+button{font:inherit;font-weight:600;padding:9px 20px;border:none;border-radius:var(--radius-sm);
+  background:var(--accent);color:#fff;cursor:pointer}
+button:hover{filter:brightness(1.08)}
+button:disabled{opacity:.5;cursor:default}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin-bottom:18px}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
+  padding:13px 15px;box-shadow:var(--shadow-sm)}
+.card .n{font-size:24px;font-weight:650;letter-spacing:-.02em}
+.card .l{color:var(--text-muted);font-size:12px;margin-top:2px}
+.tablewrap{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
+  overflow-x:auto;box-shadow:var(--shadow-sm)}
+table{border-collapse:collapse;width:100%;min-width:920px}
+th,td{padding:10px 12px;text-align:left;border-bottom:1px solid var(--border);white-space:nowrap}
+th{background:var(--surface-hover);font-size:12px;font-weight:600;color:var(--text-muted);
+  cursor:pointer;user-select:none;position:sticky;top:0;z-index:1}
+th[data-dir]::after{content:" ▲";color:var(--accent)}
+th[data-dir="desc"]::after{content:" ▼"}
+tbody tr:hover{background:var(--surface-hover)}
+a{color:var(--accent);text-decoration:none}
+a:hover{text-decoration:underline}
+.ico{width:32px;height:32px;border-radius:8px;display:block;background:var(--neutral-soft)}
+.appline{display:flex;align-items:center;gap:10px}
+td.app{white-space:normal;min-width:210px}
+td.pub{color:var(--text-muted);white-space:normal;max-width:190px;font-size:13px}
+.num{font-variant-numeric:tabular-nums;font-weight:600}
+.rate{font-variant-numeric:tabular-nums;font-weight:700;font-size:15px}
+.rate.hot{color:var(--success)}
+.rate.mid{color:var(--warning)}
+.rate.low{color:var(--text-subtle)}
+.pill{display:inline-block;padding:2px 8px;border-radius:99px;font-size:11px;font-weight:600}
+.new{background:var(--danger-soft);color:#991b1b}
+.recent{background:var(--warning-soft);color:#92400e}
+.old{background:var(--neutral-soft);color:var(--text-muted)}
+.btn{display:inline-block;padding:3px 8px;border:1px solid var(--border);border-radius:var(--radius-sm);
+  font-size:11px;font-weight:600;color:var(--text-muted);white-space:nowrap}
+.btn:hover{background:var(--accent-soft);color:var(--accent);border-color:var(--accent);text-decoration:none}
+.state{padding:44px 20px;text-align:center;color:var(--text-muted)}
+button.ghost{background:var(--surface);color:var(--text-muted);border:1px solid var(--border)}
+button.ghost:hover{background:var(--accent-soft);color:var(--accent);border-color:var(--accent);filter:none}
+.watchbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:14px}
+.wlabel{font-size:11px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.04em}
+.wchip{display:inline-flex;align-items:center;gap:6px;padding:4px 6px 4px 11px;border:1px solid var(--border);
+  border-radius:99px;font-size:12px;background:var(--surface);cursor:pointer}
+.wchip:hover{border-color:var(--accent);color:var(--accent)}
+.wx{color:var(--text-subtle);font-weight:700;padding:0 3px}
+.wx:hover{color:var(--danger)}
+.chart{display:inline-block;padding:2px 7px;border-radius:99px;font-size:11px;font-weight:700;
+  background:var(--success-soft);color:#065f46;font-variant-numeric:tabular-nums}
+.chart.free{background:var(--accent-soft);color:var(--accent)}
+.geos{display:flex;gap:3px;flex-wrap:wrap}
+.geo{padding:1px 6px;border-radius:99px;font-size:10px;font-weight:600;
+  background:var(--neutral-soft);color:var(--text-muted)}
+.note{background:var(--accent-soft);border:1px solid #c7d2fe;border-radius:var(--radius);
+  padding:10px 14px;font-size:12.5px;color:#3730a3;margin-bottom:16px}
+.muted{color:var(--text-subtle)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Niche Search</h1>
+  <div class="sub">Type any keyword — searches the App Store live and scores every result by traction.</div>
+  <div class="nav"><a href="radar.html">← New-app radar</a><a href="niches.html">Niche clusters</a></div>
+
+  <div class="note">
+    Live — queries Apple directly from your browser, so results are current to this second and
+    owe nothing to the daily run. Traction is <b>ratings per day since launch</b>, which catches
+    apps growing on paid traffic even when they rank nowhere. Use <b>Ads</b> on any row to check
+    whether that growth was bought.
+  </div>
+
+  <div class="searchbar">
+    <input id="term" placeholder="e.g. tv remote, budget, unfollow, screen mirroring…" autofocus>
+    <select id="country">
+      <option value="us">US only</option>
+      <option value="ALL4">US + UK + CA + AU</option>
+      <option value="ALL10">All 10 markets</option>
+      <option value="gb">UK</option>
+      <option value="ca">Canada</option><option value="au">Australia</option>
+      <option value="de">Germany</option><option value="fr">France</option>
+      <option value="es">Spain</option><option value="it">Italy</option>
+      <option value="br">Brazil</option><option value="mx">Mexico</option>
+      <option value="nl">Netherlands</option><option value="jp">Japan</option>
+      <option value="kr">Korea</option><option value="in">India</option>
+    </select>
+    <select id="age">
+      <option value="180">Launched &lt; 180 days</option>
+      <option value="90">Launched &lt; 90 days</option>
+      <option value="30">Launched &lt; 30 days</option>
+      <option value="365">Launched &lt; 1 year</option>
+      <option value="99999">Any age</option>
+    </select>
+    <select id="minr">
+      <option value="10">10+ ratings</option>
+      <option value="50">50+ ratings</option>
+      <option value="100">100+ ratings</option>
+      <option value="0">Any rating count</option>
+    </select>
+    <button id="go">Search</button>
+    <button id="save" class="ghost" title="Save this keyword to your watchlist">☆ Save</button>
+  </div>
+
+  <div id="watchwrap" hidden>
+    <div class="watchbar">
+      <span class="wlabel">Watchlist</span>
+      <span id="watch"></span>
+    </div>
+  </div>
+
+  <div class="cards" id="cards"></div>
+
+  <div class="tablewrap">
+    <table>
+      <thead><tr>
+        <th data-k="ratings_per_day">Ratings/day</th>
+        <th data-k="chart_rank">Charting</th>
+        <th data-k="name">App</th>
+        <th data-k="publisher">Publisher</th>
+        <th data-k="age">Age</th>
+        <th data-k="ratings">Ratings</th>
+        <th data-k="found_in">Markets</th>
+        <th data-k="price">Price</th>
+        <th data-k="genre">Category</th>
+        <th>Check</th>
+      </tr></thead>
+      <tbody id="rows"><tr><td colspan="10" class="state">Enter a keyword and hit Search.</td></tr></tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+let ALL = [], sortKey = "ratings_per_day", sortDir = "desc";
+let CHART = {};            // app_id -> {g,f,c} from the daily run
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c =>
+  ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const AD_LIB = q =>
+  "https://www.facebook.com/ads/library/?active_status=all&ad_type=all&country=ALL" +
+  "&search_type=keyword_unordered&q=" + encodeURIComponent(q);
+
+const GROUPS = {
+  ALL4:  ["us","gb","ca","au"],
+  ALL10: ["us","gb","ca","au","de","fr","es","it","br","mx"],
+};
+
+function ageClass(d){ return d <= 30 ? "new" : d <= 180 ? "recent" : "old"; }
+function rateClass(r){ return r >= 5 ? "hot" : r >= 1 ? "mid" : "low"; }
+
+// Chart positions come from the daily run, so the live search can distinguish
+// "exists and is growing" from "is actually in the top 100". Optional — the
+// page works without it, results are just unmarked.
+fetch("charting_index.json?v=" + Date.now())
+  .then(r => r.ok ? r.json() : null)
+  .then(d => { if (d) { CHART = d.apps || {}; markIndexLoaded(d); } })
+  .catch(() => {});
+
+function markIndexLoaded(d){
+  document.querySelector(".sub").textContent +=
+    ` · cross-referencing ${d.count.toLocaleString()} charting apps from ${new Date(d.generated_at).toLocaleDateString()}`;
+}
+
+async function fetchOne(term, cc){
+  const url = `https://itunes.apple.com/search?term=${encodeURIComponent(term)}`
+            + `&country=${cc}&entity=software&limit=200`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error("HTTP " + res.status);
+  // Apple serves this as text/javascript, so res.json() rejects in some
+  // browsers even though the body is valid JSON. Parse the text instead.
+  return JSON.parse(await res.text()).results || [];
+}
+
+async function search(){
+  const term = document.getElementById("term").value.trim();
+  if (!term) return;
+  const sel = document.getElementById("country").value;
+  const countries = GROUPS[sel] || [sel];
+  const btn = document.getElementById("go");
+  btn.disabled = true; btn.textContent = "Searching…";
+  document.getElementById("rows").innerHTML =
+    `<tr><td colspan="10" class="state">Searching ${countries.length} market${countries.length>1?"s":""}…</td></tr>`;
+
+  try {
+    // Parallel across markets. One failing storefront must not lose the rest,
+    // so settle rather than all-or-nothing.
+    const settled = await Promise.allSettled(countries.map(cc => fetchOne(term, cc)));
+    if (settled.every(s => s.status === "rejected"))
+      throw new Error(settled[0].reason?.message || "all requests failed");
+
+    const now = Date.now(), merged = new Map();
+    settled.forEach((s, i) => {
+      if (s.status !== "fulfilled") return;
+      for (const r of s.value) {
+        const id = String(r.trackId);
+        if (merged.has(id)) { merged.get(id).found_in.push(countries[i]); continue; }
+        const rel = r.releaseDate ? new Date(r.releaseDate) : null;
+        if (!rel) continue;
+        const age = Math.max(0, Math.floor((now - rel.getTime()) / 86400000));
+        const ratings = r.userRatingCount || 0;
+        const ch = CHART[id];
+        merged.set(id, {
+          id, name: r.trackName, publisher: r.sellerName || r.artistName,
+          icon: r.artworkUrl100, url: r.trackViewUrl, genre: r.primaryGenreName,
+          price: r.formattedPrice || "—",
+          rating: r.averageUserRating ? r.averageUserRating.toFixed(2) : null,
+          ratings, age,
+          ratings_per_day: +(ratings / Math.max(age, 1)).toFixed(2),
+          released: r.releaseDate.slice(0,10),
+          found_in: [countries[i]],
+          grossing: ch?.g ?? null, free: ch?.f ?? null, chart_countries: ch?.c ?? 0,
+          // Single sortable value: grossing beats free, unranked sorts last.
+          chart_rank: ch?.g ?? (ch?.f ? 1000 + ch.f : 99999),
+        });
+      }
+    });
+    ALL = [...merged.values()];
+    render();
+  } catch (e) {
+    document.getElementById("rows").innerHTML =
+      `<tr><td colspan="10" class="state">⚠️ Search failed<br><small>${esc(e.message)}</small></td></tr>`;
+    document.getElementById("cards").innerHTML = "";
+  } finally {
+    btn.disabled = false; btn.textContent = "Search";
+  }
+}
+
+// ── Watchlist (localStorage — no backend, survives reloads) ─────────
+const WKEY = "radar_watchlist";
+const getWatch = () => { try { return JSON.parse(localStorage.getItem(WKEY)) || []; } catch { return []; } };
+const setWatch = w => { localStorage.setItem(WKEY, JSON.stringify(w)); renderWatch(); };
+
+function renderWatch(){
+  const w = getWatch();
+  document.getElementById("watchwrap").hidden = !w.length;
+  document.getElementById("watch").innerHTML = w.map(t => `
+    <span class="wchip"><span data-go="${esc(t)}">${esc(t)}</span><span class="wx" data-del="${esc(t)}">×</span></span>
+  `).join("");
+}
+document.getElementById("watch").addEventListener("click", e => {
+  const go = e.target.dataset.go, del = e.target.dataset.del;
+  if (del) return setWatch(getWatch().filter(x => x !== del));
+  if (go) { document.getElementById("term").value = go; search(); }
+});
+document.getElementById("save").onclick = () => {
+  const t = document.getElementById("term").value.trim().toLowerCase();
+  if (!t) return;
+  const w = getWatch();
+  if (!w.includes(t)) setWatch([...w, t]);
+};
+renderWatch();
+
+function render(){
+  const maxAge = +document.getElementById("age").value;
+  const minR = +document.getElementById("minr").value;
+  let rows = ALL.filter(a => a.age <= maxAge && a.ratings >= minR);
+
+  rows.sort((x,y) => {
+    let a = x[sortKey], b = y[sortKey];
+    if (typeof a === "string" || typeof b === "string")
+      return String(a||"").localeCompare(String(b||"")) * (sortDir === "asc" ? 1 : -1);
+    a = a ?? -Infinity; b = b ?? -Infinity;
+    return (a < b ? -1 : a > b ? 1 : 0) * (sortDir === "asc" ? 1 : -1);
+  });
+
+  const fresh = ALL.filter(a => a.age <= 180);
+  const best = rows.length ? Math.max(...rows.map(a => a.ratings_per_day)) : 0;
+  document.getElementById("cards").innerHTML = [
+    ["Matching apps", ALL.length],
+    ["Launched &lt; 180d", fresh.length],
+    ["Charting now", rows.filter(a => a.grossing || a.free).length],
+    ["Shown after filters", rows.length],
+    ["Best traction", best + "/day"],
+  ].map(([l,n]) => `<div class="card"><div class="n">${n}</div><div class="l">${l}</div></div>`).join("");
+
+  document.getElementById("rows").innerHTML = rows.length ? rows.map(a => `
+    <tr>
+      <td class="rate ${rateClass(a.ratings_per_day)}">${a.ratings_per_day}</td>
+      <td>${a.grossing ? `<span class="chart" title="Top-grossing in ${a.chart_countries} market(s)">gross #${a.grossing}</span>`
+           : a.free ? `<span class="chart free" title="Top-free in ${a.chart_countries} market(s)">free #${a.free}</span>`
+           : `<span class="muted">—</span>`}</td>
+      <td class="app"><div class="appline">
+        ${a.icon ? `<img class="ico" src="${esc(a.icon)}" alt="" loading="lazy">` : `<span class="ico"></span>`}
+        <a href="${esc(a.url)}" target="_blank" rel="noopener">${esc(a.name)}</a>
+      </div></td>
+      <td class="pub">${esc(a.publisher || "")}</td>
+      <td><span class="pill ${ageClass(a.age)}" title="Released ${a.released}">${a.age}d</span></td>
+      <td class="num">${a.ratings.toLocaleString()}</td>
+      <td><div class="geos">${a.found_in.map(c => `<span class="geo">${c.toUpperCase()}</span>`).join("")}</div></td>
+      <td class="num">${esc(a.price)}</td>
+      <td>${esc(a.genre || "")}</td>
+      <td><a class="btn" href="${AD_LIB(a.name)}" target="_blank" rel="noopener">Ads</a></td>
+    </tr>`).join("")
+    : `<tr><td colspan="10" class="state">No apps match those filters. Try a wider age or fewer required ratings.</td></tr>`;
+}
+
+document.querySelectorAll("th[data-k]").forEach(th => {
+  th.onclick = () => {
+    const k = th.dataset.k;
+    sortDir = (sortKey === k && sortDir === "desc") ? "asc" : "desc";
+    sortKey = k;
+    document.querySelectorAll("th[data-k]").forEach(t => t.removeAttribute("data-dir"));
+    th.setAttribute("data-dir", sortDir);
+    render();
+  };
+});
+document.getElementById("go").onclick = search;
+document.getElementById("term").addEventListener("keydown", e => { if (e.key === "Enter") search(); });
+["age","minr"].forEach(id =>
+  document.getElementById(id).addEventListener("change", () => ALL.length && render()));
+document.getElementById("country").addEventListener("change", () => ALL.length && search());
+document.querySelector('th[data-k="ratings_per_day"]').setAttribute("data-dir","desc");
+</script>
+</body>
+</html>

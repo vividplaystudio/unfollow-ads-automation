@@ -69,6 +69,12 @@ from datetime import datetime, timezone
 
 OUTPUT = "opportunity_radar.json"
 NICHE_OUTPUT = "niche_clusters.json"
+# Compact app_id -> chart-position index over EVERY charting app, new or not.
+# The live search page cross-references against this so a result can be marked
+# "actually charting at grossing #12" rather than merely "exists and is
+# growing". opportunity_radar.json can't serve that — it only holds new apps,
+# so incumbents would come back unmarked and look like nobodies.
+INDEX_OUTPUT = "charting_index.json"
 PREV_URL = os.environ.get(
     "RADAR_PREV_URL", "https://genivox.com/ads-upload/opportunity_radar.json"
 )
@@ -735,6 +741,18 @@ def main() -> None:
     with open(OUTPUT, "w") as f:
         json.dump(payload, f, indent=2, default=str)
 
+    # ── Charting index (feeds the live search page) ──────────────────
+    # Keys are terse (g/f/c/n) purely for size — this is ~8k apps and the
+    # browser fetches it on every page load.
+    index = {
+        aid: {"g": a["grossing"], "f": a["free"], "c": len(a["countries"]), "n": a["name"]}
+        for aid, a in all_charting.items()
+    }
+    with open(INDEX_OUTPUT, "w") as f:
+        json.dump({"generated_at": now.isoformat(), "countries": COUNTRIES,
+                   "count": len(index), "apps": index}, f, separators=(",", ":"), default=str)
+    print(f"✓ {INDEX_OUTPUT}: {len(index)} charting apps indexed")
+
     # ── Niche clusters (separate deliverable, same run) ──────────────
     print(f"\n▶ Clustering niches across {len(all_charting)} charting apps "
           f"(incumbents included — costs no extra API calls)")
@@ -790,12 +808,13 @@ def main() -> None:
     # and the data being shipped.
     upload_to_ftp(OUTPUT, OUTPUT)
     upload_to_ftp(NICHE_OUTPUT, NICHE_OUTPUT)
+    upload_to_ftp(INDEX_OUTPUT, INDEX_OUTPUT)
 
     # Ship the viewers alongside the data. They must sit in the SAME folder so
     # their relative fetch() calls inherit /ads-upload's Basic Auth — the
     # browser prompts once and every request is covered.
     here = os.path.dirname(os.path.abspath(__file__))
-    for page in ("radar.html", "niches.html"):
+    for page in ("radar.html", "niches.html", "search.html"):
         viewer = os.path.join(here, "dashboard", page)
         if os.path.exists(viewer):
             upload_to_ftp(viewer, page)
