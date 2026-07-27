@@ -1,0 +1,59 @@
+name: App Discovery
+
+# Walks Apple's ID space to find EVERY new app — including ones no keyword
+# search would reach — then watches the ones that gain traction.
+#
+# Two phases per run:
+#   frontier — newest IDs, so apps launched today appear immediately
+#   backfill — older IDs, gradually building the 180-day history
+#
+# Runs twice daily. The 12h spacing matters: Apple refreshes userRatingCount
+# periodically, not live, so runs closer than that produce no velocity.
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+    - cron: "0 15 * * *"
+  workflow_dispatch:
+    inputs:
+      scan_calls:
+        description: "Total lookup calls (400 IDs each). 3000 ≈ 20 min"
+        required: false
+        default: "3000"
+      frontier_calls:
+        description: "Of those, how many for the newest IDs"
+        required: false
+        default: "900"
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run App Discovery
+        env:
+          DISCOVERY_SCAN_CALLS: ${{ github.event.inputs.scan_calls || '3000' }}
+          DISCOVERY_FRONTIER_CALLS: ${{ github.event.inputs.frontier_calls || '900' }}
+          ADS_UPLOAD_USER: ${{ secrets.ADS_UPLOAD_USER }}
+          ADS_UPLOAD_PASS: ${{ secrets.ADS_UPLOAD_PASS }}
+          FTP_HOST: ${{ secrets.FTP_HOST }}
+          FTP_USER: ${{ secrets.FTP_USER }}
+          FTP_PASS: ${{ secrets.FTP_PASS }}
+          FTP_PATH: ${{ secrets.FTP_PATH }}
+        run: python3 -u refresh_app_discovery.py
+
+      - name: Upload JSON as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-discovery
+          path: |
+            discovery.json
+            discovery_state.json
+          retention-days: 30
