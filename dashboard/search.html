@@ -130,6 +130,7 @@ button.ghost:hover{background:var(--accent-soft);color:var(--accent);border-colo
     </select>
     <button id="go">Search</button>
     <button id="save" class="ghost" title="Save this keyword to your watchlist">☆ Save</button>
+    <button id="trend" class="ghost" title="Every charting app ranked by ratings gained since the last run">🔥 Trending now</button>
   </div>
 
   <div id="watchwrap" hidden>
@@ -144,7 +145,8 @@ button.ghost:hover{background:var(--accent-soft);color:var(--accent);border-colo
   <div class="tablewrap">
     <table>
       <thead><tr>
-        <th data-k="ratings_per_day">Ratings/day</th>
+        <th data-k="velocity" title="Ratings gained per day since the last daily run — actual current growth">Now/day</th>
+        <th data-k="ratings_per_day" title="Total ratings ÷ age — lifetime average, not current">Avg/day</th>
         <th data-k="chart_rank">Charting</th>
         <th data-k="name">App</th>
         <th data-k="publisher">Publisher</th>
@@ -155,7 +157,7 @@ button.ghost:hover{background:var(--accent-soft);color:var(--accent);border-colo
         <th data-k="genre">Category</th>
         <th>Check</th>
       </tr></thead>
-      <tbody id="rows"><tr><td colspan="10" class="state">Enter a keyword and hit Search.</td></tr></tbody>
+      <tbody id="rows"><tr><td colspan="11" class="state">Enter a keyword and hit Search.</td></tr></tbody>
     </table>
   </div>
 </div>
@@ -208,7 +210,7 @@ async function search(){
   const btn = document.getElementById("go");
   btn.disabled = true; btn.textContent = "Searching…";
   document.getElementById("rows").innerHTML =
-    `<tr><td colspan="10" class="state">Searching ${countries.length} market${countries.length>1?"s":""}…</td></tr>`;
+    `<tr><td colspan="11" class="state">Searching ${countries.length} market${countries.length>1?"s":""}…</td></tr>`;
 
   try {
     // Parallel across markets. One failing storefront must not lose the rest,
@@ -238,6 +240,9 @@ async function search(){
           released: r.releaseDate.slice(0,10),
           found_in: [countries[i]],
           grossing: ch?.g ?? null, free: ch?.f ?? null, chart_countries: ch?.c ?? 0,
+          // Ratings gained per day since the last run — real current growth,
+          // as opposed to ratings_per_day which is a lifetime average.
+          velocity: ch?.d ?? null,
           // Single sortable value: grossing beats free, unranked sorts last.
           chart_rank: ch?.g ?? (ch?.f ? 1000 + ch.f : 99999),
         });
@@ -247,12 +252,65 @@ async function search(){
     render();
   } catch (e) {
     document.getElementById("rows").innerHTML =
-      `<tr><td colspan="10" class="state">⚠️ Search failed<br><small>${esc(e.message)}</small></td></tr>`;
+      `<tr><td colspan="11" class="state">⚠️ Search failed<br><small>${esc(e.message)}</small></td></tr>`;
     document.getElementById("cards").innerHTML = "";
   } finally {
     btn.disabled = false; btn.textContent = "Search";
   }
 }
+
+// ── Trending: rank the whole charting index by current velocity ─────
+// Needs no search at all — it reads the daily index, which already has every
+// charting app's ratings gained since the previous run. This is the one view
+// that answers "what is hot right now" independently of Apple's charts.
+function trending(){
+  const rows = Object.entries(CHART)
+    .filter(([, v]) => v.d)
+    .sort((a, b) => b[1].d - a[1].d)
+    .slice(0, 200);
+  if (!rows.length) {
+    document.getElementById("rows").innerHTML =
+      `<tr><td colspan="11" class="state">No velocity data yet.<br>
+       <small>Needs two daily runs — the second one produces the first comparison.</small></td></tr>`;
+    document.getElementById("cards").innerHTML = "";
+    return;
+  }
+  ALL = rows.map(([id, v]) => ({
+    id, name: v.n, publisher: "", icon: null,
+    url: `https://apps.apple.com/app/id${id}`,
+    genre: "", price: "—", rating: null,
+    ratings: v.r || 0, age: null, ratings_per_day: 0,
+    released: "", found_in: [], grossing: v.g, free: v.f,
+    chart_countries: v.c, velocity: v.d,
+    chart_rank: v.g ?? (v.f ? 1000 + v.f : 99999),
+  }));
+  renderTrending();
+}
+
+function renderTrending(){
+  document.getElementById("cards").innerHTML = [
+    ["Apps gaining", ALL.length],
+    ["Top velocity", ALL[0].velocity + "/day"],
+    ["Grossing-ranked", ALL.filter(a => a.grossing).length],
+  ].map(([l,n]) => `<div class="card"><div class="n">${n}</div><div class="l">${l}</div></div>`).join("");
+
+  document.getElementById("rows").innerHTML = ALL.map(a => `
+    <tr>
+      <td class="rate ${rateClass(a.velocity)}">${a.velocity}</td>
+      <td class="muted">—</td>
+      <td>${a.grossing ? `<span class="chart">gross #${a.grossing}</span>`
+           : a.free ? `<span class="chart free">free #${a.free}</span>` : `<span class="muted">—</span>`}</td>
+      <td class="app"><a href="${esc(a.url)}" target="_blank" rel="noopener">${esc(a.name)}</a></td>
+      <td class="pub muted">—</td>
+      <td class="muted">—</td>
+      <td class="num">${(a.ratings||0).toLocaleString()}</td>
+      <td><div class="geos"><span class="geo">${a.chart_countries} mkt</span></div></td>
+      <td class="muted">—</td>
+      <td class="muted">—</td>
+      <td><a class="btn" href="${AD_LIB(a.name)}" target="_blank" rel="noopener">Ads</a></td>
+    </tr>`).join("");
+}
+document.getElementById("trend").onclick = trending;
 
 // ── Watchlist (localStorage — no backend, survives reloads) ─────────
 const WKEY = "radar_watchlist";
@@ -304,7 +362,10 @@ function render(){
 
   document.getElementById("rows").innerHTML = rows.length ? rows.map(a => `
     <tr>
-      <td class="rate ${rateClass(a.ratings_per_day)}">${a.ratings_per_day}</td>
+      <td class="rate ${a.velocity == null ? "low" : rateClass(a.velocity)}">${
+        a.velocity == null ? '<span class="muted">—</span>'
+        : (a.velocity > a.ratings_per_day * 1.3 ? "▲ " : "") + a.velocity}</td>
+      <td class="rate ${rateClass(a.ratings_per_day)}" style="font-weight:600;font-size:13px">${a.ratings_per_day}</td>
       <td>${a.grossing ? `<span class="chart" title="Top-grossing in ${a.chart_countries} market(s)">gross #${a.grossing}</span>`
            : a.free ? `<span class="chart free" title="Top-free in ${a.chart_countries} market(s)">free #${a.free}</span>`
            : `<span class="muted">—</span>`}</td>
@@ -320,7 +381,7 @@ function render(){
       <td>${esc(a.genre || "")}</td>
       <td><a class="btn" href="${AD_LIB(a.name)}" target="_blank" rel="noopener">Ads</a></td>
     </tr>`).join("")
-    : `<tr><td colspan="10" class="state">No apps match those filters. Try a wider age or fewer required ratings.</td></tr>`;
+    : `<tr><td colspan="11" class="state">No apps match those filters. Try a wider age or fewer required ratings.</td></tr>`;
 }
 
 document.querySelectorAll("th[data-k]").forEach(th => {

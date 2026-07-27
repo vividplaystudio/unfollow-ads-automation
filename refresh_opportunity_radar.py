@@ -744,14 +744,50 @@ def main() -> None:
     # ── Charting index (feeds the live search page) ──────────────────
     # Keys are terse (g/f/c/n) purely for size — this is ~8k apps and the
     # browser fetches it on every page load.
-    index = {
-        aid: {"g": a["grossing"], "f": a["free"], "c": len(a["countries"]), "n": a["name"]}
-        for aid, a in all_charting.items()
-    }
+    # Diff ratings against the previous index to get TRUE current velocity.
+    # ratings/day computed from lifetime totals is an average — an app that was
+    # hot six months ago and is flat now scores the same as one growing today.
+    # This delta is actual movement since the last run.
+    prev_index = {}
+    prev_at = None
+    try:
+        pj = get_json(PREV_URL.rsplit("/", 1)[0] + "/" + INDEX_OUTPUT,
+                      retries=1, auth=(PREV_USER, PREV_PASS))
+        prev_index = pj.get("apps", {})
+        prev_at = pj.get("generated_at")
+        print(f"  previous index: {len(prev_index)} apps from {(prev_at or '')[:10]}")
+    except Exception as e:  # noqa: BLE001 — first run has none
+        print(f"  no previous index ({e})")
+
+    # Normalise the delta to per-day so an off-schedule or re-run day doesn't
+    # masquerade as a spike.
+    span_days = 1.0
+    if prev_at:
+        try:
+            span = (now - datetime.fromisoformat(prev_at.replace("Z", "+00:00"))).total_seconds() / 86400
+            span_days = max(span, 0.25)  # floor guards against a double-run divide blow-up
+        except ValueError:
+            pass
+
+    index, gained = {}, 0
+    for aid, a in all_charting.items():
+        rec = {"g": a["grossing"], "f": a["free"], "c": len(a["countries"]),
+               "n": a["name"], "r": a["ratings_count"]}
+        p = prev_index.get(aid)
+        if p and p.get("r") is not None:
+            delta = a["ratings_count"] - p["r"]
+            if delta > 0:
+                rec["d"] = round(delta / span_days, 1)  # ratings gained per day, NOW
+                gained += 1
+        index[aid] = rec
+
     with open(INDEX_OUTPUT, "w") as f:
         json.dump({"generated_at": now.isoformat(), "countries": COUNTRIES,
-                   "count": len(index), "apps": index}, f, separators=(",", ":"), default=str)
-    print(f"✓ {INDEX_OUTPUT}: {len(index)} charting apps indexed")
+                   "span_days": round(span_days, 2), "count": len(index),
+                   "with_velocity": gained, "apps": index},
+                  f, separators=(",", ":"), default=str)
+    print(f"✓ {INDEX_OUTPUT}: {len(index)} charting apps indexed "
+          f"({gained} with live velocity over {span_days:.1f}d)")
 
     # ── Niche clusters (separate deliverable, same run) ──────────────
     print(f"\n▶ Clustering niches across {len(all_charting)} charting apps "
