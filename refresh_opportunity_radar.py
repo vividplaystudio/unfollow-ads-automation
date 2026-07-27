@@ -541,12 +541,20 @@ def main() -> None:
                 "primary_genre": m.get("primaryGenreName"),
                 "icon": m.get("artworkUrl100"),
                 "url": m.get("trackViewUrl"),
-                "ratings_count": m.get("userRatingCount") or 0,
+                "ratings_count": 0,
                 "age_days": (now - rel_dt).days,
                 "countries": set(),
                 "grossing": None,
                 "free": None,
             })
+            # ⚠️ userRatingCount IS PER-STOREFRONT. SAP Concur reports 1,128,139
+            # in one market and 139,654 in another. Taking whichever country's
+            # lookup reached the app first made the value depend on iteration
+            # order and on which charts it happened to appear in that run — so
+            # when that flipped between runs the velocity diff read as
+            # +988,485 ratings in one hour (3.9M/day). Always take the MAX, so
+            # the figure is stable across runs regardless of chart membership.
+            ch["ratings_count"] = max(ch["ratings_count"], m.get("userRatingCount") or 0)
             ch["countries"].add(country)
             for p in placements:
                 key = "grossing" if p["chart"] == "grossing" else "free"
@@ -790,10 +798,15 @@ def main() -> None:
         # indexes written before this field existed.
         base = p.get("b", p.get("r"))
         rec["b"] = cur if roll else (base if base is not None else cur)
-        if base is not None and span_days:
+        # Require a real measurement window. Extrapolating an hour's noise to a
+        # daily rate multiplied it by 4 and turned rounding into headline
+        # numbers; below a quarter-day there is nothing meaningful to divide.
+        if base is not None and span_days and span_days >= 0.25:
             delta = cur - base
-            if delta > 0:
-                rec["d"] = round(delta / max(span_days, 0.25), 1)
+            # No genuine app gains 10k ratings a day. Anything above that is a
+            # data artefact (a storefront switch, an ID reused), not growth.
+            if 0 < delta / span_days <= 10_000:
+                rec["d"] = round(delta / span_days, 1)
                 gained += 1
         index[aid] = rec
 
