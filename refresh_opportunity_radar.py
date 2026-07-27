@@ -348,6 +348,11 @@ def main() -> None:
                 "genres": m.get("genres", []),
                 "price": m.get("formattedPrice"),
                 "icon": m.get("artworkUrl100"),
+                # Developer's App Store page — lists every app on that account,
+                # which is how you go from "this publisher has 4 charting" to
+                # actually seeing their whole portfolio.
+                "artist_id": str(m.get("artistId") or ""),
+                "artist_url": m.get("artistViewUrl"),
                 "last_updated": (m.get("currentVersionReleaseDate") or "")[:10],
                 "rating": round(m.get("averageUserRating") or 0, 2),
                 "ratings_count": m.get("userRatingCount") or 0,
@@ -457,7 +462,7 @@ def main() -> None:
     portfolio = {}
     for rec in apps.values():
         if rec["publisher"]:
-            portfolio.setdefault(rec["publisher"], []).append(rec["name"])
+            portfolio.setdefault(rec["publisher"], []).append(rec)
     for rec in apps.values():
         rec["publisher_app_count"] = len(portfolio.get(rec["publisher"], [])) or 1
 
@@ -468,10 +473,21 @@ def main() -> None:
 
     ranked = sorted(apps.values(), key=lambda a: (-a["score"], a["best_grossing_rank"] or 9999))
 
+    # Built after scoring so each entry can carry its apps' ranks and scores.
+    # Grouped by publisher NAME, not artist ID — an operator running several
+    # App Store accounts would otherwise be split into separate rows and the
+    # portfolio pattern would be invisible, which is the thing worth spotting.
+    # Each app keeps its own link, so a group spanning accounts still works.
     multi = sorted(
-        ({"publisher": p, "app_count": len(n), "apps": sorted(n)}
-         for p, n in portfolio.items() if len(n) > 1),
-        key=lambda x: -x["app_count"],
+        ({"publisher": p,
+          "app_count": len(recs),
+          "artist_url": next((r["artist_url"] for r in recs if r.get("artist_url")), None),
+          "apps": [{"name": r["name"], "url": r["url"], "icon": r["icon"],
+                    "grossing_rank": r["best_grossing_rank"], "score": r["score"],
+                    "days": r["days_since_launch"]}
+                   for r in sorted(recs, key=lambda r: -r["score"])]}
+         for p, recs in portfolio.items() if len(recs) > 1),
+        key=lambda x: (-x["app_count"], -max(a["score"] for a in x["apps"])),
     )
 
     payload = {
@@ -507,22 +523,11 @@ def main() -> None:
           f"({c['grossing_ranked']} grossing-ranked, {c['under_30_days']} launched <30d, "
           f"{c['new_since_last_run']} new since last run, {c['climbing']} climbing)")
 
-    print("\n── Top 15 by priority score ──")
-    for a in ranked[:15]:
-        g = f"#{a['best_grossing_rank']}" if a["best_grossing_rank"] else "—"
-        d = a.get("grossing_rank_delta")
-        mom = f"▲{d}" if d and d > 0 else (f"▼{abs(d)}" if d and d < 0 else "")
-        tag = "NEW" if a.get("is_new") else ""
-        pub = f"×{a['publisher_app_count']}" if a["publisher_app_count"] > 1 else ""
-        print(f"  {a['score']:>5.1f}  gross {g:>5} {mom:>5}  {a['days_since_launch']:>4}d  "
-              f"{len(a['countries'])}geo {tag:3} {pub:3}  "
-              f"{(a['name'] or '')[:32]:32}  {(a['publisher'] or '')[:20]}")
-
-    if multi:
-        print(f"\n── Publishers with multiple apps charting ──")
-        for p in multi[:8]:
-            print(f"  {p['app_count']}×  {p['publisher'][:34]:34}  {', '.join(p['apps'])[:60]}")
-
+    # UPLOAD BEFORE PRETTY-PRINTING. The summary below is cosmetic; the upload
+    # is the entire point of the run. A formatting bug in the summary once
+    # crashed the process here and silently skipped the upload, so the ordering
+    # is deliberate — never put anything fallible between the data being ready
+    # and the data being shipped.
     upload_to_ftp(OUTPUT, OUTPUT)
 
     # Ship the viewer alongside the data. It must sit in the SAME folder so its
@@ -531,6 +536,26 @@ def main() -> None:
     viewer = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dashboard", "radar.html")
     if os.path.exists(viewer):
         upload_to_ftp(viewer, "radar.html")
+
+    try:
+        print("\n── Top 15 by priority score ──")
+        for a in ranked[:15]:
+            g = f"#{a['best_grossing_rank']}" if a["best_grossing_rank"] else "—"
+            d = a.get("grossing_rank_delta")
+            mom = f"▲{d}" if d and d > 0 else (f"▼{abs(d)}" if d and d < 0 else "")
+            tag = "NEW" if a.get("is_new") else ""
+            pub = f"×{a['publisher_app_count']}" if a["publisher_app_count"] > 1 else ""
+            print(f"  {a['score']:>5.1f}  gross {g:>5} {mom:>5}  {a['days_since_launch']:>4}d  "
+                  f"{len(a['countries'])}geo {tag:3} {pub:3}  "
+                  f"{(a['name'] or '')[:32]:32}  {(a['publisher'] or '')[:20]}")
+
+        if multi:
+            print("\n── Publishers with multiple apps charting ──")
+            for p in multi[:8]:
+                names = ", ".join(x["name"] or "" for x in p["apps"])
+                print(f"  {p['app_count']}×  {(p['publisher'] or '')[:34]:34}  {names[:60]}")
+    except Exception as e:  # noqa: BLE001 — console output must never fail the run
+        print(f"  ! summary print failed ({e}) — data already uploaded, ignoring")
 
 
 def upload_to_ftp(local_file: str, remote_name: str) -> None:

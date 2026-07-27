@@ -70,10 +70,18 @@ td.app{white-space:normal;min-width:200px}
 .btn:hover{background:var(--accent-soft);color:var(--accent);border-color:var(--accent);text-decoration:none}
 .pubs{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
   padding:14px 16px;margin-bottom:22px;box-shadow:var(--shadow-sm)}
-.pubs h2{font-size:13px;margin:0 0 8px;color:var(--text-muted);font-weight:600}
-.pubs ul{margin:0;padding-left:18px;font-size:13px}
-.pubs li{margin-bottom:3px}
-.pubs b{font-variant-numeric:tabular-nums}
+.pubs h2{font-size:13px;margin:0 0 10px;color:var(--text-muted);font-weight:600}
+.pubrow{display:flex;gap:12px;align-items:flex-start;padding:9px 0;border-top:1px solid var(--border)}
+.pubrow:first-of-type{border-top:none}
+.pubcount{flex:0 0 42px;font-variant-numeric:tabular-nums;font-weight:700;font-size:15px;color:var(--accent)}
+.pubmain{flex:1;min-width:0}
+.pubname{font-weight:600;font-size:13px}
+.pubapps{display:flex;flex-wrap:wrap;gap:6px;margin-top:5px}
+.chip{display:inline-flex;align-items:center;gap:5px;padding:3px 8px 3px 4px;
+  border:1px solid var(--border);border-radius:99px;font-size:11.5px;background:var(--bg)}
+.chip:hover{border-color:var(--accent);background:var(--accent-soft);text-decoration:none}
+.chip img{width:16px;height:16px;border-radius:4px}
+.chip .r{color:var(--success);font-weight:700;font-variant-numeric:tabular-nums}
 </style>
 </head>
 <body>
@@ -185,7 +193,9 @@ function render(){
         <span><a href="${esc(a.url)}" target="_blank" rel="noopener">${esc(a.name)}</a>
         ${a.is_new ? '<span class="pill new">NEW</span>' : ""}</span>
       </div></td>
-      <td class="pub">${esc(a.publisher || "")}
+      <td class="pub">${a.artist_url
+          ? `<a href="${esc(a.artist_url)}" target="_blank" rel="noopener" title="Open this developer's App Store account">${esc(a.publisher || "")}</a>`
+          : esc(a.publisher || "")}
         ${a.publisher_app_count > 1
           ? `<span class="pill warm" title="This publisher has ${a.publisher_app_count} apps charting">×${a.publisher_app_count}</span>` : ""}</td>
       <td>${esc(a.primary_genre || "")}</td>
@@ -243,10 +253,24 @@ fetch("opportunity_radar.json?v=" + Date.now())
     if (pubs.length) {
       document.getElementById("pubs").hidden = false;
       document.getElementById("pubs").innerHTML =
-        `<h2>Publishers with more than one app charting — repeatable formula, worth studying</h2><ul>` +
-        pubs.slice(0,10).map(p =>
-          `<li><b>${p.app_count}×</b> ${esc(p.publisher)} — <span class="muted">${esc(p.apps.join(", "))}</span></li>`
-        ).join("") + `</ul>`;
+        `<h2>Publishers with more than one app charting — repeatable formula, worth studying.
+             Click the name to open their App Store account and see everything they've shipped.</h2>` +
+        pubs.slice(0,12).map(p => `
+          <div class="pubrow">
+            <div class="pubcount">${p.app_count}×</div>
+            <div class="pubmain">
+              <div class="pubname">${p.artist_url
+                ? `<a href="${esc(p.artist_url)}" target="_blank" rel="noopener">${esc(p.publisher)} ↗</a>`
+                : esc(p.publisher)}</div>
+              <div class="pubapps">${p.apps.map(x => `
+                <a class="chip" href="${esc(x.url)}" target="_blank" rel="noopener">
+                  ${x.icon ? `<img src="${esc(x.icon)}" alt="" loading="lazy">` : ""}
+                  ${esc(x.name)}
+                  ${x.grossing_rank ? `<span class="r">#${x.grossing_rank}</span>` : ""}
+                  <span class="muted">${x.days}d</span>
+                </a>`).join("")}</div>
+            </div>
+          </div>`).join("");
     }
 
     const genres = [...new Set(APPS.map(a => a.primary_genre).filter(Boolean))].sort();
