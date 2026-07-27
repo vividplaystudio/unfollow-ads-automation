@@ -270,7 +270,7 @@ async function search(){
 // Needs no search at all — it reads the daily index, which already has every
 // charting app's ratings gained since the previous run. This is the one view
 // that answers "what is hot right now" independently of Apple's charts.
-function trending(){
+async function trending(){
   const rows = Object.entries(CHART)
     .filter(([, v]) => v.d)
     .sort((a, b) => b[1].d - a[1].d)
@@ -278,45 +278,60 @@ function trending(){
   if (!rows.length) {
     document.getElementById("rows").innerHTML =
       `<tr><td colspan="11" class="state">No velocity data yet.<br>
-       <small>Needs two daily runs — the second one produces the first comparison.</small></td></tr>`;
+       <small>Needs two daily runs 12h+ apart — the second produces the first comparison.</small></td></tr>`;
     document.getElementById("cards").innerHTML = "";
     return;
   }
-  ALL = rows.map(([id, v]) => ({
-    id, name: v.n, publisher: "", icon: null,
-    url: `https://apps.apple.com/app/id${id}`,
-    genre: "", price: "—", rating: null,
-    ratings: v.r || 0, age: null, ratings_per_day: 0,
-    released: "", found_in: [], grossing: v.g, free: v.f,
-    chart_countries: v.c, velocity: v.d,
-    chart_rank: v.g ?? (v.f ? 1000 + v.f : 99999),
-  }));
-  renderTrending();
+  const btn = document.getElementById("trend");
+  btn.disabled = true; btn.textContent = "Loading…";
+  document.getElementById("rows").innerHTML =
+    `<tr><td colspan="11" class="state">Fetching details for ${rows.length} apps…</td></tr>`;
+
+  // The index deliberately stores only compact fields (g/f/c/n/r/d) to keep it
+  // small enough to load on every page view — no icon, publisher, genre, age
+  // or price. Those columns were rendering as dashes. Since only the top 200
+  // are ever shown, one batched lookup (400 IDs per call) fills them all in.
+  const meta = {};
+  try {
+    const ids = rows.map(([id]) => id);
+    for (let i = 0; i < ids.length; i += 400) {
+      const u = `https://itunes.apple.com/lookup?id=${ids.slice(i,i+400).join(",")}`
+              + `&country=${document.getElementById("country").value.startsWith("ALL") ? "us"
+                            : document.getElementById("country").value}&entity=software`;
+      const r = await fetch(u);
+      if (!r.ok) continue;
+      for (const x of JSON.parse(await r.text()).results || []) {
+        if (x.kind === "software") meta[String(x.trackId)] = x;
+      }
+    }
+  } catch (e) { /* enrichment is best-effort — the velocity numbers still stand */ }
+
+  const now = Date.now();
+  ALL = rows.map(([id, v]) => {
+    const m = meta[id] || {};
+    const rel = m.releaseDate ? new Date(m.releaseDate) : null;
+    const age = rel ? Math.max(0, Math.floor((now - rel.getTime()) / 86400000)) : null;
+    const ratings = m.userRatingCount ?? v.r ?? 0;
+    return {
+      id, name: m.trackName || v.n,
+      publisher: m.sellerName || m.artistName || "",
+      icon: m.artworkUrl100 || null,
+      url: m.trackViewUrl || `https://apps.apple.com/app/id${id}`,
+      genre: m.primaryGenreName || "", price: m.formattedPrice || "—",
+      rating: m.averageUserRating ? m.averageUserRating.toFixed(2) : null,
+      ratings, age,
+      ratings_per_day: age ? +(ratings / Math.max(age, 1)).toFixed(2) : 0,
+      released: m.releaseDate ? m.releaseDate.slice(0,10) : "",
+      found_in: [], grossing: v.g, free: v.f,
+      chart_countries: v.c, velocity: v.d,
+      chart_rank: v.g ?? (v.f ? 1000 + v.f : 99999),
+    };
+  });
+  btn.disabled = false; btn.textContent = "🔥 Trending now";
+  sortKey = "velocity"; sortDir = "desc";
+  render();
 }
 
-function renderTrending(){
-  document.getElementById("cards").innerHTML = [
-    ["Apps gaining", ALL.length],
-    ["Top velocity", ALL[0].velocity + "/day"],
-    ["Grossing-ranked", ALL.filter(a => a.grossing).length],
-  ].map(([l,n]) => `<div class="card"><div class="n">${n}</div><div class="l">${l}</div></div>`).join("");
-
-  document.getElementById("rows").innerHTML = ALL.map(a => `
-    <tr>
-      <td class="rate ${rateClass(a.velocity)}">${a.velocity}</td>
-      <td class="muted">—</td>
-      <td>${a.grossing ? `<span class="chart">gross #${a.grossing}</span>`
-           : a.free ? `<span class="chart free">free #${a.free}</span>` : `<span class="muted">—</span>`}</td>
-      <td class="app"><a href="${esc(a.url)}" target="_blank" rel="noopener">${esc(a.name)}</a></td>
-      <td class="pub muted">—</td>
-      <td class="muted">—</td>
-      <td class="num">${(a.ratings||0).toLocaleString()}</td>
-      <td><div class="geos"><span class="geo">${a.chart_countries} mkt</span></div></td>
-      <td class="muted">—</td>
-      <td class="muted">—</td>
-      <td><a class="btn" href="${AD_LIB(a.name)}" target="_blank" rel="noopener">Ads</a></td>
-    </tr>`).join("");
-}
 document.getElementById("trend").onclick = trending;
 
 // ── Watchlist (localStorage — no backend, survives reloads) ─────────
