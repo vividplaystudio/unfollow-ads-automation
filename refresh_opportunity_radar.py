@@ -55,6 +55,7 @@ import base64
 import ftplib
 import json
 import os
+import re
 import ssl
 import time
 import urllib.error
@@ -67,6 +68,7 @@ from datetime import datetime, timezone
 # ══════════════════════════════════════════════════════════════════
 
 OUTPUT = "opportunity_radar.json"
+NICHE_OUTPUT = "niche_clusters.json"
 PREV_URL = os.environ.get(
     "RADAR_PREV_URL", "https://genivox.com/ads-upload/opportunity_radar.json"
 )
@@ -282,6 +284,94 @@ def priority_score(rec: dict) -> float:
     return round(sum(b.values()), 1)
 
 
+# Generic marketing words that appear across unrelated apps. Without this list
+# "universal", "fast" and "smart" outrank real niches purely on frequency.
+# Expect to tune it once you've seen a few runs — override via RADAR_STOPWORDS.
+NICHE_STOPWORDS = set((os.environ.get("RADAR_STOPWORDS") or (
+    "app,apps,free,pro,plus,premium,lite,the,and,for,with,your,you,my,our,all,new,best,top,easy,"
+    "simple,quick,fast,smart,super,ultra,max,mini,hd,now,one,two,get,make,made,use,using,ios,"
+    "iphone,ipad,mobile,phone,universal,official,daily,real,true,live,plus,and,its,que,para,con,"
+    "der,die,das,und,fur,mit,von,dem,les,des,une,pour,avec,sur,por,com,que,dos,das,edition,version"
+)).split(","))
+NICHE_STOPWORDS = {w.strip() for w in NICHE_STOPWORDS if w.strip()}
+
+MIN_NICHE_PUBLISHERS = int(os.environ.get("RADAR_MIN_NICHE_PUBLISHERS") or 3)
+
+
+def build_niches(all_charting: dict, new_ids: set) -> list:
+    """Cluster ALL charting apps by shared name terms within a category.
+
+    Separate question from the new-app radar. That one asks "is someone winning
+    right now?"; this asks "can this market support more than one winner?" —
+    which is why it deliberately ignores age and includes incumbents.
+
+    DISTINCT PUBLISHERS is the metric, not app count. 15 publishers each with a
+    charting remote app means 15 viable businesses. 15 apps from 2 publishers
+    means two operators shipping clones — a completely different, far weaker
+    signal that an app count alone would not distinguish.
+
+    Name-token matching is crude and will miss same-niche apps with dissimilar
+    names ("Unfollow Tracker" vs "Ghost Detector" share no words). It is a lead
+    generator, not a taxonomy — the app lists are shown so you can eyeball
+    whether a cluster is real.
+    """
+    clusters = {}
+    for aid, a in all_charting.items():
+        name = (a["name"] or "").lower()
+        words = [w for w in re.findall(r"[a-z]{3,}", name) if w not in NICHE_STOPWORDS]
+        # Bigrams as well as single words: "screen mirroring" is a niche,
+        # "screen" and "mirroring" separately are much weaker terms.
+        terms = set(words) | {f"{x} {y}" for x, y in zip(words, words[1:])}
+        genre = a["primary_genre"] or "Unknown"
+        for t in terms:
+            c = clusters.setdefault((genre, t), {
+                "term": t, "category": genre, "apps": [], "publishers": set(),
+            })
+            c["apps"].append(a)
+            if a["publisher"]:
+                c["publishers"].add(a["publisher"])
+
+    out = []
+    for (genre, term), c in clusters.items():
+        if len(c["publishers"]) < MIN_NICHE_PUBLISHERS:
+            continue
+        apps = c["apps"]
+        grossing = [a["grossing"] for a in apps if a["grossing"]]
+        new_entrants = [a for a in apps if a["app_id"] in new_ids]
+        best = min(grossing) if grossing else None
+
+        # Market depth — how many independent operators sustain a business here.
+        depth = min(len(c["publishers"]), 15) / 15 * 45
+        # Is there actual Apple-processed money in this niche?
+        money = 35 * (1 - (best - 1) / 100) if best else 0.0
+        # Openness — are recent entrants ALSO charting, or is it locked up by
+        # incumbents? This is the factor that decides whether you can get in.
+        openness = min(len(new_entrants), 4) / 4 * 20
+
+        out.append({
+            "term": term,
+            "category": genre,
+            "app_count": len(apps),
+            "publisher_count": len(c["publishers"]),
+            "new_entrant_count": len(new_entrants),
+            "grossing_count": len(grossing),
+            "best_grossing_rank": best,
+            "median_age_days": sorted(a["age_days"] for a in apps)[len(apps) // 2],
+            "score": round(depth + money + openness, 1),
+            "score_breakdown": {"depth": round(depth, 1), "money": round(money, 1),
+                                "openness": round(openness, 1)},
+            "examples": [
+                {"name": a["name"], "url": a["url"], "icon": a["icon"],
+                 "publisher": a["publisher"], "grossing_rank": a["grossing"],
+                 "age_days": a["age_days"], "is_new": a["app_id"] in new_ids,
+                 "countries": sorted(a["countries"])}
+                for a in sorted(apps, key=lambda x: (x["grossing"] is None, x["grossing"] or 9999))[:12]
+            ],
+        })
+
+    return sorted(out, key=lambda x: -x["score"])
+
+
 def load_previous() -> dict:
     """{app_id: prev_record} from the last published run. Empty on first run."""
     try:
@@ -313,6 +403,7 @@ def main() -> None:
 
     print("\n▶ Fetching metadata")
     apps = {}
+    all_charting = {}
     for country, id_map in charts_by_country.items():
         meta = lookup_batch(list(id_map.keys()), country)
         print(f"  {country.upper()}: resolved {len(meta)}/{len(id_map)}")
@@ -329,6 +420,30 @@ def main() -> None:
                 rel_dt = datetime.fromisoformat(released.replace("Z", "+00:00"))
             except ValueError:
                 continue
+
+            # Retain EVERY charting app — not just the new ones — for the niche
+            # clustering below. This metadata is already fetched and was
+            # previously discarded at the age filter, so keeping it costs zero
+            # extra API calls. A niche's depth is measured across incumbents,
+            # which are by definition the old apps.
+            ch = all_charting.setdefault(app_id, {
+                "app_id": app_id,
+                "name": m.get("trackName"),
+                "publisher": m.get("sellerName") or m.get("artistName"),
+                "primary_genre": m.get("primaryGenreName"),
+                "icon": m.get("artworkUrl100"),
+                "url": m.get("trackViewUrl"),
+                "ratings_count": m.get("userRatingCount") or 0,
+                "age_days": (now - rel_dt).days,
+                "countries": set(),
+                "grossing": None,
+                "free": None,
+            })
+            ch["countries"].add(country)
+            for p in placements:
+                key = "grossing" if p["chart"] == "grossing" else "free"
+                if ch[key] is None or p["rank"] < ch[key]:
+                    ch[key] = p["rank"]
 
             # CHEAP PRE-FILTER on the storefront-local date. Safe to use here:
             # the true global date is always <= the earliest local date we see,
@@ -518,6 +633,32 @@ def main() -> None:
     with open(OUTPUT, "w") as f:
         json.dump(payload, f, indent=2, default=str)
 
+    # ── Niche clusters (separate deliverable, same run) ──────────────
+    print(f"\n▶ Clustering niches across {len(all_charting)} charting apps "
+          f"(incumbents included — costs no extra API calls)")
+    niches = build_niches(all_charting, set(apps.keys()))
+    niche_payload = {
+        "generated_at": now.isoformat(),
+        "config": {
+            "countries": COUNTRIES,
+            "min_publishers": MIN_NICHE_PUBLISHERS,
+            "apps_analysed": len(all_charting),
+            "new_app_window_days": MAX_AGE_DAYS,
+        },
+        "counts": {
+            "niches": len(niches),
+            "with_new_entrants": sum(1 for n in niches if n["new_entrant_count"]),
+            "deep_markets": sum(1 for n in niches if n["publisher_count"] >= 8),
+        },
+        "niches": niches,
+    }
+    with open(NICHE_OUTPUT, "w") as f:
+        json.dump(niche_payload, f, indent=2, default=str)
+    nc = niche_payload["counts"]
+    print(f"✓ {NICHE_OUTPUT}: {nc['niches']} niches "
+          f"({nc['with_new_entrants']} with new entrants charting, "
+          f"{nc['deep_markets']} with 8+ publishers)")
+
     c = payload["counts"]
     print(f"\n✓ {OUTPUT}: {c['total']} genuinely-new-and-charting apps "
           f"({c['grossing_ranked']} grossing-ranked, {c['under_30_days']} launched <30d, "
@@ -529,13 +670,16 @@ def main() -> None:
     # is deliberate — never put anything fallible between the data being ready
     # and the data being shipped.
     upload_to_ftp(OUTPUT, OUTPUT)
+    upload_to_ftp(NICHE_OUTPUT, NICHE_OUTPUT)
 
-    # Ship the viewer alongside the data. It must sit in the SAME folder so its
-    # relative fetch("opportunity_radar.json") inherits /ads-upload's Basic Auth
-    # — the browser prompts once and both requests are covered.
-    viewer = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dashboard", "radar.html")
-    if os.path.exists(viewer):
-        upload_to_ftp(viewer, "radar.html")
+    # Ship the viewers alongside the data. They must sit in the SAME folder so
+    # their relative fetch() calls inherit /ads-upload's Basic Auth — the
+    # browser prompts once and every request is covered.
+    here = os.path.dirname(os.path.abspath(__file__))
+    for page in ("radar.html", "niches.html"):
+        viewer = os.path.join(here, "dashboard", page)
+        if os.path.exists(viewer):
+            upload_to_ftp(viewer, page)
 
     try:
         print("\n── Top 15 by priority score ──")

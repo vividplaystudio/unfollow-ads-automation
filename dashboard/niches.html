@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Niche Clusters</title>
+<style>
+/* Standalone, same as radar.html — lives beside niche_clusters.json in
+   /ads-upload so the relative fetch inherits the folder's Basic Auth. */
+:root{
+  --bg:#f7f8fb; --surface:#fff; --surface-hover:#f3f4f7; --border:#e4e7ed;
+  --text:#1d2230; --text-muted:#6b7280; --text-subtle:#9ca3af;
+  --accent:#4f46e5; --accent-soft:#eef2ff; --success:#10b981; --success-soft:#d1fae5;
+  --warning:#f59e0b; --warning-soft:#fef3c7; --danger:#ef4444; --danger-soft:#fee2e2;
+  --neutral-soft:#f3f4f6; --radius:10px; --radius-sm:6px;
+  --shadow-sm:0 1px 2px rgba(0,0,0,.04);
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);
+  font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+.wrap{max-width:1400px;margin:0 auto;padding:28px 20px 64px}
+h1{font-size:22px;margin:0 0 4px}
+.sub{color:var(--text-muted);font-size:13px;margin-bottom:6px}
+.nav{margin-bottom:20px;font-size:13px}
+.nav a{margin-right:14px}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:20px}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
+  padding:14px 16px;box-shadow:var(--shadow-sm)}
+.card .n{font-size:26px;font-weight:650;letter-spacing:-.02em}
+.card .l{color:var(--text-muted);font-size:12px;margin-top:2px}
+.toolbar{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:16px}
+input,select{font:inherit;padding:8px 11px;border:1px solid var(--border);
+  border-radius:var(--radius-sm);background:var(--surface);color:var(--text)}
+input:focus,select:focus{outline:2px solid var(--accent-soft);border-color:var(--accent)}
+#q{flex:1;min-width:200px}
+.count{color:var(--text-muted);font-size:12px;margin-left:auto}
+a{color:var(--accent);text-decoration:none}
+a:hover{text-decoration:underline}
+.niche{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
+  padding:14px 16px;margin-bottom:10px;box-shadow:var(--shadow-sm);display:flex;gap:16px}
+.nscore{flex:0 0 56px;text-align:center}
+.nscore .v{font-size:22px;font-weight:700;font-variant-numeric:tabular-nums;line-height:1.1}
+.nscore .l{font-size:10px;color:var(--text-subtle);text-transform:uppercase;letter-spacing:.04em}
+.nbody{flex:1;min-width:0}
+.nhead{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.nterm{font-size:16px;font-weight:650}
+.ncat{font-size:12px;color:var(--text-muted)}
+.nstats{font-size:12.5px;color:var(--text-muted);margin:4px 0 8px}
+.nstats b{color:var(--text);font-variant-numeric:tabular-nums}
+.verdict{display:inline-block;padding:2px 9px;border-radius:99px;font-size:11px;font-weight:700}
+.open{background:var(--success-soft);color:#065f46}
+.locked{background:var(--danger-soft);color:#991b1b}
+.chips{display:flex;flex-wrap:wrap;gap:6px}
+.chip{display:inline-flex;align-items:center;gap:5px;padding:3px 9px 3px 4px;
+  border:1px solid var(--border);border-radius:99px;font-size:11.5px;background:var(--bg);
+  color:var(--text)}
+.chip:hover{border-color:var(--accent);background:var(--accent-soft);text-decoration:none}
+.chip img{width:16px;height:16px;border-radius:4px}
+.chip .r{color:var(--success);font-weight:700;font-variant-numeric:tabular-nums}
+.chip.isnew{border-color:var(--accent);background:var(--accent-soft)}
+.muted{color:var(--text-subtle)}
+.state{padding:48px 20px;text-align:center;color:var(--text-muted)}
+.note{background:var(--warning-soft);border:1px solid #f6d78a;border-radius:var(--radius);
+  padding:10px 14px;font-size:12.5px;color:#7a4c05;margin-bottom:18px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Niche Clusters</h1>
+  <div class="sub" id="meta">Loading…</div>
+  <div class="nav"><a href="radar.html">← New-app radar</a></div>
+
+  <div class="note">
+    Different question from the radar. This one ignores age and includes incumbents to ask
+    <b>“can this market support more than one winner?”</b> The metric is <b>distinct publishers</b> —
+    15 publishers each with a charting app means 15 viable businesses; 15 apps from 2 publishers
+    would just be two operators shipping clones.
+    Terms come from app names, so expect some junk — the app lists are there so you can judge.
+  </div>
+
+  <div class="cards" id="cards"></div>
+
+  <div class="toolbar">
+    <input id="q" placeholder="Search term or category…">
+    <select id="cat"><option value="all">All categories</option></select>
+    <select id="pubs">
+      <option value="3">3+ publishers</option>
+      <option value="5">5+ publishers</option>
+      <option value="8">8+ publishers</option>
+    </select>
+    <select id="open">
+      <option value="all">Open + locked</option>
+      <option value="open">Open only — new entrants charting</option>
+      <option value="locked">Locked only — incumbents hold it</option>
+    </select>
+    <span class="count" id="count"></span>
+  </div>
+
+  <div id="list"><div class="state">Loading…</div></div>
+</div>
+
+<script>
+let NICHES = [];
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c =>
+  ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+function render(){
+  const q = document.getElementById("q").value.toLowerCase().trim();
+  const cat = document.getElementById("cat").value;
+  const minPubs = +document.getElementById("pubs").value;
+  const open = document.getElementById("open").value;
+
+  const rows = NICHES.filter(n =>
+    (!q || n.term.includes(q) || n.category.toLowerCase().includes(q)) &&
+    (cat === "all" || n.category === cat) &&
+    n.publisher_count >= minPubs &&
+    (open === "all" || (open === "open" ? n.new_entrant_count > 0 : n.new_entrant_count === 0))
+  );
+
+  document.getElementById("count").textContent = `${rows.length} of ${NICHES.length} niches`;
+  document.getElementById("list").innerHTML = rows.length ? rows.map(n => `
+    <div class="niche">
+      <div class="nscore"><div class="v">${n.score}</div><div class="l">score</div></div>
+      <div class="nbody">
+        <div class="nhead">
+          <span class="nterm">${esc(n.term)}</span>
+          <span class="ncat">${esc(n.category)}</span>
+          ${n.new_entrant_count > 0
+            ? `<span class="verdict open">OPEN · ${n.new_entrant_count} new entrant${n.new_entrant_count>1?"s":""} charting</span>`
+            : `<span class="verdict locked">LOCKED · no new entrant is charting</span>`}
+        </div>
+        <div class="nstats">
+          <b>${n.publisher_count}</b> publishers ·
+          <b>${n.app_count}</b> apps ·
+          ${n.best_grossing_rank ? `best grossing <b>#${n.best_grossing_rank}</b> · ` : ""}
+          <b>${n.grossing_count}</b> earning ·
+          median age <b>${n.median_age_days}</b>d
+        </div>
+        <div class="chips">${n.examples.map(x => `
+          <a class="chip ${x.is_new ? "isnew" : ""}" href="${esc(x.url)}" target="_blank" rel="noopener"
+             title="${esc(x.publisher || "")}">
+            ${x.icon ? `<img src="${esc(x.icon)}" alt="" loading="lazy">` : ""}
+            ${esc(x.name)}
+            ${x.grossing_rank ? `<span class="r">#${x.grossing_rank}</span>` : ""}
+            <span class="muted">${x.age_days}d</span>
+          </a>`).join("")}</div>
+      </div>
+    </div>`).join("")
+    : `<div class="state">No niches match those filters.</div>`;
+}
+
+["q","cat","pubs","open"].forEach(id =>
+  document.getElementById(id).addEventListener("input", render));
+
+fetch("niche_clusters.json?v=" + Date.now())
+  .then(r => { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+  .then(d => {
+    NICHES = d.niches || [];
+    const c = d.counts || {}, cfg = d.config || {};
+    document.getElementById("meta").textContent =
+      `Generated ${new Date(d.generated_at).toLocaleString()} · ` +
+      `${cfg.apps_analysed} charting apps analysed · ` +
+      `${(cfg.countries||[]).join(", ").toUpperCase()}`;
+    document.getElementById("cards").innerHTML = [
+      ["Niches found", c.niches],
+      ["Open — new entrants charting", c.with_new_entrants],
+      ["Deep markets (8+ publishers)", c.deep_markets],
+    ].map(([l,n]) => `<div class="card"><div class="n">${n ?? 0}</div><div class="l">${l}</div></div>`).join("");
+
+    const cats = [...new Set(NICHES.map(n => n.category))].sort();
+    document.getElementById("cat").innerHTML =
+      `<option value="all">All categories</option>` +
+      cats.map(g => `<option>${esc(g)}</option>`).join("");
+    render();
+  })
+  .catch(e => {
+    document.getElementById("meta").textContent = "Failed to load niche_clusters.json";
+    document.getElementById("list").innerHTML =
+      `<div class="state">⚠️ Could not load niche_clusters.json<br><small>${esc(e.message)}</small></div>`;
+  });
+</script>
+</body>
+</html>
