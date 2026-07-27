@@ -334,11 +334,12 @@ def main() -> None:
               f"{(w.get('r') or 0):>6} ratings  {(w.get('n') or '')[:34]:34} "
               f"{(w.get('g') or '')[:14]}")
 
+    # JSON only — upload-dashboard.yml owns discovery.html. Uploading pages
+    # from a long-running job races the dedicated uploader and the slower job
+    # wins, silently reverting page fixes. See the note in
+    # refresh_opportunity_radar.py.
     for fn in (WATCHLIST_OUTPUT, DISCOVERY_OUTPUT, STATE_OUTPUT):
         upload_to_ftp(fn, fn)
-    page = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dashboard", "discovery.html")
-    if os.path.exists(page):
-        upload_to_ftp(page, "discovery.html")
 
 
 if __name__ == "__main__":

@@ -878,14 +878,14 @@ def main() -> None:
     upload_to_ftp(NICHE_OUTPUT, NICHE_OUTPUT)
     upload_to_ftp(INDEX_OUTPUT, INDEX_OUTPUT)
 
-    # Ship the viewers alongside the data. They must sit in the SAME folder so
-    # their relative fetch() calls inherit /ads-upload's Basic Auth — the
-    # browser prompts once and every request is covered.
-    here = os.path.dirname(os.path.abspath(__file__))
-    for page in ("radar.html", "niches.html", "search.html"):
-        viewer = os.path.join(here, "dashboard", page)
-        if os.path.exists(viewer):
-            upload_to_ftp(viewer, page)
+    # HTML pages are NOT uploaded here — upload-dashboard.yml owns them.
+    #
+    # This script used to ship them too, which raced: a radar run started at
+    # 17:33 on one commit finished at 17:46:48 and overwrote the fixed
+    # search.html that upload-dashboard had written at 17:46:12 from a NEWER
+    # commit. The long-running job wins simply by finishing last, so a page fix
+    # could silently revert minutes after deploying. One uploader per artifact:
+    # this script owns the JSON, upload-dashboard.yml owns the pages.
 
     try:
         print("\n── Top 15 by priority score ──")
