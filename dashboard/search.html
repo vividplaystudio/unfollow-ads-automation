@@ -96,9 +96,11 @@ button.ghost:hover{background:var(--accent-soft);color:var(--accent);border-colo
 
   <div class="note">
     Live — queries Apple directly from your browser, so results are current to this second and
-    owe nothing to the daily run. Traction is <b>ratings per day since launch</b>, which catches
-    apps growing on paid traffic even when they rank nowhere. Use <b>Ads</b> on any row to check
-    whether that growth was bought.
+    owe nothing to the daily run. Use <b>Ads</b> on any row to check whether growth was bought.<br><br>
+    <b>Charting</b> comes from the daily run (top 100, 14 categories, 10 markets) — and the apps
+    holding those positions are usually <i>years</i> old. Narrowing <b>Age</b> to recent launches
+    will therefore empty that column: you have filtered the incumbents out. Keep it on
+    <b>Any age</b> to see who owns the niche, then narrow to see who is arriving.
   </div>
 
   <div class="searchbar">
@@ -115,12 +117,17 @@ button.ghost:hover{background:var(--accent-soft);color:var(--accent);border-colo
       <option value="nl">Netherlands</option><option value="jp">Japan</option>
       <option value="kr">Korea</option><option value="in">India</option>
     </select>
+    <!-- Any age is the DEFAULT on purpose. Narrowing to new apps hides every
+         incumbent, and incumbents are the ones holding the chart positions —
+         filtering to <180d made the Charting column read as all dashes and
+         "Charting now: 0" on a niche with 33 charting apps. Researching a
+         niche means seeing who owns it AND who is new. -->
     <select id="age">
+      <option value="99999">Any age — whole niche</option>
+      <option value="365">Launched &lt; 1 year</option>
       <option value="180">Launched &lt; 180 days</option>
       <option value="90">Launched &lt; 90 days</option>
       <option value="30">Launched &lt; 30 days</option>
-      <option value="365">Launched &lt; 1 year</option>
-      <option value="99999">Any age</option>
     </select>
     <select id="minr">
       <option value="10">10+ ratings</option>
