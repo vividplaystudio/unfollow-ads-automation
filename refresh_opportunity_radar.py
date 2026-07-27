@@ -297,6 +297,77 @@ NICHE_STOPWORDS = {w.strip() for w in NICHE_STOPWORDS if w.strip()}
 
 MIN_NICHE_PUBLISHERS = int(os.environ.get("RADAR_MIN_NICHE_PUBLISHERS") or 3)
 
+# Niche-entrant probe: how many niches to search, and in which storefront.
+# One extra API call per niche, so this is the only knob that costs anything.
+NICHE_SEARCH_TOP = int(os.environ.get("RADAR_NICHE_SEARCH_TOP") or 40)
+SEARCH_COUNTRY = (os.environ.get("RADAR_SEARCH_COUNTRY") or "us").lower()
+
+
+def probe_niche_entrants(term: str, now) -> dict:
+    """Find apps that ENTERED a niche recently, charting or not.
+
+    The chart sweep only sees the top 100 per category, so a newcomer sitting
+    at rank 250 is invisible to it. The Search API queries the whole App Store
+    by keyword, which is how you tell "nobody has tried this niche lately" from
+    "lots of people tried and none broke through".
+
+    Traction is measured as RATINGS PER DAY, not chart position, and that
+    distinction is the point. An app can be bought to real scale with paid UA
+    while never cracking a top-100 grossing chart — and in ad-driven niches
+    (TV remotes being the textbook case) that is the normal path. Judging
+    entrants purely on whether they charted would score a well-funded paid-UA
+    launch as a failure. Ratings/day catches traction regardless of HOW it was
+    acquired, which is the only fair read when the winning strategy is ads
+    rather than ASO.
+    """
+    url = (f"https://itunes.apple.com/search?term={urllib.parse.quote_plus(term)}"
+           f"&country={SEARCH_COUNTRY}&entity=software&limit=200")
+    try:
+        data = get_json(url)
+    except Exception as e:  # noqa: BLE001 — one failed probe must not kill the run
+        return {"searched": False, "error": str(e)}
+
+    entrants = []
+    for r in data.get("results", []):
+        rel = r.get("releaseDate")
+        if not rel:
+            continue
+        try:
+            age = (now - datetime.fromisoformat(rel.replace("Z", "+00:00"))).days
+        except ValueError:
+            continue
+        if age > MAX_AGE_DAYS or age < 0:
+            continue
+        ratings = r.get("userRatingCount") or 0
+        entrants.append({
+            "name": r.get("trackName"),
+            "publisher": r.get("sellerName") or r.get("artistName"),
+            "url": r.get("trackViewUrl"),
+            "icon": r.get("artworkUrl100"),
+            "age_days": age,
+            "ratings_count": ratings,
+            "ratings_per_day": round(ratings / max(age, 1), 2),
+            "ad_library_url": AD_LIBRARY_URL.format(q=urllib.parse.quote_plus(r.get("trackName") or "")),
+        })
+
+    entrants.sort(key=lambda x: -x["ratings_per_day"])
+    best = entrants[0]["ratings_per_day"] if entrants else 0.0
+    return {
+        "searched": True,
+        "attempts": len(entrants),
+        "best_traction": best,
+        "with_traction": sum(1 for e in entrants if e["ratings_per_day"] >= 1),
+        # Read deliberately in terms of demonstrated traction, NOT chart rank —
+        # see the docstring. "Nobody through" means nobody has cracked it
+        # recently by any route; it does NOT mean the niche is unwinnable,
+        # since most entrants never spend on acquisition at all.
+        "verdict": ("proven_enterable" if best >= 5
+                    else "some_movement" if best >= 1
+                    else "nobody_through" if len(entrants) >= 5
+                    else "uncontested"),
+        "entrants": entrants[:10],
+    }
+
 
 def build_niches(all_charting: dict, new_ids: set) -> list:
     """Cluster ALL charting apps by shared name terms within a category.
@@ -637,6 +708,18 @@ def main() -> None:
     print(f"\n▶ Clustering niches across {len(all_charting)} charting apps "
           f"(incumbents included — costs no extra API calls)")
     niches = build_niches(all_charting, set(apps.keys()))
+
+    # Probe the top niches for recent entrants the charts can't see.
+    top = niches[:NICHE_SEARCH_TOP]
+    print(f"  probing {len(top)} niches for off-chart entrants ({SEARCH_COUNTRY.upper()})")
+    for n in top:
+        n["entrant_probe"] = probe_niche_entrants(n["term"], now)
+        time.sleep(THROTTLE)
+    probed = [n for n in top if n["entrant_probe"].get("searched")]
+    print(f"  probed {len(probed)}: "
+          f"{sum(1 for n in probed if n['entrant_probe']['verdict'] == 'proven_enterable')} proven enterable, "
+          f"{sum(1 for n in probed if n['entrant_probe']['verdict'] == 'nobody_through')} nobody through")
+
     niche_payload = {
         "generated_at": now.isoformat(),
         "config": {
@@ -649,6 +732,11 @@ def main() -> None:
             "niches": len(niches),
             "with_new_entrants": sum(1 for n in niches if n["new_entrant_count"]),
             "deep_markets": sum(1 for n in niches if n["publisher_count"] >= 8),
+            "probed": len(probed),
+            "proven_enterable": sum(1 for n in probed
+                                    if n["entrant_probe"]["verdict"] == "proven_enterable"),
+            "uncontested": sum(1 for n in probed
+                               if n["entrant_probe"]["verdict"] == "uncontested"),
         },
         "niches": niches,
     }

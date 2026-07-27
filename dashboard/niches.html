@@ -48,8 +48,22 @@ a:hover{text-decoration:underline}
 .nstats{font-size:12.5px;color:var(--text-muted);margin:4px 0 8px}
 .nstats b{color:var(--text);font-variant-numeric:tabular-nums}
 .verdict{display:inline-block;padding:2px 9px;border-radius:99px;font-size:11px;font-weight:700}
-.open{background:var(--success-soft);color:#065f46}
-.locked{background:var(--danger-soft);color:#991b1b}
+.v-proven_enterable{background:var(--success-soft);color:#065f46}
+.v-some_movement{background:var(--warning-soft);color:#92400e}
+.v-nobody_through{background:var(--danger-soft);color:#991b1b}
+.v-uncontested{background:var(--accent-soft);color:var(--accent)}
+.entrants{margin-top:9px;padding-top:9px;border-top:1px dashed var(--border)}
+.entrants h3{font-size:11px;margin:0 0 6px;color:var(--text-muted);font-weight:600;
+  text-transform:uppercase;letter-spacing:.04em}
+.erow{display:flex;align-items:center;gap:8px;padding:3px 0;font-size:12.5px}
+.erate{flex:0 0 74px;font-variant-numeric:tabular-nums;font-weight:700;text-align:right}
+.erate.good{color:var(--success)}
+.erate.weak{color:var(--text-subtle)}
+.ename{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.eimg{width:18px;height:18px;border-radius:4px;flex:0 0 18px}
+.adbtn{flex:0 0 auto;padding:1px 7px;border:1px solid var(--border);border-radius:99px;
+  font-size:10.5px;font-weight:600;color:var(--text-muted)}
+.adbtn:hover{border-color:var(--accent);color:var(--accent);text-decoration:none}
 .chips{display:flex;flex-wrap:wrap;gap:6px}
 .chip{display:inline-flex;align-items:center;gap:5px;padding:3px 9px 3px 4px;
   border:1px solid var(--border);border-radius:99px;font-size:11.5px;background:var(--bg);
@@ -72,9 +86,14 @@ a:hover{text-decoration:underline}
 
   <div class="note">
     Different question from the radar. This one ignores age and includes incumbents to ask
-    <b>“can this market support more than one winner?”</b> The metric is <b>distinct publishers</b> —
-    15 publishers each with a charting app means 15 viable businesses; 15 apps from 2 publishers
-    would just be two operators shipping clones.
+    <b>“can this market support more than one winner?”</b> Market depth is measured in
+    <b>distinct publishers</b> — 15 publishers each with a charting app means 15 viable
+    businesses; 15 apps from 2 publishers would just be two operators shipping clones.<br><br>
+    The verdict is based on <b>traction (ratings/day), not chart position</b>. In ad-driven
+    niches an app can be bought to real scale without ever entering a top-100 grossing chart,
+    so “didn’t chart” is not the same as “didn’t work”. Recent entrants are found via App Store
+    search, so they appear here even when they rank nowhere near the charts.
+    Use the <b>Ads</b> link on each entrant to check whether its traction was bought.<br><br>
     Terms come from app names, so expect some junk — the app lists are there so you can judge.
   </div>
 
@@ -89,9 +108,11 @@ a:hover{text-decoration:underline}
       <option value="8">8+ publishers</option>
     </select>
     <select id="open">
-      <option value="all">Open + locked</option>
-      <option value="open">Open only — new entrants charting</option>
-      <option value="locked">Locked only — incumbents hold it</option>
+      <option value="all">Any verdict</option>
+      <option value="proven_enterable">Proven enterable</option>
+      <option value="some_movement">Some movement</option>
+      <option value="nobody_through">Nobody through yet</option>
+      <option value="uncontested">Uncontested</option>
     </select>
     <span class="count" id="count"></span>
   </div>
@@ -104,6 +125,38 @@ let NICHES = [];
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c =>
   ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 
+const VERDICTS = {
+  proven_enterable: "PROVEN ENTERABLE · a recent app reached real traction",
+  some_movement:    "SOME MOVEMENT · a recent app is gaining slowly",
+  nobody_through:   "NOBODY THROUGH YET · entrants exist, none gaining",
+  uncontested:      "UNCONTESTED · almost nobody is entering this niche",
+};
+
+function verdictBadge(n){
+  const p = n.entrant_probe;
+  if (!p || !p.searched) return `<span class="verdict v-uncontested muted">not probed</span>`;
+  return `<span class="verdict v-${p.verdict}">${VERDICTS[p.verdict] || p.verdict}</span>`;
+}
+
+// Traction is ratings/day, NOT chart rank. In ad-driven niches an app can be
+// bought to real scale without ever cracking a top-100 grossing chart, so
+// judging entrants on charting alone scores a funded launch as a failure.
+function entrantBlock(n){
+  const p = n.entrant_probe;
+  if (!p || !p.searched || !p.entrants?.length) return "";
+  return `<div class="entrants">
+    <h3>Recent entrants — traction in ratings/day (charting or not)</h3>
+    ${p.entrants.slice(0,6).map(e => `
+      <div class="erow">
+        <span class="erate ${e.ratings_per_day >= 1 ? "good" : "weak"}">${e.ratings_per_day}/day</span>
+        ${e.icon ? `<img class="eimg" src="${esc(e.icon)}" alt="" loading="lazy">` : ""}
+        <span class="ename"><a href="${esc(e.url)}" target="_blank" rel="noopener">${esc(e.name)}</a>
+          <span class="muted">· ${e.ratings_count} ratings · ${e.age_days}d</span></span>
+        <a class="adbtn" href="${esc(e.ad_library_url)}" target="_blank" rel="noopener">Ads</a>
+      </div>`).join("")}
+  </div>`;
+}
+
 function render(){
   const q = document.getElementById("q").value.toLowerCase().trim();
   const cat = document.getElementById("cat").value;
@@ -114,7 +167,7 @@ function render(){
     (!q || n.term.includes(q) || n.category.toLowerCase().includes(q)) &&
     (cat === "all" || n.category === cat) &&
     n.publisher_count >= minPubs &&
-    (open === "all" || (open === "open" ? n.new_entrant_count > 0 : n.new_entrant_count === 0))
+    (open === "all" || n.entrant_probe?.verdict === open)
   );
 
   document.getElementById("count").textContent = `${rows.length} of ${NICHES.length} niches`;
@@ -125,9 +178,7 @@ function render(){
         <div class="nhead">
           <span class="nterm">${esc(n.term)}</span>
           <span class="ncat">${esc(n.category)}</span>
-          ${n.new_entrant_count > 0
-            ? `<span class="verdict open">OPEN · ${n.new_entrant_count} new entrant${n.new_entrant_count>1?"s":""} charting</span>`
-            : `<span class="verdict locked">LOCKED · no new entrant is charting</span>`}
+          ${verdictBadge(n)}
         </div>
         <div class="nstats">
           <b>${n.publisher_count}</b> publishers ·
@@ -135,7 +186,11 @@ function render(){
           ${n.best_grossing_rank ? `best grossing <b>#${n.best_grossing_rank}</b> · ` : ""}
           <b>${n.grossing_count}</b> earning ·
           median age <b>${n.median_age_days}</b>d
+          ${n.entrant_probe?.searched
+            ? ` · <b>${n.entrant_probe.attempts}</b> recent entrants, best <b>${n.entrant_probe.best_traction}</b> ratings/day`
+            : ""}
         </div>
+        ${entrantBlock(n)}
         <div class="chips">${n.examples.map(x => `
           <a class="chip ${x.is_new ? "isnew" : ""}" href="${esc(x.url)}" target="_blank" rel="noopener"
              title="${esc(x.publisher || "")}">
