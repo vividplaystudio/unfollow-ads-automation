@@ -57,6 +57,23 @@ a:hover{text-decoration:underline}
 .muted{color:var(--text-subtle)}
 .flags{display:flex;gap:3px;flex-wrap:wrap}
 .state{padding:48px 20px;text-align:center;color:var(--text-muted)}
+.ico{width:34px;height:34px;border-radius:8px;display:block;background:var(--neutral-soft)}
+td.app{white-space:normal;min-width:200px}
+.appline{display:flex;align-items:center;gap:10px}
+.score{font-variant-numeric:tabular-nums;font-weight:700;font-size:15px}
+.up{color:var(--success);font-weight:600}
+.down{color:var(--danger);font-weight:600}
+.new{background:var(--accent);color:#fff}
+.acts{display:flex;gap:4px}
+.btn{display:inline-block;padding:3px 8px;border:1px solid var(--border);border-radius:var(--radius-sm);
+  font-size:11px;font-weight:600;color:var(--text-muted);background:var(--surface);white-space:nowrap}
+.btn:hover{background:var(--accent-soft);color:var(--accent);border-color:var(--accent);text-decoration:none}
+.pubs{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
+  padding:14px 16px;margin-bottom:22px;box-shadow:var(--shadow-sm)}
+.pubs h2{font-size:13px;margin:0 0 8px;color:var(--text-muted);font-weight:600}
+.pubs ul{margin:0;padding-left:18px;font-size:13px}
+.pubs li{margin-bottom:3px}
+.pubs b{font-variant-numeric:tabular-nums}
 </style>
 </head>
 <body>
@@ -84,13 +101,22 @@ a:hover{text-decoration:underline}
       <option value="geo">Geo expansions only</option>
     </select>
     <select id="genre"><option value="all">All categories</option></select>
+    <select id="whatsnew">
+      <option value="all">Everything</option>
+      <option value="new">New since last run</option>
+      <option value="climbing">Climbing the charts</option>
+    </select>
     <span class="count" id="count"></span>
   </div>
+
+  <div class="pubs" id="pubs" hidden></div>
 
   <div class="tablewrap">
     <table>
       <thead><tr>
+        <th data-k="score">Score</th>
         <th data-k="best_grossing_rank">Gross #</th>
+        <th data-k="grossing_rank_delta">Move</th>
         <th data-k="best_free_rank">Free #</th>
         <th data-k="name">App</th>
         <th data-k="publisher">Publisher</th>
@@ -99,17 +125,17 @@ a:hover{text-decoration:underline}
         <th data-k="first_market">Launched</th>
         <th data-k="ratings_count">Ratings</th>
         <th data-k="ratings_delta">Δ/day</th>
-        <th data-k="rating">Stars</th>
         <th data-k="chart_appearances">Charts</th>
         <th>Geos</th>
+        <th>Check</th>
       </tr></thead>
-      <tbody id="rows"><tr><td colspan="12" class="state">Loading…</td></tr></tbody>
+      <tbody id="rows"><tr><td colspan="14" class="state">Loading…</td></tr></tbody>
     </table>
   </div>
 </div>
 
 <script>
-let APPS = [], sortKey = "best_grossing_rank", sortDir = "asc";
+let APPS = [], sortKey = "score", sortDir = "desc";
 
 // null ranks must sort LAST in ascending order, not first — an app with no
 // grossing rank is the weakest signal, but null < any number numerically.
@@ -123,13 +149,15 @@ function render(){
   const chart = document.getElementById("chart").value;
   const genre = document.getElementById("genre").value;
   const exp = document.getElementById("expansion").value;
+  const wn = document.getElementById("whatsnew").value;
 
   let rows = APPS.filter(a =>
     (!q || (a.name||"").toLowerCase().includes(q) || (a.publisher||"").toLowerCase().includes(q)) &&
     a.days_since_launch <= maxAge &&
     (chart === "all" || a.best_grossing_rank !== null) &&
     (genre === "all" || a.primary_genre === genre) &&
-    (exp === "all" || (exp === "geo" ? !!a.geo_expansion : !a.geo_expansion))
+    (exp === "all" || (exp === "geo" ? !!a.geo_expansion : !a.geo_expansion)) &&
+    (wn === "all" || (wn === "new" ? !!a.is_new : (a.grossing_rank_delta || 0) > 0))
   );
 
   rows.sort((x,y) => {
@@ -141,12 +169,25 @@ function render(){
   });
 
   document.getElementById("count").textContent = `${rows.length} of ${APPS.length} apps`;
-  document.getElementById("rows").innerHTML = rows.length ? rows.map(a => `
+  document.getElementById("rows").innerHTML = rows.length ? rows.map(a => {
+    const d = a.grossing_rank_delta;
+    const move = d > 0 ? `<span class="up">▲ ${d}</span>`
+               : d < 0 ? `<span class="down">▼ ${Math.abs(d)}</span>`
+               : `<span class="muted">—</span>`;
+    return `
     <tr>
+      <td class="score">${a.score ?? "—"}</td>
       <td class="rank ${a.best_grossing_rank ? "g" : "muted"}">${a.best_grossing_rank ? "#"+a.best_grossing_rank : "—"}</td>
+      <td class="rank">${move}</td>
       <td class="rank ${a.best_free_rank ? "" : "muted"}">${a.best_free_rank ? "#"+a.best_free_rank : "—"}</td>
-      <td class="name"><a href="${a.url}" target="_blank" rel="noopener">${esc(a.name)}</a></td>
-      <td class="pub">${esc(a.publisher || "")}</td>
+      <td class="app"><div class="appline">
+        ${a.icon ? `<img class="ico" src="${esc(a.icon)}" alt="" loading="lazy">` : `<span class="ico"></span>`}
+        <span><a href="${esc(a.url)}" target="_blank" rel="noopener">${esc(a.name)}</a>
+        ${a.is_new ? '<span class="pill new">NEW</span>' : ""}</span>
+      </div></td>
+      <td class="pub">${esc(a.publisher || "")}
+        ${a.publisher_app_count > 1
+          ? `<span class="pill warm" title="This publisher has ${a.publisher_app_count} apps charting">×${a.publisher_app_count}</span>` : ""}</td>
       <td>${esc(a.primary_genre || "")}</td>
       <td><span class="pill ${ageClass(a.days_since_launch)}" title="Global launch ${a.released}">${a.days_since_launch}d</span></td>
       <td>${a.first_market === "global"
@@ -156,12 +197,15 @@ function render(){
             ? `<span class="pill cool" title="Global launch ${a.released}, reached your geos ${a.released_local}">↗ geo</span>`
             : ""}</td>
       <td class="rank">${(a.ratings_count||0).toLocaleString()}</td>
-      <td class="rank ${a.ratings_delta > 0 ? "g" : "muted"}">${a.ratings_delta === null ? "—" : "+"+a.ratings_delta}</td>
-      <td class="rank">${a.rating || "—"}</td>
+      <td class="rank ${a.ratings_delta > 0 ? "g" : "muted"}">${a.ratings_delta == null ? "—" : "+"+a.ratings_delta}</td>
       <td class="rank">${a.chart_appearances}</td>
       <td><div class="flags">${(a.countries||[]).map(c => `<span class="pill cool">${c.toUpperCase()}</span>`).join("")}</div></td>
-    </tr>`).join("")
-    : `<tr><td colspan="12" class="state">No apps match those filters.</td></tr>`;
+      <td><div class="acts">
+        <a class="btn" href="${esc(a.intel_url)}" target="_blank" rel="noopener">Revenue</a>
+        <a class="btn" href="${esc(a.ad_library_url)}" target="_blank" rel="noopener">Ads</a>
+      </div></td>
+    </tr>`;}).join("")
+    : `<tr><td colspan="14" class="state">No apps match those filters.</td></tr>`;
 }
 
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c =>
@@ -177,7 +221,7 @@ document.querySelectorAll("th[data-k]").forEach(th => {
     render();
   };
 });
-["q","age","chart","genre","expansion"].forEach(id =>
+["q","age","chart","genre","expansion","whatsnew"].forEach(id =>
   document.getElementById(id).addEventListener("input", render));
 
 fetch("opportunity_radar.json?v=" + Date.now())
@@ -191,21 +235,32 @@ fetch("opportunity_radar.json?v=" + Date.now())
       `released within ${d.config?.max_age_days}d`;
     document.getElementById("cards").innerHTML = [
       ["New &amp; charting", c.total], ["Grossing-ranked", c.grossing_ranked],
-      ["Launched &lt; 90d", c.under_90_days], ["Launched &lt; 30d", c.under_30_days],
+      ["Launched &lt; 30d", c.under_30_days], ["New since last run", c.new_since_last_run],
+      ["Climbing", c.climbing],
     ].map(([l,n]) => `<div class="card"><div class="n">${n ?? 0}</div><div class="l">${l}</div></div>`).join("");
+
+    const pubs = d.multi_app_publishers || [];
+    if (pubs.length) {
+      document.getElementById("pubs").hidden = false;
+      document.getElementById("pubs").innerHTML =
+        `<h2>Publishers with more than one app charting — repeatable formula, worth studying</h2><ul>` +
+        pubs.slice(0,10).map(p =>
+          `<li><b>${p.app_count}×</b> ${esc(p.publisher)} — <span class="muted">${esc(p.apps.join(", "))}</span></li>`
+        ).join("") + `</ul>`;
+    }
 
     const genres = [...new Set(APPS.map(a => a.primary_genre).filter(Boolean))].sort();
     document.getElementById("genre").innerHTML =
       `<option value="all">All categories</option>` +
       genres.map(g => `<option>${esc(g)}</option>`).join("");
 
-    document.querySelector('th[data-k="best_grossing_rank"]').setAttribute("data-dir","asc");
+    document.querySelector('th[data-k="score"]').setAttribute("data-dir","desc");
     render();
   })
   .catch(e => {
     document.getElementById("meta").textContent = "Failed to load opportunity_radar.json";
     document.getElementById("rows").innerHTML =
-      `<tr><td colspan="12" class="state">⚠️ Could not load opportunity_radar.json<br><small>${esc(e.message)}</small></td></tr>`;
+      `<tr><td colspan="14" class="state">⚠️ Could not load opportunity_radar.json<br><small>${esc(e.message)}</small></td></tr>`;
   });
 </script>
 </body>

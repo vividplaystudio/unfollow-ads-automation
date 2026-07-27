@@ -16,7 +16,7 @@ on:
       countries:
         description: "Storefronts (comma-separated ISO-2, lowercase)"
         required: false
-        default: "us,gb,ca,au"
+        default: "us,gb,ca,au,de,fr,es,it,br,mx"
       max_age_days:
         description: "Only apps released within this many days"
         required: false
@@ -33,7 +33,9 @@ on:
 jobs:
   radar:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # 10 storefronts is ~630 throttled requests (~20 min). Headroom for Apple
+    # rate-limiting back off, which retries with exponential delay.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -44,7 +46,8 @@ jobs:
 
       - name: Run Opportunity Radar
         env:
-          RADAR_COUNTRIES: ${{ github.event.inputs.countries || 'us,gb,ca,au' }}
+          RADAR_COUNTRIES: ${{ github.event.inputs.countries || 'us,gb,ca,au,de,fr,es,it,br,mx' }}
+          RADAR_INTEL_URL: ${{ vars.RADAR_INTEL_URL }}
           RADAR_MAX_AGE_DAYS: ${{ github.event.inputs.max_age_days || '180' }}
           RADAR_GENRES: ${{ github.event.inputs.genres }}
           RADAR_CHARTS: ${{ github.event.inputs.charts || 'grossing,free' }}

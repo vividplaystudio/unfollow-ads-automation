@@ -58,6 +58,7 @@ import os
 import ssl
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 
@@ -81,8 +82,24 @@ PREV_URL = os.environ.get(
 PREV_USER = os.environ.get("ADS_UPLOAD_USER") or "ads"
 PREV_PASS = os.environ.get("ADS_UPLOAD_PASS") or "@fifi2019"
 
-# Proven geos first. Storefront codes are ISO-2, lowercase.
-COUNTRIES = [c.strip().lower() for c in (os.environ.get("RADAR_COUNTRIES") or "us,gb,ca,au").split(",") if c.strip()]
+# Proven geos first, then EU + LatAm. Storefront codes are ISO-2, lowercase.
+# Non-English markets are worth sweeping even if you don't advertise there yet:
+# apps frequently chart in a smaller storefront weeks before the English ones,
+# so they act as an early-warning net.
+COUNTRIES = [c.strip().lower() for c in (
+    os.environ.get("RADAR_COUNTRIES") or "us,gb,ca,au,de,fr,es,it,br,mx"
+).split(",") if c.strip()]
+
+# Meta Ad Library search — verified URL shape. Confirms whether a candidate is
+# actually buying traffic, which is step 2 of the manual check.
+AD_LIBRARY_URL = ("https://www.facebook.com/ads/library/?active_status=all&ad_type=all"
+                  "&country=ALL&search_type=keyword_unordered&q={q}")
+
+# App-intelligence deep link. Mobile Action's per-app URL pattern isn't publicly
+# derivable from an app ID (every documented shape 404s), so this defaults to a
+# site-scoped search. Once you confirm the real pattern from a logged-in
+# session, set RADAR_INTEL_URL with {id} / {name} placeholders.
+INTEL_URL = os.environ.get("RADAR_INTEL_URL") or "https://www.google.com/search?q=site:mobileaction.co+{name}"
 
 # Storefronts checked ONLY to establish the true global launch date (see the
 # releaseDate warning in the module docstring). Includes the classic
@@ -237,6 +254,34 @@ def lookup_batch(app_ids: list, country: str) -> dict:
 # Step 3 — previous run (for ratings velocity + first_seen)
 # ══════════════════════════════════════════════════════════════════
 
+def priority_score(rec: dict) -> float:
+    """0–100 ranking heuristic. Sorting on grossing rank alone treats a static
+    #20 the same as one that climbed from #80 overnight, and treats a
+    single-country #5 the same as a #5 charting in six. This weights the things
+    that actually predict a winner. The breakdown is stored on the record so
+    every number is auditable rather than a black box.
+    """
+    b = {}
+    # Money signal. Rank 1 → 40 pts, rank 100 → ~0.
+    g = rec["best_grossing_rank"]
+    b["grossing"] = round(40 * (1 - (g - 1) / 100), 1) if g else 0.0
+    # Multi-geo. Charting in many storefronts means sustained real spend,
+    # not a one-market fluke.
+    b["geo"] = round(min(len(rec["countries"]), 6) / 6 * 20, 1)
+    # Momentum. Only upward movement scores — a faller gets 0, not a penalty,
+    # since a high static rank is still a valid signal.
+    d = rec.get("grossing_rank_delta") or 0
+    b["momentum"] = round(min(max(d, 0), 50) / 50 * 20, 1)
+    # Youth. Catching it at week 3 beats month 5.
+    b["youth"] = round(max(0, (MAX_AGE_DAYS - rec["days_since_launch"]) / MAX_AGE_DAYS) * 15, 1)
+    # Download signal — small bonus for also holding a top-free position.
+    f = rec["best_free_rank"]
+    b["free"] = round(5 * (1 - (f - 1) / 100), 1) if f else 0.0
+
+    rec["score_breakdown"] = b
+    return round(sum(b.values()), 1)
+
+
 def load_previous() -> dict:
     """{app_id: prev_record} from the last published run. Empty on first run."""
     try:
@@ -302,6 +347,7 @@ def main() -> None:
                 "primary_genre": m.get("primaryGenreName"),
                 "genres": m.get("genres", []),
                 "price": m.get("formattedPrice"),
+                "icon": m.get("artworkUrl100"),
                 "last_updated": (m.get("currentVersionReleaseDate") or "")[:10],
                 "rating": round(m.get("averageUserRating") or 0, 2),
                 "ratings_count": m.get("userRatingCount") or 0,
@@ -374,28 +420,58 @@ def main() -> None:
         rec["best_free_rank"] = min(free) if free else None
         rec["chart_appearances"] = len(rec["placements"])
 
+        # Deep links for the manual verification step.
+        q = urllib.parse.quote_plus(rec["name"] or "")
+        rec["ad_library_url"] = AD_LIBRARY_URL.format(q=q)
+        rec["intel_url"] = INTEL_URL.replace("{id}", rec["app_id"]).replace("{name}", q)
+
         p = prev.get(app_id)
         if p:
             rec["first_seen"] = p.get("first_seen", now.date().isoformat())
+            rec["is_new"] = False
             delta = rec["ratings_count"] - (p.get("ratings_count") or 0)
             rec["ratings_delta"] = delta
             # Rough install proxy: ratings are typically ~1-2% of installs.
             rec["est_daily_installs_low"] = int(delta / 0.02) if delta > 0 else 0
             rec["est_daily_installs_high"] = int(delta / 0.01) if delta > 0 else 0
+
+            # Rank momentum. POSITIVE = climbing (rank number went DOWN), which
+            # is the direction that matters — a mover is spending effectively
+            # right now, where a static rank is just a snapshot.
+            for key, field in (("best_grossing_rank", "grossing_rank_delta"),
+                               ("best_free_rank", "free_rank_delta")):
+                cur, was = rec[key], p.get(key)
+                rec[field] = (was - cur) if (cur and was) else None
         else:
             rec["first_seen"] = now.date().isoformat()
+            rec["is_new"] = True
+            rec["grossing_rank_delta"] = None
+            rec["free_rank_delta"] = None
             rec["ratings_delta"] = None
             rec["est_daily_installs_low"] = None
             rec["est_daily_installs_high"] = None
 
-    # Grossing-ranked first (the money signal), then free-chart-only apps.
-    ranked = sorted(
-        apps.values(),
-        key=lambda a: (
-            a["best_grossing_rank"] is None,
-            a["best_grossing_rank"] or 9999,
-            a["best_free_rank"] or 9999,
-        ),
+    # Publisher portfolio. A publisher with several apps charting at once has a
+    # repeatable formula — those operators are worth studying more than any
+    # single app they've shipped.
+    portfolio = {}
+    for rec in apps.values():
+        if rec["publisher"]:
+            portfolio.setdefault(rec["publisher"], []).append(rec["name"])
+    for rec in apps.values():
+        rec["publisher_app_count"] = len(portfolio.get(rec["publisher"], [])) or 1
+
+    # Score last — it reads best_*_rank, the momentum deltas, and countries,
+    # so every input has to be populated first.
+    for rec in apps.values():
+        rec["score"] = priority_score(rec)
+
+    ranked = sorted(apps.values(), key=lambda a: (-a["score"], a["best_grossing_rank"] or 9999))
+
+    multi = sorted(
+        ({"publisher": p, "app_count": len(n), "apps": sorted(n)}
+         for p, n in portfolio.items() if len(n) > 1),
+        key=lambda x: -x["app_count"],
     )
 
     payload = {
@@ -415,7 +491,11 @@ def main() -> None:
             "under_30_days": sum(1 for a in ranked if a["days_since_launch"] <= 30),
             "geo_expansions": sum(1 for a in ranked if a.get("geo_expansion")),
             "removed_as_older_than_they_looked": aged_out,
+            "new_since_last_run": sum(1 for a in ranked if a.get("is_new")),
+            "climbing": sum(1 for a in ranked if (a.get("grossing_rank_delta") or 0) > 0),
+            "multi_app_publishers": len(multi),
         },
+        "multi_app_publishers": multi,
         "apps": ranked,
     }
 
@@ -424,17 +504,24 @@ def main() -> None:
 
     c = payload["counts"]
     print(f"\n✓ {OUTPUT}: {c['total']} genuinely-new-and-charting apps "
-          f"({c['grossing_ranked']} grossing-ranked, {c['under_30_days']} launched <30d)")
+          f"({c['grossing_ranked']} grossing-ranked, {c['under_30_days']} launched <30d, "
+          f"{c['new_since_last_run']} new since last run, {c['climbing']} climbing)")
 
-    print("\n── Top 15 ──")
+    print("\n── Top 15 by priority score ──")
     for a in ranked[:15]:
         g = f"#{a['best_grossing_rank']}" if a["best_grossing_rank"] else "—"
-        fr = f"#{a['best_free_rank']}" if a["best_free_rank"] else "—"
-        exp = " ↗geo" if a.get("geo_expansion") else ""
-        first = a["first_market"][:9]
-        print(f"  gross {g:>5}  free {fr:>5}  {a['days_since_launch']:>4}d  "
-              f"1st:{first:9}{exp:5}  "
-              f"{(a['name'] or '')[:34]:34}  {(a['publisher'] or '')[:22]}")
+        d = a.get("grossing_rank_delta")
+        mom = f"▲{d}" if d and d > 0 else (f"▼{abs(d)}" if d and d < 0 else "")
+        tag = "NEW" if a.get("is_new") else ""
+        pub = f"×{a['publisher_app_count']}" if a["publisher_app_count"] > 1 else ""
+        print(f"  {a['score']:>5.1f}  gross {g:>5} {mom:>5}  {a['days_since_launch']:>4}d  "
+              f"{len(a['countries'])}geo {tag:3} {pub:3}  "
+              f"{(a['name'] or '')[:32]:32}  {(a['publisher'] or '')[:20]}")
+
+    if multi:
+        print(f"\n── Publishers with multiple apps charting ──")
+        for p in multi[:8]:
+            print(f"  {p['app_count']}×  {p['publisher'][:34]:34}  {', '.join(p['apps'])[:60]}")
 
     upload_to_ftp(OUTPUT, OUTPUT)
 
