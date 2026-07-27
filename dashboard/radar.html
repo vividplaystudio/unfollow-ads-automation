@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Opportunity Radar</title>
+<style>
+/* Standalone on purpose: lives next to opportunity_radar.json in /ads-upload so
+   the relative fetch below inherits the folder's HTTP Basic Auth. Palette is
+   copied from the main dashboard's style.css rather than linked, so this page
+   cannot break — or be broken by — the live dashboard. */
+:root{
+  --bg:#f7f8fb; --surface:#fff; --surface-hover:#f3f4f7; --border:#e4e7ed;
+  --text:#1d2230; --text-muted:#6b7280; --text-subtle:#9ca3af;
+  --accent:#4f46e5; --accent-soft:#eef2ff; --success:#10b981; --success-soft:#d1fae5;
+  --warning:#f59e0b; --warning-soft:#fef3c7; --danger:#ef4444; --danger-soft:#fee2e2;
+  --neutral-soft:#f3f4f6; --radius:10px; --radius-sm:6px;
+  --shadow-sm:0 1px 2px rgba(0,0,0,.04); --shadow-md:0 2px 8px rgba(0,0,0,.05);
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);
+  font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+.wrap{max-width:1400px;margin:0 auto;padding:28px 20px 64px}
+h1{font-size:22px;margin:0 0 4px}
+.sub{color:var(--text-muted);font-size:13px;margin-bottom:22px}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:22px}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
+  padding:14px 16px;box-shadow:var(--shadow-sm)}
+.card .n{font-size:26px;font-weight:650;letter-spacing:-.02em}
+.card .l{color:var(--text-muted);font-size:12px;margin-top:2px}
+.toolbar{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:14px}
+input,select{font:inherit;padding:8px 11px;border:1px solid var(--border);
+  border-radius:var(--radius-sm);background:var(--surface);color:var(--text)}
+input:focus,select:focus{outline:2px solid var(--accent-soft);border-color:var(--accent)}
+#q{flex:1;min-width:220px}
+.count{color:var(--text-muted);font-size:12px;margin-left:auto}
+.tablewrap{background:var(--surface);border:1px solid var(--border);
+  border-radius:var(--radius);overflow-x:auto;box-shadow:var(--shadow-sm)}
+table{border-collapse:collapse;width:100%;min-width:900px}
+th,td{padding:10px 12px;text-align:left;border-bottom:1px solid var(--border);white-space:nowrap}
+th{background:var(--surface-hover);font-size:12px;font-weight:600;color:var(--text-muted);
+  cursor:pointer;user-select:none;position:sticky;top:0;z-index:1}
+th:hover{color:var(--text)}
+th[data-dir]::after{content:" ▲";color:var(--accent)}
+th[data-dir="desc"]::after{content:" ▼"}
+tbody tr:hover{background:var(--surface-hover)}
+td.name{white-space:normal;min-width:210px;font-weight:550}
+td.pub{color:var(--text-muted);white-space:normal;max-width:200px;font-size:13px}
+a{color:var(--accent);text-decoration:none}
+a:hover{text-decoration:underline}
+.pill{display:inline-block;padding:2px 8px;border-radius:99px;font-size:11px;font-weight:600}
+.hot{background:var(--danger-soft);color:#991b1b}
+.warm{background:var(--warning-soft);color:#92400e}
+.cool{background:var(--neutral-soft);color:var(--text-muted)}
+.rank{font-variant-numeric:tabular-nums;font-weight:600}
+.rank.g{color:var(--success)}
+.muted{color:var(--text-subtle)}
+.flags{display:flex;gap:3px;flex-wrap:wrap}
+.state{padding:48px 20px;text-align:center;color:var(--text-muted)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Opportunity Radar</h1>
+  <div class="sub" id="meta">Loading…</div>
+
+  <div class="cards" id="cards"></div>
+
+  <div class="toolbar">
+    <input id="q" placeholder="Search app or publisher…">
+    <select id="age">
+      <option value="9999">Any age</option>
+      <option value="30">Launched &lt; 30 days</option>
+      <option value="60">Launched &lt; 60 days</option>
+      <option value="90">Launched &lt; 90 days</option>
+    </select>
+    <select id="chart">
+      <option value="all">All apps</option>
+      <option value="grossing">Grossing-ranked only</option>
+    </select>
+    <select id="expansion">
+      <option value="all">New + geo expansions</option>
+      <option value="new">True new launches only</option>
+      <option value="geo">Geo expansions only</option>
+    </select>
+    <select id="genre"><option value="all">All categories</option></select>
+    <span class="count" id="count"></span>
+  </div>
+
+  <div class="tablewrap">
+    <table>
+      <thead><tr>
+        <th data-k="best_grossing_rank">Gross #</th>
+        <th data-k="best_free_rank">Free #</th>
+        <th data-k="name">App</th>
+        <th data-k="publisher">Publisher</th>
+        <th data-k="primary_genre">Category</th>
+        <th data-k="days_since_launch">Age</th>
+        <th data-k="first_market">Launched</th>
+        <th data-k="ratings_count">Ratings</th>
+        <th data-k="ratings_delta">Δ/day</th>
+        <th data-k="rating">Stars</th>
+        <th data-k="chart_appearances">Charts</th>
+        <th>Geos</th>
+      </tr></thead>
+      <tbody id="rows"><tr><td colspan="12" class="state">Loading…</td></tr></tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+let APPS = [], sortKey = "best_grossing_rank", sortDir = "asc";
+
+// null ranks must sort LAST in ascending order, not first — an app with no
+// grossing rank is the weakest signal, but null < any number numerically.
+const nn = v => (v === null || v === undefined) ? Infinity : v;
+
+function ageClass(d){ return d <= 30 ? "hot" : d <= 90 ? "warm" : "cool"; }
+
+function render(){
+  const q = document.getElementById("q").value.toLowerCase().trim();
+  const maxAge = +document.getElementById("age").value;
+  const chart = document.getElementById("chart").value;
+  const genre = document.getElementById("genre").value;
+  const exp = document.getElementById("expansion").value;
+
+  let rows = APPS.filter(a =>
+    (!q || (a.name||"").toLowerCase().includes(q) || (a.publisher||"").toLowerCase().includes(q)) &&
+    a.days_since_launch <= maxAge &&
+    (chart === "all" || a.best_grossing_rank !== null) &&
+    (genre === "all" || a.primary_genre === genre) &&
+    (exp === "all" || (exp === "geo" ? !!a.geo_expansion : !a.geo_expansion))
+  );
+
+  rows.sort((x,y) => {
+    let a = x[sortKey], b = y[sortKey];
+    if (typeof a === "string" || typeof b === "string")
+      return (a||"").localeCompare(b||"") * (sortDir === "asc" ? 1 : -1);
+    a = nn(a); b = nn(b);
+    return (a < b ? -1 : a > b ? 1 : 0) * (sortDir === "asc" ? 1 : -1);
+  });
+
+  document.getElementById("count").textContent = `${rows.length} of ${APPS.length} apps`;
+  document.getElementById("rows").innerHTML = rows.length ? rows.map(a => `
+    <tr>
+      <td class="rank ${a.best_grossing_rank ? "g" : "muted"}">${a.best_grossing_rank ? "#"+a.best_grossing_rank : "—"}</td>
+      <td class="rank ${a.best_free_rank ? "" : "muted"}">${a.best_free_rank ? "#"+a.best_free_rank : "—"}</td>
+      <td class="name"><a href="${a.url}" target="_blank" rel="noopener">${esc(a.name)}</a></td>
+      <td class="pub">${esc(a.publisher || "")}</td>
+      <td>${esc(a.primary_genre || "")}</td>
+      <td><span class="pill ${ageClass(a.days_since_launch)}" title="Global launch ${a.released}">${a.days_since_launch}d</span></td>
+      <td>${a.first_market === "global"
+            ? '<span class="muted">global</span>'
+            : `<span class="pill warm">${esc(a.first_market || "")}</span>`}
+          ${a.geo_expansion
+            ? `<span class="pill cool" title="Global launch ${a.released}, reached your geos ${a.released_local}">↗ geo</span>`
+            : ""}</td>
+      <td class="rank">${(a.ratings_count||0).toLocaleString()}</td>
+      <td class="rank ${a.ratings_delta > 0 ? "g" : "muted"}">${a.ratings_delta === null ? "—" : "+"+a.ratings_delta}</td>
+      <td class="rank">${a.rating || "—"}</td>
+      <td class="rank">${a.chart_appearances}</td>
+      <td><div class="flags">${(a.countries||[]).map(c => `<span class="pill cool">${c.toUpperCase()}</span>`).join("")}</div></td>
+    </tr>`).join("")
+    : `<tr><td colspan="12" class="state">No apps match those filters.</td></tr>`;
+}
+
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c =>
+  ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+document.querySelectorAll("th[data-k]").forEach(th => {
+  th.onclick = () => {
+    const k = th.dataset.k;
+    sortDir = (sortKey === k && sortDir === "asc") ? "desc" : "asc";
+    sortKey = k;
+    document.querySelectorAll("th[data-k]").forEach(t => t.removeAttribute("data-dir"));
+    th.setAttribute("data-dir", sortDir);
+    render();
+  };
+});
+["q","age","chart","genre","expansion"].forEach(id =>
+  document.getElementById(id).addEventListener("input", render));
+
+fetch("opportunity_radar.json?v=" + Date.now())
+  .then(r => { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
+  .then(d => {
+    APPS = d.apps || [];
+    const c = d.counts || {};
+    document.getElementById("meta").textContent =
+      `Generated ${new Date(d.generated_at).toLocaleString()} · ` +
+      `${(d.config?.countries||[]).join(", ").toUpperCase()} · ` +
+      `released within ${d.config?.max_age_days}d`;
+    document.getElementById("cards").innerHTML = [
+      ["New &amp; charting", c.total], ["Grossing-ranked", c.grossing_ranked],
+      ["Launched &lt; 90d", c.under_90_days], ["Launched &lt; 30d", c.under_30_days],
+    ].map(([l,n]) => `<div class="card"><div class="n">${n ?? 0}</div><div class="l">${l}</div></div>`).join("");
+
+    const genres = [...new Set(APPS.map(a => a.primary_genre).filter(Boolean))].sort();
+    document.getElementById("genre").innerHTML =
+      `<option value="all">All categories</option>` +
+      genres.map(g => `<option>${esc(g)}</option>`).join("");
+
+    document.querySelector('th[data-k="best_grossing_rank"]').setAttribute("data-dir","asc");
+    render();
+  })
+  .catch(e => {
+    document.getElementById("meta").textContent = "Failed to load opportunity_radar.json";
+    document.getElementById("rows").innerHTML =
+      `<tr><td colspan="12" class="state">⚠️ Could not load opportunity_radar.json<br><small>${esc(e.message)}</small></td></tr>`;
+  });
+</script>
+</body>
+</html>

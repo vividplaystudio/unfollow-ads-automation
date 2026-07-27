@@ -1,0 +1,64 @@
+name: Opportunity Radar
+
+# Finds newly-launched apps that are ALREADY holding a top-grossing / top-free
+# chart position — i.e. someone is buying them into the charts profitably.
+# Writes opportunity_radar.json to cPanel.
+#   curl -s -u ads:@fifi2019 https://genivox.com/ads-upload/opportunity_radar.json -o radar.json
+#
+# Runs daily. Ratings-velocity deltas need 2+ runs to populate (each run diffs
+# userRatingCount against the previously published file).
+
+on:
+  schedule:
+    - cron: "0 6 * * *" # 06:00 UTC daily
+  workflow_dispatch:
+    inputs:
+      countries:
+        description: "Storefronts (comma-separated ISO-2, lowercase)"
+        required: false
+        default: "us,gb,ca,au"
+      max_age_days:
+        description: "Only apps released within this many days"
+        required: false
+        default: "180"
+      genres:
+        description: "Apple genre IDs (blank = all non-game defaults)"
+        required: false
+        default: ""
+      charts:
+        description: "Charts to sweep (grossing,free)"
+        required: false
+        default: "grossing,free"
+
+jobs:
+  radar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run Opportunity Radar
+        env:
+          RADAR_COUNTRIES: ${{ github.event.inputs.countries || 'us,gb,ca,au' }}
+          RADAR_MAX_AGE_DAYS: ${{ github.event.inputs.max_age_days || '180' }}
+          RADAR_GENRES: ${{ github.event.inputs.genres }}
+          RADAR_CHARTS: ${{ github.event.inputs.charts || 'grossing,free' }}
+          ADS_UPLOAD_USER: ${{ secrets.ADS_UPLOAD_USER }}
+          ADS_UPLOAD_PASS: ${{ secrets.ADS_UPLOAD_PASS }}
+          FTP_HOST: ${{ secrets.FTP_HOST }}
+          FTP_USER: ${{ secrets.FTP_USER }}
+          FTP_PASS: ${{ secrets.FTP_PASS }}
+          FTP_PATH: ${{ secrets.FTP_PATH }}
+        run: python3 -u refresh_opportunity_radar.py
+
+      - name: Upload JSON as workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: opportunity-radar
+          path: opportunity_radar.json
+          retention-days: 30
