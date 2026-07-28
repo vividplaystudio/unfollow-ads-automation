@@ -137,9 +137,18 @@ def scan_range(start: int, direction: int, calls: int, now, label: str,
     when per-call latency varies by an order of magnitude; a deadline can.
     """
     found, used, cursor, empty_run = {}, 0, start, 0
+    max_app_id, skips = 0, 0
     while used < calls:
         if deadline and time.time() > deadline:
             print(f"  {label}: stopping at time budget")
+            break
+        # Going UP there is nothing above the frontier, so repeated dead zones
+        # mean we have run off the end of the live range and every further call
+        # is wasted. Without this the cursor kept jumping +2M and one run stored
+        # top_id = 7,934,892,000 when apps stop existing around 6.79B — the next
+        # frontier scan would have probed pure emptiness and found nothing.
+        if direction > 0 and skips >= 2:
+            print(f"  {label}: past the end of the live ID range, stopping")
             break
         lo = cursor if direction > 0 else cursor - LOOKUP_BATCH
         block, total = lookup_ids(range(lo, lo + LOOKUP_BATCH))
@@ -162,6 +171,7 @@ def scan_range(start: int, direction: int, calls: int, now, label: str,
                 if age < 0 or age > MAX_AGE_DAYS:
                     continue
                 found[str(r["trackId"])] = r
+                max_app_id = max(max_app_id, int(r["trackId"]))
         else:
             empty_run += 1
             if empty_run >= EMPTY_RUN_TO_SKIP:
@@ -169,13 +179,17 @@ def scan_range(start: int, direction: int, calls: int, now, label: str,
                 # wasted calls walking empty space.
                 cursor += direction * SKIP_AHEAD
                 empty_run = 0
+                skips += 1
                 continue
 
         cursor += direction * LOOKUP_BATCH
 
     print(f"  {label}: {used} calls, {used * LOOKUP_BATCH:,} IDs probed, "
           f"{len(found)} apps within {MAX_AGE_DAYS}d")
-    return found, used, cursor
+    # Returns the highest ID where an APP was actually found, NOT the final
+    # cursor. The cursor overshoots by design (dead-zone skips), so using it as
+    # the new frontier anchor walks the next run into empty space.
+    return found, used, cursor, max_app_id
 
 
 def refresh_watchlist(watch: dict, now) -> int:
@@ -253,14 +267,14 @@ def main() -> None:
     # rather than waiting for the backfill to finish ──
     print("\n▶ Frontier scan (newest IDs)")
     deadline = time.time() + SCAN_MINUTES * 60
-    fresh, used_f, new_top = scan_range(top_id, +1, FRONTIER_CALLS, now, "frontier", deadline)
+    fresh, used_f, _, front_max = scan_range(top_id, +1, FRONTIER_CALLS, now, "frontier", deadline)
 
     # ── Backfill: walk downward through the live region ──
     print("\n▶ Backfill scan (older IDs)")
     remaining = max(SCAN_CALLS - used_f, 0)
-    older, used_b, new_cursor = ({}, 0, cursor)
+    older, used_b, new_cursor, back_max = ({}, 0, cursor, 0)
     if remaining and cursor > floor:
-        older, used_b, new_cursor = scan_range(cursor, -1, remaining, now, "backfill", deadline)
+        older, used_b, new_cursor, back_max = scan_range(cursor, -1, remaining, now, "backfill", deadline)
     elif cursor <= floor:
         print("  backfill complete — nothing older to cover")
 
@@ -347,7 +361,14 @@ def main() -> None:
     with open(STATE_OUTPUT, "w") as f:
         json.dump({"generated_at": now.isoformat(),
                    "baseline_at": now.isoformat() if roll else prev_state_at,
-                   "top_id": max(new_top, top_id), "cursor": new_cursor,
+                   # Anchor to a PROVEN app ID. Never carry a top_id forward
+                   # blindly — a bad one (7.93B, past the end of the live range)
+                   # would persist forever and every future frontier scan would
+                   # probe emptiness. The watchlist is the fallback: its highest
+                   # key is by definition a real app.
+                   "top_id": max([front_max, back_max]
+                                 + [int(k) for k in watch] or [SEED_TOP_ID]),
+                   "cursor": new_cursor,
                    "floor": floor,
                    "backfill_complete": new_cursor <= floor}, f, indent=2)
 
