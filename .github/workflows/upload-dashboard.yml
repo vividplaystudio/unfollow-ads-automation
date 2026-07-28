@@ -21,7 +21,7 @@ jobs:
           RC_WEBHOOK_SECRET: ${{ secrets.RC_WEBHOOK_SECRET }}
         run: |
           python3 << 'EOF'
-          import ftplib, ssl, os, io
+          import ftplib, ssl, os, io, time
           host = os.environ["FTP_HOST"]
           user = os.environ["FTP_USER"]
           pw = os.environ["FTP_PASS"]
@@ -32,9 +32,26 @@ jobs:
           ctx.check_hostname = False
           ctx.verify_mode = ssl.CERT_NONE
 
-          ftp = ftplib.FTP_TLS(host, timeout=60, context=ctx)
-          ftp.login(user, pw)
-          ftp.prot_p()
+          # Retry the CONNECT. Two consecutive runs died on
+          # "TimeoutError: timed out" inside socket.connect — the host was
+          # refusing the connection outright, not failing mid-transfer. cPanel
+          # brute-force protection throttles repeated FTP connections from the
+          # same source, and this repo opens one per data job as well as per
+          # dashboard push. A stale page then sits on the server looking like a
+          # broken fix, so failing loudly on the first refusal is worse than
+          # waiting.
+          ftp = None
+          for attempt in range(4):
+              try:
+                  ftp = ftplib.FTP_TLS(host, timeout=90, context=ctx)
+                  ftp.login(user, pw)
+                  ftp.prot_p()
+                  break
+              except Exception as e:
+                  print(f"FTP connect attempt {attempt + 1}/4 failed: {e}")
+                  if attempt == 3:
+                      raise
+                  time.sleep(20 * (attempt + 1))
 
           # Navigate / create path
           try:
