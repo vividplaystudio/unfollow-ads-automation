@@ -788,7 +788,7 @@ def main() -> None:
     roll = span_days is None or span_days >= MIN_BASELINE_DAYS
     baseline_at = now.isoformat() if roll else prev_baseline_at
 
-    index, gained = {}, 0
+    index, gained, carried = {}, 0, 0
     for aid, a in all_charting.items():
         cur = a["ratings_count"]
         rec = {"g": a["grossing"], "f": a["free"], "c": len(a["countries"]),
@@ -808,6 +808,15 @@ def main() -> None:
             if 0 < delta / span_days <= 10_000:
                 rec["d"] = round(delta / span_days, 1)
                 gained += 1
+        elif p.get("d") is not None:
+            # Window too short to measure — CARRY the previous reading rather
+            # than dropping it. Declining to compute is correct; discarding the
+            # last valid measurement is not. A manual run at 08:15 produced real
+            # velocity over a 15h window, then the cron fired at 08:20 and blanked
+            # every number because five minutes is unmeasurable. Stale figures
+            # beat none until a long enough window comes round again.
+            rec["d"] = p["d"]
+            carried += 1
         index[aid] = rec
 
     with open(INDEX_OUTPUT, "w") as f:
@@ -817,8 +826,9 @@ def main() -> None:
                    "count": len(index), "with_velocity": gained, "apps": index},
                   f, separators=(",", ":"), default=str)
     span_txt = f"{span_days:.2f}d" if span_days else "no baseline yet"
+    carry_txt = f", {carried} carried from the last valid window" if carried else ""
     print(f"✓ {INDEX_OUTPUT}: {len(index)} charting apps indexed "
-          f"({gained} with velocity over {span_txt}"
+          f"({gained} with velocity over {span_txt}{carry_txt}"
           f"{'' if roll else ' — baseline carried, gap too short to roll'})")
 
     # ── Niche clusters (separate deliverable, same run) ──────────────

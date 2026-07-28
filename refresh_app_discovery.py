@@ -323,9 +323,12 @@ def main() -> None:
         base = w.get("b")
         if base is None:
             w["b"] = w.get("r", 0)
-        elif span:
+        elif span and span >= 0.25:
             delta = w.get("r", 0) - base
-            w["d"] = round(delta / max(span, 0.25), 1) if delta > 0 else 0.0
+            w["d"] = round(delta / span, 1) if delta > 0 else 0.0
+        # else: window too short to measure — leave the previous w["d"] intact
+        # rather than blanking it. The watchlist dict is carried over from the
+        # last run, so doing nothing here IS the carry-forward.
         if roll:
             w["b"] = w.get("r", 0)
 
