@@ -554,6 +554,8 @@ def main() -> None:
             # when that flipped between runs the velocity diff read as
             # +988,485 ratings in one hour (3.9M/day). Always take the MAX, so
             # the figure is stable across runs regardless of chart membership.
+            # Provisional only — the fixed-storefront pass below overwrites
+            # this. Kept so the field always exists if that pass fails.
             ch["ratings_count"] = max(ch["ratings_count"], m.get("userRatingCount") or 0)
             ch["countries"].add(country)
             for p in placements:
@@ -749,6 +751,44 @@ def main() -> None:
     with open(OUTPUT, "w") as f:
         json.dump(payload, f, indent=2, default=str)
 
+    # ── Stable ratings pass ──────────────────────────────────────────
+    # Ratings MUST come from a fixed storefront or velocity is meaningless.
+    # Taking max() across the countries an app charted in was still unstable:
+    # when an app enters a new, larger storefront's charts its max jumps, and
+    # that reads as explosive growth. Setmore showed 7,716/day purely because
+    # it went from charting in GB (1,540 ratings) to charting in the US (9,175).
+    #
+    # So ask a FIXED priority of storefronts, first hit wins, and record WHICH
+    # one answered. A delta is only computed when the same storefront answered
+    # both runs — see the rc check below.
+    print("\n▶ Reading ratings from a fixed storefront (for stable velocity)")
+    RATINGS_PRIORITY = [c for c in ("us", "gb", "de", "fr", "jp") if c]
+    pending = set(all_charting)
+    for cc in RATINGS_PRIORITY:
+        if not pending:
+            break
+        ids = list(pending)
+        got = 0
+        for i in range(0, len(ids), 400):
+            chunk = ids[i:i + 400]
+            url = (f"https://itunes.apple.com/lookup?id={','.join(chunk)}"
+                   f"&country={cc}&entity=software")
+            try:
+                res = get_json(url, retries=1).get("results", [])
+            except Exception:  # noqa: BLE001
+                continue
+            for r in res:
+                aid = str(r.get("trackId") or "")
+                if aid in pending and r.get("kind") == "software":
+                    all_charting[aid]["ratings_count"] = r.get("userRatingCount") or 0
+                    all_charting[aid]["ratings_country"] = cc
+                    pending.discard(aid)
+                    got += 1
+            time.sleep(THROTTLE)
+        print(f"  {cc.upper()}: {got} apps  ({len(pending)} still unresolved)")
+    for aid in pending:  # not sold in any priority storefront
+        all_charting[aid]["ratings_country"] = "?"
+
     # ── Charting index (feeds the live search page) ──────────────────
     # Keys are terse (g/f/c/n) purely for size — this is ~8k apps and the
     # browser fetches it on every page load.
@@ -792,7 +832,7 @@ def main() -> None:
     for aid, a in all_charting.items():
         cur = a["ratings_count"]
         rec = {"g": a["grossing"], "f": a["free"], "c": len(a["countries"]),
-               "n": a["name"], "r": cur}
+               "n": a["name"], "r": cur, "rc": a.get("ratings_country", "?")}
         p = prev_index.get(aid) or {}
         # Prefer the explicit baseline; fall back to the previous reading for
         # indexes written before this field existed.
@@ -801,7 +841,9 @@ def main() -> None:
         # Require a real measurement window. Extrapolating an hour's noise to a
         # daily rate multiplied it by 4 and turned rounding into headline
         # numbers; below a quarter-day there is nothing meaningful to divide.
-        if base is not None and span_days and span_days >= 0.25:
+        # Same storefront both runs, or the comparison is apples-to-oranges.
+        same_store = p.get("rc") == rec["rc"] and rec["rc"] != "?"
+        if base is not None and span_days and span_days >= 0.25 and same_store:
             delta = cur - base
             # No genuine app gains 10k ratings a day. Anything above that is a
             # data artefact (a storefront switch, an ID reused), not growth.
