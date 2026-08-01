@@ -71,7 +71,16 @@ THROTTLE = float(os.environ.get("DISCOVERY_THROTTLE") or 0.35)
 # real throughput is ~22 calls/min, not the ~170/min the throttle alone implies.
 # The wall-clock budget is the real limit; the call counts are just ceilings.
 SCAN_CALLS = int(os.environ.get("DISCOVERY_SCAN_CALLS") or 1200)
-FRONTIER_CALLS = int(os.environ.get("DISCOVERY_FRONTIER_CALLS") or 700)
+# THE FRONTIER GETS EVERYTHING BY DEFAULT. Splitting the budget 700/500 with
+# the backfill starved the part that matters: the scan was catching only
+# ~150 apps per launch day against a real rate near 1,000, while the backfill
+# spent its half discovering 30-180-day-old apps with zero ratings that pruning
+# deleted in the same run. It was burning most of a run to produce nothing.
+#
+# Backfill now runs only on whatever budget the frontier does not consume —
+# and the frontier stops on its own once it runs off the end of the live ID
+# range, so leftover budget genuinely means "caught up", not "gave up".
+FRONTIER_CALLS = int(os.environ.get("DISCOVERY_FRONTIER_CALLS") or SCAN_CALLS)
 SCAN_MINUTES = float(os.environ.get("DISCOVERY_SCAN_MINUTES") or 25)
 
 MAX_AGE_DAYS = int(os.environ.get("DISCOVERY_MAX_AGE_DAYS") or 180)
@@ -147,7 +156,7 @@ def scan_range(start: int, direction: int, calls: int, now, label: str,
         # is wasted. Without this the cursor kept jumping +2M and one run stored
         # top_id = 7,934,892,000 when apps stop existing around 6.79B — the next
         # frontier scan would have probed pure emptiness and found nothing.
-        if direction > 0 and skips >= 2:
+        if direction > 0 and skips >= 5:
             print(f"  {label}: past the end of the live ID range, stopping")
             break
         lo = cursor if direction > 0 else cursor - LOOKUP_BATCH
@@ -177,7 +186,14 @@ def scan_range(start: int, direction: int, calls: int, now, label: str,
             if empty_run >= EMPTY_RUN_TO_SKIP:
                 # Dead zone. Jumping costs one probe instead of thousands of
                 # wasted calls walking empty space.
-                cursor += direction * SKIP_AHEAD
+                #
+                # Going UP the jump must be much smaller. Apple issues ~326k
+                # IDs/day, so the whole frontier is under a million wide — a 2M
+                # leap clears it entirely and lands in dead space, which is why
+                # only ~150 apps per launch day were being found against a real
+                # rate near 1,000. Downward the dead zones are tens of millions
+                # wide and the big jump is what makes backfill viable at all.
+                cursor += direction * (SKIP_AHEAD // 10 if direction > 0 else SKIP_AHEAD)
                 empty_run = 0
                 skips += 1
                 continue
@@ -211,15 +227,22 @@ def refresh_watchlist(watch: dict, now) -> int:
 
 def prune(watch: dict, now) -> int:
     """Drop the dead. ~1000 apps launch daily and almost all go nowhere; without
-    this the watchlist fills with corpses and the signal drowns."""
+    this the watchlist fills with corpses and the signal drowns.
+
+    Thresholds sit at 60/90 days rather than 30/60. A dev spends the first month
+    iterating — fixing the paywall, re-cutting creative, finding the hook — so
+    cutting at 30 days kills apps right before their ads start converting, which
+    is exactly the moment worth catching. The cost is a watchlist that holds
+    roughly twice as many apps, and a refresh pass that grows with it.
+    """
     drop = []
     for aid, w in watch.items():
         age, r = w["age"], w.get("r", 0)
         if age > MAX_AGE_DAYS:
             drop.append(aid)
-        elif age > 60 and r < 20:
+        elif age > 90 and r < 20:
             drop.append(aid)
-        elif age > 30 and r < 5:
+        elif age > 60 and r < 5:
             drop.append(aid)
     for aid in drop:
         del watch[aid]
