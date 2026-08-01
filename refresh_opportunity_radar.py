@@ -767,24 +767,37 @@ def main() -> None:
     for cc in RATINGS_PRIORITY:
         if not pending:
             break
-        ids = list(pending)
         got = 0
-        for i in range(0, len(ids), 400):
-            chunk = ids[i:i + 400]
-            url = (f"https://itunes.apple.com/lookup?id={','.join(chunk)}"
-                   f"&country={cc}&entity=software")
-            try:
-                res = get_json(url, retries=1).get("results", [])
-            except Exception:  # noqa: BLE001
-                continue
-            for r in res:
-                aid = str(r.get("trackId") or "")
-                if aid in pending and r.get("kind") == "software":
-                    all_charting[aid]["ratings_count"] = r.get("userRatingCount") or 0
-                    all_charting[aid]["ratings_country"] = cc
-                    pending.discard(aid)
-                    got += 1
-            time.sleep(THROTTLE)
+        # RETRY FAILED CHUNKS WITHIN THIS COUNTRY before falling through to the
+        # next. A single failed batch used to dump 400 apps straight to the
+        # following storefront, so Mixbook was recorded from GB (665 ratings)
+        # while the US it is actually sold in has 13,450 — and that swap looked
+        # exactly like a 9,437/day surge. Falling through must mean "not sold
+        # here", never "one request happened to fail".
+        for attempt in range(3):
+            ids = list(pending)
+            if not ids:
+                break
+            failed = False
+            for i in range(0, len(ids), 400):
+                chunk = ids[i:i + 400]
+                url = (f"https://itunes.apple.com/lookup?id={','.join(chunk)}"
+                       f"&country={cc}&entity=software")
+                try:
+                    res = get_json(url, retries=2).get("results", [])
+                except Exception:  # noqa: BLE001
+                    failed = True
+                    continue
+                for r in res:
+                    aid = str(r.get("trackId") or "")
+                    if aid in pending and r.get("kind") == "software":
+                        all_charting[aid]["ratings_count"] = r.get("userRatingCount") or 0
+                        all_charting[aid]["ratings_country"] = cc
+                        pending.discard(aid)
+                        got += 1
+                time.sleep(THROTTLE)
+            if not failed:
+                break
         print(f"  {cc.upper()}: {got} apps  ({len(pending)} still unresolved)")
     for aid in pending:  # not sold in any priority storefront
         all_charting[aid]["ratings_country"] = "?"
@@ -828,7 +841,7 @@ def main() -> None:
     roll = span_days is None or span_days >= MIN_BASELINE_DAYS
     baseline_at = now.isoformat() if roll else prev_baseline_at
 
-    index, gained, carried = {}, 0, 0
+    index, gained, carried, dropped = {}, 0, 0, 0
     for aid, a in all_charting.items():
         cur = a["ratings_count"]
         rec = {"g": a["grossing"], "f": a["free"], "c": len(a["countries"]),
@@ -843,13 +856,20 @@ def main() -> None:
         # numbers; below a quarter-day there is nothing meaningful to divide.
         # Same storefront both runs, or the comparison is apples-to-oranges.
         same_store = p.get("rc") == rec["rc"] and rec["rc"] != "?"
-        if base is not None and span_days and span_days >= 0.25 and same_store:
+        measurable = base is not None and span_days and span_days >= 0.25
+        if measurable and same_store:
             delta = cur - base
             # No genuine app gains 10k ratings a day. Anything above that is a
             # data artefact (a storefront switch, an ID reused), not growth.
             if 0 < delta / span_days <= 10_000:
                 rec["d"] = round(delta / span_days, 1)
                 gained += 1
+        elif measurable and not same_store:
+            # Storefront changed — DROP any previous value rather than carrying
+            # it. Carrying assumes the old number is merely stale; a storefront
+            # switch means it was measuring something else entirely. This is how
+            # pre-fix garbage (Mixbook at 9,437/day) survived every later run.
+            dropped += 1
         elif p.get("d") is not None:
             # Window too short to measure — CARRY the previous reading rather
             # than dropping it. Declining to compute is correct; discarding the
@@ -868,7 +888,8 @@ def main() -> None:
                    "count": len(index), "with_velocity": gained, "apps": index},
                   f, separators=(",", ":"), default=str)
     span_txt = f"{span_days:.2f}d" if span_days else "no baseline yet"
-    carry_txt = f", {carried} carried from the last valid window" if carried else ""
+    carry_txt = (f", {carried} carried from the last valid window" if carried else "") + \
+                (f", {dropped} dropped on storefront change" if dropped else "")
     print(f"✓ {INDEX_OUTPUT}: {len(index)} charting apps indexed "
           f"({gained} with velocity over {span_txt}{carry_txt}"
           f"{'' if roll else ' — baseline carried, gap too short to roll'})")
