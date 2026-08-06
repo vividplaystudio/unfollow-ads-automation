@@ -1,55 +1,47 @@
 #!/usr/bin/env python3
-"""App Discovery — find every new app by walking Apple's ID space, then watch
-the ones that show traction.
+"""App Discovery — read Apple's published list of new apps, then watch the ones
+that gain traction.
 
-WHY ID WALKING RATHER THAN SEARCH. Keyword search only returns what you already
-thought to search for, so it structurally cannot surface a niche nobody has
-named. Counting IDs is unbiased: it finds whatever exists. A probe of twelve
-consecutive IDs turned up "Alkebulan", "QUIERO CASARME CONTIGO" and
-"BYTHEDØZEN" — none of which any keyword list would have reached.
+DISCOVERY: APPLE PUBLISHES THE LIST. robots.txt on apps.apple.com declares a
+"new-app" sitemap index — 400 gzipped files, ~140 unique apps each, ~55k total.
+Sampling 200 of them gave a median age of 15 days with 98% under a month, so
+"new" means what it says.
 
-THE COST ASYMMETRY THAT SHAPES THIS SCRIPT. Discovery is expensive; monitoring
-is nearly free. Re-checking apps you already know costs ~2.4s per 400, so tens
-of thousands take a couple of minutes. Scanning to FIND them is the slow part.
-So the engine is not the scan — it is the WATCHLIST: discover an app once, then
-track it daily for almost nothing.
+This replaced ID-space walking, which inferred at a 0.25% hit rate what Apple
+hands over directly. The comparison was not close:
 
-⚠️ A FULL 180-DAY BACKFILL IS NOT PRACTICAL. Real throughput is ~22 calls/min
-(a 400-ID lookup costs ~2.4s of request time, not the 0.35s throttle I first
-sized against), so the ~40M IDs covering 180 days would need ~75 hours of
-scanning, not the ~11 I originally estimated. The FRONTIER is what pays:
-~350k new IDs/day is ~15 min, so scanning forward from today accumulates a
-complete window over time. Backfill runs only with whatever budget is left and
-should be treated as a bonus, not a plan.
+    ID walking   1,200 lookups  ->    ~160 apps   (~1/3 of daily launches)
+    sitemaps       400 fetches  -> ~55,000 apps   (effectively complete)
 
-MEASURED FACTS THIS RELIES ON (all verified against the live API):
-  - Lookup accepts 400 IDs per call. 800 returns a 502.
-  - Sequential scanning hits 25-66% live apps; RANDOM probing across the same
-    range hits 3.7%. IDs are issued in dense clusters, so counting beats
-    guessing by ~10x. Never sample randomly here.
-  - Apple issues ~326k IDs/day (32M IDs spanned 98 days), across apps,
-    developer accounts, music and books — not apps alone.
-  - The live region is roughly the top 40M IDs. Below that it is mostly dead:
-    7 of 11 sampled blocks between -40M and -400M were completely empty. Hence
-    probe-and-skip rather than walking every number.
-  - ID order tracks release date but NOT perfectly — ~1% of recent apps sit at
-    far lower IDs (one 55-day-old app had ID 1.67B). Backward walking finds
-    almost everything, not literally everything.
+Each app appears once per storefront (~7,000 URLs for ~140 apps), so dedupe on
+the ID, not the URL.
 
-PRUNING IS THE FEATURE. Roughly a thousand apps launch daily and almost all
-die. Without aggressive pruning the watchlist becomes a hundred thousand dead
-listings and the signal drowns. Anything that hasn't shown traction by day 30
-is dropped.
+THE COST ASYMMETRY THAT SHAPES THE REST. Discovery is now cheap; monitoring was
+always cheap (400 IDs per lookup, ~2.4s each). The engine is the WATCHLIST:
+record an app once, then track it twice daily for almost nothing. Only apps not
+already tracked need a metadata lookup, so after the first run that half shrinks
+to a small remainder.
+
+⚠️ THE LOOKUP ENDPOINT IGNORES entity=software — see lookup_ids(). It returns
+songs, albums and artist pages alongside apps, and songs carry a trackName too.
+
+PRUNING IS THE FEATURE. Roughly a thousand apps launch daily and almost all die.
+Thresholds sit at 60/90 days rather than 30/60 because a dev spends the first
+month iterating — paywall, creative, hook — and cutting at 30 days killed apps
+right before their ads started converting.
 
 Outputs:
-  app_watchlist.json — full tracking state, script-only, can be several MB
-  discovery.json     — top apps by score, sized for the browser
-  discovery_state.json — scan cursor so each run resumes where the last stopped
+  app_watchlist.json   — full tracking state, script-only, several MB
+  discovery.json       — top apps by score, sized for the browser
+  discovery_state.json — velocity baseline (discovery itself is stateless now)
 """
 
+import gzip
 import json
 import os
+import re
 import time
+import urllib.request
 from datetime import datetime, timezone
 
 # Shared helpers. The radar module has no import-time side effects — its
@@ -67,36 +59,15 @@ LOOKUP_BATCH = 400            # measured ceiling; 800 -> 502
 SCAN_COUNTRY = (os.environ.get("DISCOVERY_COUNTRY") or "us").lower()
 THROTTLE = float(os.environ.get("DISCOVERY_THROTTLE") or 0.35)
 
-# Sized from MEASURED latency: a 400-ID lookup costs ~2.4s of request time, so
-# real throughput is ~22 calls/min, not the ~170/min the throttle alone implies.
-# The wall-clock budget is the real limit; the call counts are just ceilings.
-SCAN_CALLS = int(os.environ.get("DISCOVERY_SCAN_CALLS") or 1200)
-# THE FRONTIER GETS EVERYTHING BY DEFAULT. Splitting the budget 700/500 with
-# the backfill starved the part that matters: the scan was catching only
-# ~150 apps per launch day against a real rate near 1,000, while the backfill
-# spent its half discovering 30-180-day-old apps with zero ratings that pruning
-# deleted in the same run. It was burning most of a run to produce nothing.
-#
-# Backfill now runs only on whatever budget the frontier does not consume —
-# and the frontier stops on its own once it runs off the end of the live ID
-# range, so leftover budget genuinely means "caught up", not "gave up".
-FRONTIER_CALLS = int(os.environ.get("DISCOVERY_FRONTIER_CALLS") or SCAN_CALLS)
+# Wall-clock budget for the whole scan. A 400-ID lookup costs ~2.4s of request
+# time, so throughput is ~22 calls/min — call counts cannot predict runtime, a
+# deadline can. An earlier build sized against the throttle alone and ran past
+# the 90-minute job timeout, uploading nothing.
 SCAN_MINUTES = float(os.environ.get("DISCOVERY_SCAN_MINUTES") or 25)
 
 MAX_AGE_DAYS = int(os.environ.get("DISCOVERY_MAX_AGE_DAYS") or 180)
-# Consecutive empty blocks before declaring a dead zone and jumping. 3 blocks
-# = 1200 IDs of nothing, which does not happen inside a live cluster.
-EMPTY_RUN_TO_SKIP = 3
-SKIP_AHEAD = 2_000_000        # how far to jump past a dead zone (backfill only)
-# Consecutive all-empty blocks before the FRONTIER concludes it has passed the
-# newest ID. 25 blocks = 10,000 contiguous IDs with no content of any kind;
-# inside the live band even sparse stretches return music and developer pages,
-# so a run of that length genuinely means the end.
-FRONTIER_STOP_BLOCKS = int(os.environ.get("DISCOVERY_FRONTIER_STOP_BLOCKS") or 25)
 BROWSER_TOP_N = int(os.environ.get("DISCOVERY_BROWSER_TOP") or 1500)
 
-# Seed used only when no state exists yet; the first frontier scan corrects it.
-SEED_TOP_ID = int(os.environ.get("DISCOVERY_SEED_TOP_ID") or 6_794_400_000)
 
 
 def fetch_json(name: str, default):
@@ -118,110 +89,68 @@ def lookup_ids(ids: list) -> tuple:
     Phonk" and "Down in this Divebar" as top discoveries. kind == "software"
     is the only reliable discriminator.
 
-    The caller needs BOTH counts: apps are what we collect, but total decides
-    whether a block is a genuine dead zone. Apps are only ~1% of IDs (0-14 per
-    400) while all content types together run ~40%, so a block with zero apps
-    is normal inside live space — judging emptiness on apps alone would skip
-    straight over regions that do contain them.
+    The total count is returned alongside for callers that need to tell "this
+    ID resolved to something that isn't an app" from "this ID resolves to
+    nothing at all".
     """
     url = ("https://itunes.apple.com/lookup?id=" + ",".join(map(str, ids))
            + f"&country={SCAN_COUNTRY}&entity=software")
     try:
-        # retries=1 deliberately. ~12% of sparse ID blocks return HTTP 500, and
-        # that is a property of the block, not a transient fault — retrying wins
-        # nothing while the default 3 retries add ~7s of exponential backoff
-        # each. At scale that was the difference between a 30-minute run and a
-        # 3-hour one. A failed block is simply treated as empty.
+        # retries=1 deliberately. Batched lookups return HTTP 500 often enough
+        # (~12% on sparse input) that the default 3 retries add ~7s of backoff
+        # per failure for nothing. A failed block is treated as empty; the next
+        # run picks those IDs up again.
         res = get_json(url, retries=1).get("results", [])
     except Exception:  # noqa: BLE001 — a bad block must not stop the sweep
         return [], 0
     return [r for r in res if r.get("kind") == "software" and r.get("trackId")], len(res)
 
 
-def scan_range(start: int, direction: int, calls: int, now, label: str,
-               deadline: float = None) -> tuple:
-    """Walk IDs in blocks, skipping dead zones. Returns (apps, calls_used, end_id).
+SITEMAP_INDEX = (os.environ.get("DISCOVERY_SITEMAP_INDEX")
+                 or "https://apps.apple.com/sitemaps_apps_index_new-app_1.xml")
+_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
 
-    direction: +1 scans upward (frontier, newest), -1 downward (backfill).
 
-    A WALL-CLOCK DEADLINE bounds this, not just the call count. A 400-ID lookup
-    takes ~2.4s of real request time — I originally sized the budget on the
-    0.35s throttle alone and a 3000-call run took over 90 minutes and was killed
-    by the job timeout, uploading nothing. Call counts cannot predict runtime
-    when per-call latency varies by an order of magnitude; a deadline can.
+def crawl_new_app_sitemaps(deadline: float = None) -> set:
+    """Read Apple's PUBLISHED list of new apps instead of inferring it.
+
+    Returns a set of app-ID strings. Each app appears once per storefront
+    (~7,000 URLs for ~140 apps), so dedupe on the ID rather than the URL.
+
+    A failed file is skipped rather than retried — with 400 of them, losing one
+    costs ~140 apps that the next run picks up anyway, whereas retrying on a
+    deadline-bound crawl costs coverage everywhere else.
     """
-    found, used, cursor, empty_run = {}, 0, start, 0
-    max_app_id, skips = 0, 0
-    while used < calls:
+    print(f"  index: {SITEMAP_INDEX}")
+    try:
+        req = urllib.request.Request(SITEMAP_INDEX, headers={"User-Agent": _UA})
+        with urllib.request.urlopen(req, timeout=90) as r:
+            files = re.findall(r"<loc>(.*?)</loc>", r.read().decode("utf-8", "ignore"))
+    except Exception as e:  # noqa: BLE001
+        print(f"  ! sitemap index unreachable ({e})")
+        return set()
+
+    ids, done, failed = set(), 0, 0
+    for f in files:
         if deadline and time.time() > deadline:
-            print(f"  {label}: stopping at time budget")
+            print(f"  stopped at time budget after {done}/{len(files)} files")
             break
-        # Going UP there is nothing above the frontier, so repeated dead zones
-        # mean we have run off the end of the live range and every further call
-        # is wasted. Without this the cursor kept jumping +2M and one run stored
-        # top_id = 7,934,892,000 when apps stop existing around 6.79B — the next
-        # frontier scan would have probed pure emptiness and found nothing.
-        lo = cursor if direction > 0 else cursor - LOOKUP_BATCH
-        block, total = lookup_ids(range(lo, lo + LOOKUP_BATCH))
-        used += 1
+        try:
+            req = urllib.request.Request(f, headers={"User-Agent": _UA})
+            with urllib.request.urlopen(req, timeout=90) as r:
+                body = gzip.decompress(r.read()).decode("utf-8", "ignore")
+            ids |= set(re.findall(r"/id(\d+)", body))
+        except Exception:  # noqa: BLE001 — one bad file must not stop the crawl
+            failed += 1
+        done += 1
+        if done % 50 == 0:
+            print(f"  {done}/{len(files)} files · {len(ids):,} unique apps")
         time.sleep(THROTTLE)
 
-        # Liveness is judged on TOTAL results, not apps — see lookup_ids.
-        if total:
-            empty_run = 0
-            for r in block:
-                rel = r.get("releaseDate")
-                if not rel:
-                    continue
-                try:
-                    age = (now - datetime.fromisoformat(rel.replace("Z", "+00:00"))).days
-                except ValueError:
-                    continue
-                # Raw ID space contains junk dates — 1979-01-01 placeholders and
-                # future-dated pre-orders. Both must be rejected.
-                if age < 0 or age > MAX_AGE_DAYS:
-                    continue
-                found[str(r["trackId"])] = r
-                max_app_id = max(max_app_id, int(r["trackId"]))
-        else:
-            empty_run += 1
-            # UPWARD: never skip, only stop. The frontier is a narrow band —
-            # ~400k IDs/day — and apps are sparse in it (roughly 1 per 400 IDs).
-            # Skipping 200k on three empty blocks leapt clean over the new
-            # territory: a run probed 44,000 IDs, found 3 apps, declared itself
-            # past the end and stopped after 110 of its 1,200 calls. Walking
-            # contiguously and stopping only after a long unbroken dead stretch
-            # is the only way to actually cover the band.
-            if direction > 0:
-                if empty_run >= FRONTIER_STOP_BLOCKS:
-                    print(f"  {label}: {empty_run * LOOKUP_BATCH:,} IDs of nothing — "
-                          f"past the end of the live range")
-                    break
-                cursor += direction * LOOKUP_BATCH
-                continue
-            if empty_run >= EMPTY_RUN_TO_SKIP:
-                # Dead zone. Jumping costs one probe instead of thousands of
-                # wasted calls walking empty space.
-                #
-                # Going UP the jump must be much smaller. Apple issues ~326k
-                # IDs/day, so the whole frontier is under a million wide — a 2M
-                # leap clears it entirely and lands in dead space, which is why
-                # only ~150 apps per launch day were being found against a real
-                # rate near 1,000. Downward the dead zones are tens of millions
-                # wide and the big jump is what makes backfill viable at all.
-                cursor += direction * (SKIP_AHEAD // 10 if direction > 0 else SKIP_AHEAD)
-                empty_run = 0
-                skips += 1
-                continue
+    print(f"  {done} files read ({failed} failed) → {len(ids):,} unique app IDs")
+    return ids
 
-        cursor += direction * LOOKUP_BATCH
 
-    print(f"  {label}: {used} calls, {used * LOOKUP_BATCH:,} IDs probed, "
-          f"{len(found)} apps within {MAX_AGE_DAYS}d")
-    # Returns the highest ID where an APP was actually found, NOT the final
-    # cursor. The cursor overshoots by design (dead-zone skips), so using it as
-    # the new frontier anchor walks the next run into empty space.
-    return found, used, cursor, max_app_id
 
 
 def refresh_watchlist(watch: dict, now) -> int:
@@ -288,38 +217,49 @@ def score(w: dict) -> float:
 
 def main() -> None:
     now = datetime.now(timezone.utc)
-    print(f"▶ App Discovery  {now.date()}  (budget {SCAN_CALLS} calls)")
+    print(f"▶ App Discovery  {now.date()}  (budget {SCAN_MINUTES:.0f} min)")
 
     print("\n▶ Loading state")
     state = fetch_json(STATE_OUTPUT, {})
     watch = fetch_json(WATCHLIST_OUTPUT, {}).get("apps", {})
     print(f"  watchlist: {len(watch)} apps")
 
-    top_id = int(state.get("top_id") or SEED_TOP_ID)
-    cursor = int(state.get("cursor") or top_id)
-    floor = int(state.get("floor") or (top_id - 40_000_000))
-    print(f"  top_id={top_id:,}  backfill cursor={cursor:,}  floor={floor:,}")
-    done_pct = (top_id - cursor) / max(top_id - floor, 1) * 100
-    print(f"  backfill {min(done_pct, 100):.1f}% complete")
-
-    # ── Frontier: newest IDs first, so brand-new apps appear immediately
-    # rather than waiting for the backfill to finish ──
-    print("\n▶ Frontier scan (newest IDs)")
     deadline = time.time() + SCAN_MINUTES * 60
-    fresh, used_f, _, front_max = scan_range(top_id, +1, FRONTIER_CALLS, now, "frontier", deadline)
 
-    # ── Backfill: walk downward through the live region ──
-    print("\n▶ Backfill scan (older IDs)")
-    remaining = max(SCAN_CALLS - used_f, 0)
-    older, used_b, new_cursor, back_max = ({}, 0, cursor, 0)
-    if remaining and cursor > floor:
-        older, used_b, new_cursor, back_max = scan_range(cursor, -1, remaining, now, "backfill", deadline)
-    elif cursor <= floor:
-        print("  backfill complete — nothing older to cover")
+    # ── Discovery: read Apple's published new-app list ──
+    print("\n▶ Reading Apple's new-app sitemaps")
+    listed = crawl_new_app_sitemaps(deadline)
+
+    # Only look up what isn't already tracked. After the first run this is a
+    # small remainder, so the expensive half all but disappears.
+    unknown = sorted(listed - set(watch))
+    print(f"  {len(listed):,} listed · {len(listed) - len(unknown):,} already tracked "
+          f"· {len(unknown):,} to look up")
+
+    fresh = {}
+    for i in range(0, len(unknown), LOOKUP_BATCH):
+        if time.time() > deadline:
+            print(f"  stopped at time budget ({len(fresh):,} resolved)")
+            break
+        block, _ = lookup_ids(unknown[i:i + LOOKUP_BATCH])
+        for r in block:
+            rel = r.get("releaseDate")
+            if not rel:
+                continue
+            try:
+                age = (now - datetime.fromisoformat(rel.replace("Z", "+00:00"))).days
+            except ValueError:
+                continue
+            if 0 <= age <= MAX_AGE_DAYS:
+                fresh[str(r["trackId"])] = r
+        time.sleep(THROTTLE)
+    print(f"  {len(fresh):,} resolved and within {MAX_AGE_DAYS}d")
 
     # ── Merge discoveries into the watchlist ──
+    # Existing entries are never overwritten, so every app already tracked keeps
+    # its first_seen, baseline and velocity history across this change.
     added = 0
-    for aid, r in {**fresh, **older}.items():
+    for aid, r in fresh.items():
         if aid in watch:
             continue
         rel = r["releaseDate"][:10]
@@ -392,7 +332,7 @@ def main() -> None:
             "baseline_at": now.isoformat() if roll else prev_state_at,
             "span_days": round(span, 2) if span else None,
             "tracked": len(watch), "added_today": added,
-            "backfill_pct": round(min(done_pct, 100), 1),
+            "listed_in_sitemaps": len(listed),
             "apps": [
                 {**w, "app_id": aid, "ad_library_url": AD_LIBRARY_URL.format(
                     q=(w.get("n") or "").replace(" ", "+"))}
@@ -401,21 +341,16 @@ def main() -> None:
         }, f, indent=2, default=str)
 
     with open(STATE_OUTPUT, "w") as f:
+        # Discovery is STATELESS now. The sitemap index is re-read in full each
+        # run, so there is no cursor to resume from and no top_id to corrupt —
+        # which removes the class of bug that stored 7.93B, a value past the end
+        # of the live ID range that would have poisoned every later run.
         json.dump({"generated_at": now.isoformat(),
                    "baseline_at": now.isoformat() if roll else prev_state_at,
-                   # Anchor to a PROVEN app ID. Never carry a top_id forward
-                   # blindly — a bad one (7.93B, past the end of the live range)
-                   # would persist forever and every future frontier scan would
-                   # probe emptiness. The watchlist is the fallback: its highest
-                   # key is by definition a real app.
-                   "top_id": max([front_max, back_max]
-                                 + [int(k) for k in watch] or [SEED_TOP_ID]),
-                   "cursor": new_cursor,
-                   "floor": floor,
-                   "backfill_complete": new_cursor <= floor}, f, indent=2)
+                   "listed_in_sitemaps": len(listed)}, f, indent=2)
 
     print(f"\n✓ {len(watch)} tracked · {added} added · "
-          f"backfill {min(done_pct, 100):.1f}% · top {BROWSER_TOP_N} to browser")
+          f"{len(listed):,} listed in sitemaps · top {BROWSER_TOP_N} to browser")
 
     print("\n── Top 12 by discovery score ──")
     for aid, w in ranked[:12]:
