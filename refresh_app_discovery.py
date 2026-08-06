@@ -87,7 +87,12 @@ MAX_AGE_DAYS = int(os.environ.get("DISCOVERY_MAX_AGE_DAYS") or 180)
 # Consecutive empty blocks before declaring a dead zone and jumping. 3 blocks
 # = 1200 IDs of nothing, which does not happen inside a live cluster.
 EMPTY_RUN_TO_SKIP = 3
-SKIP_AHEAD = 2_000_000        # how far to jump past a dead zone
+SKIP_AHEAD = 2_000_000        # how far to jump past a dead zone (backfill only)
+# Consecutive all-empty blocks before the FRONTIER concludes it has passed the
+# newest ID. 25 blocks = 10,000 contiguous IDs with no content of any kind;
+# inside the live band even sparse stretches return music and developer pages,
+# so a run of that length genuinely means the end.
+FRONTIER_STOP_BLOCKS = int(os.environ.get("DISCOVERY_FRONTIER_STOP_BLOCKS") or 25)
 BROWSER_TOP_N = int(os.environ.get("DISCOVERY_BROWSER_TOP") or 1500)
 
 # Seed used only when no state exists yet; the first frontier scan corrects it.
@@ -156,9 +161,6 @@ def scan_range(start: int, direction: int, calls: int, now, label: str,
         # is wasted. Without this the cursor kept jumping +2M and one run stored
         # top_id = 7,934,892,000 when apps stop existing around 6.79B — the next
         # frontier scan would have probed pure emptiness and found nothing.
-        if direction > 0 and skips >= 5:
-            print(f"  {label}: past the end of the live ID range, stopping")
-            break
         lo = cursor if direction > 0 else cursor - LOOKUP_BATCH
         block, total = lookup_ids(range(lo, lo + LOOKUP_BATCH))
         used += 1
@@ -183,6 +185,20 @@ def scan_range(start: int, direction: int, calls: int, now, label: str,
                 max_app_id = max(max_app_id, int(r["trackId"]))
         else:
             empty_run += 1
+            # UPWARD: never skip, only stop. The frontier is a narrow band —
+            # ~400k IDs/day — and apps are sparse in it (roughly 1 per 400 IDs).
+            # Skipping 200k on three empty blocks leapt clean over the new
+            # territory: a run probed 44,000 IDs, found 3 apps, declared itself
+            # past the end and stopped after 110 of its 1,200 calls. Walking
+            # contiguously and stopping only after a long unbroken dead stretch
+            # is the only way to actually cover the band.
+            if direction > 0:
+                if empty_run >= FRONTIER_STOP_BLOCKS:
+                    print(f"  {label}: {empty_run * LOOKUP_BATCH:,} IDs of nothing — "
+                          f"past the end of the live range")
+                    break
+                cursor += direction * LOOKUP_BATCH
+                continue
             if empty_run >= EMPTY_RUN_TO_SKIP:
                 # Dead zone. Jumping costs one probe instead of thousands of
                 # wasted calls walking empty space.
