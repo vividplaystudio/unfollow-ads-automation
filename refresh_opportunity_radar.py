@@ -991,9 +991,27 @@ def upload_to_ftp(local_file: str, remote_name: str) -> None:
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
 
-    ftp = ftplib.FTP_TLS(FTP_HOST, timeout=60, context=ctx)
-    ftp.login(FTP_USER, FTP_PASS)
-    ftp.prot_p()
+    # RETRY THE CONNECT. A radar run failed after 26 minutes of successful
+    # scanning with "TimeoutError: timed out" raised from socket.connect — the
+    # host refused the connection outright rather than failing mid-transfer.
+    # cPanel throttles repeated FTP connections from one source, and this repo
+    # opens several per run across two scheduled jobs plus dashboard pushes.
+    #
+    # Failing here is the worst possible place: all the work is done and the
+    # results are discarded with the runner. The same guard already exists in
+    # upload-dashboard.yml; this is the shared helper both data jobs use.
+    ftp = None
+    for attempt in range(4):
+        try:
+            ftp = ftplib.FTP_TLS(FTP_HOST, timeout=90, context=ctx)
+            ftp.login(FTP_USER, FTP_PASS)
+            ftp.prot_p()
+            break
+        except Exception as e:  # noqa: BLE001 — connect/login, retry then give up
+            print(f"    FTP connect attempt {attempt + 1}/4 failed: {e}")
+            if attempt == 3:
+                raise
+            time.sleep(20 * (attempt + 1))
 
     try:
         ftp.cwd(FTP_PATH)
