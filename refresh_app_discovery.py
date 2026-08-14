@@ -41,6 +41,7 @@ import json
 import os
 import re
 import time
+import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 
@@ -70,10 +71,34 @@ BROWSER_TOP_N = int(os.environ.get("DISCOVERY_BROWSER_TOP") or 1500)
 
 
 
-def fetch_json(name: str, default):
+def fetch_json(name: str, default, required: bool = False):
+    """Read a published JSON artifact.
+
+    `required` distinguishes "this file does not exist yet" from "the server is
+    unreachable", which look identical here but must not be treated alike. On
+    2026-08-13 genivox.com timed out for both HTTP reads, so the watchlist
+    loaded as {} and the run proceeded to rebuild it from scratch — the upload
+    failing immediately afterwards is the only reason 78,432 tracked apps were
+    not overwritten by a few thousand. Losing every first_seen date and velocity
+    baseline is unrecoverable, so a read failure must stop the run instead.
+
+    A genuine 404 still returns the default: that is the first-run case.
+    """
     try:
-        return get_json(f"{BASE_URL}/{name}", retries=1, auth=(PREV_USER, PREV_PASS))
-    except Exception as e:  # noqa: BLE001 — absent on the first run
+        return get_json(f"{BASE_URL}/{name}", retries=3, auth=(PREV_USER, PREV_PASS))
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            print(f"  no {name} (404 — treating as first run)")
+            return default
+        if required:
+            raise RuntimeError(f"cannot read {name} (HTTP {e.code}) — aborting "
+                               f"rather than risk overwriting tracking history") from e
+        print(f"  no {name} (HTTP {e.code})")
+        return default
+    except Exception as e:  # noqa: BLE001 — timeout, DNS, connection refused
+        if required:
+            raise RuntimeError(f"cannot read {name} ({e}) — aborting rather than "
+                               f"risk overwriting tracking history") from e
         print(f"  no {name} ({e})")
         return default
 
@@ -221,7 +246,9 @@ def main() -> None:
 
     print("\n▶ Loading state")
     state = fetch_json(STATE_OUTPUT, {})
-    watch = fetch_json(WATCHLIST_OUTPUT, {}).get("apps", {})
+    # required=True: an unreadable watchlist must abort the run, never
+    # silently become an empty one that overwrites the real thing.
+    watch = fetch_json(WATCHLIST_OUTPUT, {}, required=True).get("apps", {})
     print(f"  watchlist: {len(watch)} apps")
 
     deadline = time.time() + SCAN_MINUTES * 60
