@@ -480,16 +480,43 @@ def build_niches(all_charting: dict, new_ids: set) -> list:
     return sorted(out, key=lambda x: -x["score"])
 
 
-def load_previous() -> dict:
-    """{app_id: prev_record} from the last published run. Empty on first run."""
+def fetch_published(url: str, label: str) -> dict:
+    """Read one of our own published artifacts, distinguishing "not there yet"
+    from "could not reach it".
+
+    Those two look identical to a bare try/except, and treating them alike
+    destroys accumulated state: a transient outage returns {}, the run rebuilds
+    from nothing, and the next upload overwrites the real history with it. The
+    watchlist lost 78k apps' worth of first_seen dates this way (saved only by
+    the upload failing too), and the same pattern sits behind every accumulated
+    field here — first_seen on the radar, velocity baselines in the index.
+
+    404 means genuinely absent, which is the first run. Anything else raises,
+    because one skipped cycle is cheap and silently reset history is not.
+    """
     try:
-        data = get_json(PREV_URL, retries=1, auth=(PREV_USER, PREV_PASS))
-        prev = {a["app_id"]: a for a in data.get("apps", [])}
-        print(f"  loaded {len(prev)} apps from previous run")
-        return prev
-    except Exception as e:  # noqa: BLE001 — first run has nothing to load
-        print(f"  no previous run available ({e})")
-        return {}
+        return get_json(url, retries=3, auth=(PREV_USER, PREV_PASS))
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            print(f"  no {label} yet (404 — first run)")
+            return {}
+        raise RuntimeError(f"cannot read {label} (HTTP {e.code}) — aborting rather "
+                           f"than rebuild from empty and overwrite history") from e
+    except Exception as e:  # noqa: BLE001 — timeout, DNS, refused
+        raise RuntimeError(f"cannot read {label} ({e}) — aborting rather than "
+                           f"rebuild from empty and overwrite history") from e
+
+
+def load_previous() -> dict:
+    """{app_id: prev_record} from the last published run. Empty on first run.
+
+    Unlike the discovery watchlist, an EMPTY result here is legitimate — a sweep
+    can genuinely find no new-and-charting apps — so only a read failure aborts.
+    """
+    data = fetch_published(PREV_URL, "previous radar run")
+    prev = {a["app_id"]: a for a in data.get("apps", [])}
+    print(f"  loaded {len(prev)} apps from previous run")
+    return prev
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -809,16 +836,15 @@ def main() -> None:
     # ratings/day computed from lifetime totals is an average — an app that was
     # hot six months ago and is flat now scores the same as one growing today.
     # This delta is actual movement since the last run.
-    prev_index, pj = {}, {}
-    prev_at = None
-    try:
-        pj = get_json(PREV_URL.rsplit("/", 1)[0] + "/" + INDEX_OUTPUT,
-                      retries=1, auth=(PREV_USER, PREV_PASS))
-        prev_index = pj.get("apps", {})
-        prev_at = pj.get("generated_at")
+    # Same guard as load_previous: a transient outage must not silently reset
+    # every velocity baseline, since the reset only shows up as an unexplained
+    # empty Trending page a run later.
+    pj = fetch_published(PREV_URL.rsplit("/", 1)[0] + "/" + INDEX_OUTPUT,
+                         "previous charting index")
+    prev_index = pj.get("apps", {})
+    prev_at = pj.get("generated_at")
+    if prev_index:
         print(f"  previous index: {len(prev_index)} apps from {(prev_at or '')[:10]}")
-    except Exception as e:  # noqa: BLE001 — first run has none
-        print(f"  no previous index ({e})")
 
     # The baseline is held SEPARATE from the current reading and only rolls
     # forward once enough time has passed. Naively diffing against "whatever
