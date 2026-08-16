@@ -248,7 +248,19 @@ def main() -> None:
     state = fetch_json(STATE_OUTPUT, {})
     # required=True: an unreadable watchlist must abort the run, never
     # silently become an empty one that overwrites the real thing.
-    watch = fetch_json(WATCHLIST_OUTPUT, {}, required=True).get("apps", {})
+    wl = fetch_json(WATCHLIST_OUTPUT, {}, required=True)
+    watch = wl.get("apps", {})
+
+    # A READABLE but EMPTY watchlist is the failure the required= guard misses,
+    # and it is the one that actually happened: a truncated upload left a valid
+    # JSON file containing no apps, so nothing raised, and the run rebuilt from
+    # scratch. If the file exists at all it should never be empty — only a
+    # genuine 404 (handled above, which yields no "count" key) means first run.
+    if wl and not watch:
+        raise RuntimeError(
+            f"{WATCHLIST_OUTPUT} parsed but contains 0 apps — refusing to "
+            f"rebuild from scratch and overwrite tracking history. Likely a "
+            f"truncated upload; restore or delete the file to start fresh.")
     print(f"  watchlist: {len(watch)} apps")
 
     deadline = time.time() + SCAN_MINUTES * 60

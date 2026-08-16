@@ -1026,8 +1026,22 @@ def upload_to_ftp(local_file: str, remote_name: str) -> None:
                 ftp.mkd(current)
                 ftp.cwd(current)
 
+    # ATOMIC SWAP. FTP STOR truncates the destination the instant it opens it,
+    # so a connection that dies mid-transfer leaves a 0-byte or half-written
+    # file in place of the real one. That is how a 41 MB app_watchlist.json
+    # became a readable-but-empty file: the next run parsed it fine, saw zero
+    # apps, and rebuilt the watchlist from scratch — no error anywhere.
+    #
+    # Uploading to a temp name and renaming means a failed transfer damages only
+    # the temp file and the previous good copy survives untouched.
+    tmp_name = f"{remote_name}.part"
     with open(local_file, "rb") as f:
-        ftp.storbinary(f"STOR {remote_name}", f)
+        ftp.storbinary(f"STOR {tmp_name}", f)
+    try:
+        ftp.delete(remote_name)
+    except ftplib.error_perm:
+        pass  # first upload — nothing to replace
+    ftp.rename(tmp_name, remote_name)
     ftp.quit()
     print(f"    ✅ Uploaded {remote_name}")
 
