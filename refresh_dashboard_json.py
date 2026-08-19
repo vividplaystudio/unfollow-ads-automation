@@ -33,6 +33,18 @@ from datetime import datetime, timedelta, timezone
 # Actions setup needed the ASA token via Google Sheets).
 SPREADSHEET_ID = os.environ.get("SPREADSHEET_ID", "")
 GOOGLE_SERVICE_ACCOUNT_JSON = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON", "")
+# ── Apple Ads Platform API v1 ──────────────────────────────────────────────
+# v1 mints its own token from the same credentials refresh_token.py already
+# uses (identical ES256 JWT, same audience, same `searchadsorg` scope), so the
+# Google-Sheets token relay is no longer needed. Sheets vars are still read as
+# a fallback so an old deployment keeps working until it is updated.
+ASA_CLIENT_ID = os.environ.get("ASA_CLIENT_ID", "")
+ASA_TEAM_ID = os.environ.get("ASA_TEAM_ID", "")
+ASA_KEY_ID = os.environ.get("ASA_KEY_ID", "")
+ASA_PRIVATE_KEY_PEM = os.environ.get("ASA_PRIVATE_KEY_PEM", "")
+ASA_V1_BASE = "https://api.ads.apple.com/v1"
+ASA_V1_ENABLED = bool(ASA_CLIENT_ID and ASA_TEAM_ID and ASA_KEY_ID and ASA_PRIVATE_KEY_PEM)
+
 ASA_ENABLED = bool(SPREADSHEET_ID and GOOGLE_SERVICE_ACCOUNT_JSON)
 # REVENUECAT_API_KEY is required by the full refresh (rc_get_all_customers
 # and rc_enrich_customers), but the fast daily_rc path imports from this
@@ -119,6 +131,191 @@ def sheets_read(google_token: str, range_: str) -> list:
 # ══════════════════════════════════════════════════════════════════
 # Apple Search Ads API
 # ══════════════════════════════════════════════════════════════════
+
+def sign_with_openssl(data: bytes, key_path: str) -> bytes:
+    digest = hashlib.sha256(data).digest()
+    result = subprocess.run(
+        ["openssl", "pkeyutl", "-sign", "-inkey", key_path,
+         "-pkeyopt", "digest:sha256"],
+        input=digest,
+        capture_output=True,
+        check=True,
+    )
+    der_sig = result.stdout
+    assert der_sig[0] == 0x30
+    assert der_sig[2] == 0x02
+    r_len = der_sig[3]
+    r_bytes = der_sig[4:4 + r_len]
+    s_start = 4 + r_len
+    assert der_sig[s_start] == 0x02
+    s_len = der_sig[s_start + 1]
+    s_bytes = der_sig[s_start + 2:s_start + 2 + s_len]
+    r_padded = r_bytes.lstrip(b"\x00").rjust(32, b"\x00")
+    s_padded = s_bytes.lstrip(b"\x00").rjust(32, b"\x00")
+    return r_padded + s_padded
+
+
+def _asa_v1_client_secret() -> str:
+    """Build the ES256 client-secret JWT. Same shape refresh_token.py uses."""
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".pem", delete=False) as f:
+        f.write(ASA_PRIVATE_KEY_PEM.replace("\\n", "\n"))
+        key_path = f.name
+    try:
+        now = int(time.time())
+        header = {"alg": "ES256", "kid": ASA_KEY_ID}
+        payload = {
+            "sub": ASA_CLIENT_ID,
+            "aud": "https://appleid.apple.com",
+            "iat": now,
+            "exp": now + 86400 * 180,
+            "iss": ASA_TEAM_ID,
+        }
+        h = base64url_encode(json.dumps(header, separators=(",", ":")).encode())
+        pl = base64url_encode(json.dumps(payload, separators=(",", ":")).encode())
+        sig = sign_with_openssl(f"{h}.{pl}".encode("ascii"), key_path)
+        return f"{h}.{pl}.{base64url_encode(sig)}"
+    finally:
+        try:
+            os.unlink(key_path)
+        except OSError:
+            pass
+
+
+_ASA_V1_TOKEN = {"value": None, "expires_at": 0}
+
+
+def asa_v1_token() -> str:
+    """Fetch (and cache in-process) a v1 access token."""
+    if _ASA_V1_TOKEN["value"] and time.time() < _ASA_V1_TOKEN["expires_at"] - 60:
+        return _ASA_V1_TOKEN["value"]
+    data = urllib.parse.urlencode({
+        "grant_type": "client_credentials",
+        "client_id": ASA_CLIENT_ID,
+        "client_secret": _asa_v1_client_secret(),
+        "scope": "searchadsorg",
+    }).encode()
+    req = urllib.request.Request(
+        "https://appleid.apple.com/auth/oauth2/token",
+        data=data,
+        headers={"Host": "appleid.apple.com",
+                 "Content-Type": "application/x-www-form-urlencoded"},
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        body = json.loads(resp.read().decode())
+    _ASA_V1_TOKEN["value"] = body["access_token"]
+    _ASA_V1_TOKEN["expires_at"] = time.time() + int(body.get("expires_in", 3600))
+    return _ASA_V1_TOKEN["value"]
+
+
+def asa_v1(method: str, path: str, body: dict = None, retries: int = 3) -> dict:
+    """Call the Apple Ads Platform API v1. Returns {} on failure — ASA data is
+    additive to the dashboard and must never abort the RevenueCat refresh."""
+    url = f"{ASA_V1_BASE}{path}"
+    for attempt in range(retries):
+        try:
+            headers = {
+                "Authorization": f"Bearer {asa_v1_token()}",
+                "X-AP-Context": f"orgId={ORG_ID}",
+                "Content-Type": "application/json",
+            }
+            data = json.dumps(body).encode() if body is not None else None
+            req = urllib.request.Request(url, data=data, headers=headers, method=method)
+            with urllib.request.urlopen(req, timeout=90) as resp:
+                return json.loads(resp.read().decode())
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode()[:300]
+            if e.code == 401 and attempt < retries - 1:
+                _ASA_V1_TOKEN["value"] = None      # force refresh, retry
+                continue
+            if e.code in (429, 500, 502, 503, 504) and attempt < retries - 1:
+                time.sleep(2 ** attempt)
+                continue
+            print(f"  ASA v1 {method} {path} -> {e.code}: {detail}")
+            return {}
+        except Exception as e:
+            if attempt < retries - 1:
+                time.sleep(2 ** attempt)
+                continue
+            print(f"  ASA v1 {method} {path} failed: {e}")
+            return {}
+    return {}
+
+
+def asa_v1_paged(path: str, body: dict, page_size: int = 1000) -> list:
+    """POST a /query endpoint and follow pagination to the end."""
+    rows, offset = [], 0
+    while True:
+        payload = dict(body)
+        payload["pagination"] = {"offset": offset, "pageSize": page_size}
+        resp = asa_v1("POST", path, payload)
+        data = resp.get("data") or []
+        if isinstance(data, dict):
+            data = data.get("rows") or data.get("results") or []
+        rows.extend(data)
+        pg = (resp.get("pagination") or {})
+        total = pg.get("totalResults")
+        if not data or len(data) < page_size:
+            break
+        offset += page_size
+        if total is not None and offset >= total:
+            break
+    return rows
+
+
+def asa_v1_report(entity: str, start: str, end: str,
+                  group_by: list = None, extra_filters: list = None) -> list:
+    """Reporting for APPS. entity: campaigns | adgroups | keywords | ads | searchterms.
+
+    v5 needed one keyword call PER CAMPAIGN; v1 returns everything from a single
+    endpoint. SEARCHTERM does not accept UTC, so it uses the org timezone.
+    """
+    body = {
+        "timeRange": {
+            "start": start,
+            "end": end,
+            "timeZone": "ORTZ" if entity == "searchterms" else "UTC",
+            "granularity": "DAILY",
+        },
+        "sorting": [{"field": "localSpend", "order": "DESCENDING"}],
+    }
+    if group_by:
+        body["groupBy"] = group_by
+    if extra_filters:
+        body["filters"] = extra_filters
+    if entity != "searchterms":
+        body["options"] = {"includeRows": ["EMPTY_METRICS"]}
+    return asa_v1_paged(f"/reports/apps/{entity}/query", body)
+
+
+def asa_v1_keyword_popularity(keywords: list, country: str = "US") -> dict:
+    """Apple's search-volume score per term -> {keyword_lower: popularity}.
+
+    This is the field that makes 'does volume predict profit?' answerable: it
+    lands on the same row as revenue and cost-per-sub in data.json.
+    """
+    if not keywords:
+        return {}
+    out, CHUNK = {}, 100
+    for i in range(0, len(keywords), CHUNK):
+        chunk = keywords[i:i + CHUNK]
+        resp = asa_v1("POST", "/insights/apps/search-term-popularity/query", {
+            "searchTerms": chunk,
+            "countriesOrRegions": [country],
+        })
+        rows = resp.get("data") or []
+        if isinstance(rows, dict):
+            rows = rows.get("rows") or rows.get("results") or []
+        for r in rows:
+            term = (r.get("searchTerm") or r.get("keyword") or "").strip().lower()
+            if not term:
+                continue
+            pop = r.get("searchTermPopularity", r.get("popularity"))
+            if pop is not None:
+                out[term] = pop
+    print(f"  ASA v1: popularity resolved for {len(out)}/{len(keywords)} terms")
+    return out
+
 
 def asa_request(asa_token: str, method: str, path: str, body: dict = None) -> dict:
     url = f"https://api.searchads.apple.com/api/v5{path}"
@@ -757,113 +954,6 @@ def rc_fetch_customer_active(customer_id: str) -> bool:
         return False
 
 
-ENRICH_CACHE_NAME = "rc_enrich_cache.json"
-# Fields produced by enrich_one that are safe to serve from cache.
-_ENRICH_FIELDS = (
-    "_attrs", "_revenue", "_active", "_canceled", "_renewals", "_tier",
-    "_tier_counts", "_tier_revenue", "_sub_count", "_transactions", "_txn_source",
-)
-# Re-check a cached customer at least this often even if nothing changed —
-# catches renewals/cancellations that never produced a webhook we saw.
-_ENRICH_MAX_AGE_DAYS = 7
-
-
-def _ftp_download(remote_name: str, local_path: str) -> bool:
-    """Best-effort FTPS download. Returns True on success."""
-    if not FTP_HOST:
-        return False
-    try:
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-        ftp = ftplib.FTP_TLS(FTP_HOST, timeout=60, context=ctx)
-        ftp.login(FTP_USER, FTP_PASS)
-        ftp.prot_p()
-        ftp.cwd(FTP_PATH)
-        with open(local_path, "wb") as f:
-            ftp.retrbinary(f"RETR {remote_name}", f.write)
-        ftp.quit()
-        return True
-    except Exception as e:
-        print(f"  [cache] FTP download of {remote_name} skipped: {e}")
-        return False
-
-
-def load_enrich_cache() -> dict:
-    """Load the previous enrichment cache. Any failure returns {} which makes
-    this run behave exactly like the old no-cache code — never fatal."""
-    path = None
-    if LOCAL_OUTPUT_DIR:
-        candidate = os.path.join(LOCAL_OUTPUT_DIR, ENRICH_CACHE_NAME)
-        if os.path.exists(candidate):
-            path = candidate
-    if path is None:
-        tmp = os.path.join(tempfile.gettempdir(), ENRICH_CACHE_NAME)
-        if _ftp_download(ENRICH_CACHE_NAME, tmp):
-            path = tmp
-    if path is None:
-        print("  [cache] no previous cache — enriching everyone (first run)")
-        return {}
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            blob = json.load(f)
-        entries = blob.get("customers") or {}
-        print(f"  [cache] loaded {len(entries)} cached customers "
-              f"(written {blob.get('generated_at','?')})")
-        return entries
-    except Exception as e:
-        print(f"  [cache] unreadable ({e}) — enriching everyone")
-        return {}
-
-
-def save_enrich_cache(enriched: list) -> None:
-    """Persist enrichment so the next run only re-fetches what changed."""
-    now = datetime.now(timezone.utc).isoformat()
-    out = {}
-    for c in enriched:
-        cid = c.get("id")
-        if not cid:
-            continue
-        entry = {k: c.get(k) for k in _ENRICH_FIELDS if k in c}
-        entry["_cached_at"] = c.get("_cached_at") or now
-        out[cid] = entry
-    blob = {"generated_at": now, "customers": out}
-    tmp = os.path.join(tempfile.gettempdir(), ENRICH_CACHE_NAME)
-    try:
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(blob, f, separators=(",", ":"))
-        publish_output(tmp, ENRICH_CACHE_NAME)
-        print(f"  [cache] saved {len(out)} customers")
-    except Exception as e:
-        # Never let a cache write failure kill the refresh.
-        print(f"  [cache] save failed (non-fatal): {e}")
-
-
-def _needs_refetch(customer: dict, cached: dict, webhook_events: dict, now_ts: float) -> bool:
-    """Decide whether a customer must be re-fetched from RevenueCat.
-
-    Conservative on purpose: anything that could still be producing revenue is
-    always re-fetched, so cached data can only ever be stale for customers who
-    are inactive AND had no recent webhook activity.
-    """
-    if not cached:
-        return True                       # never seen
-    if customer["id"] in webhook_events:
-        return True                       # transacted recently
-    if cached.get("_active"):
-        return True                       # active subs renew / cancel
-    if (cached.get("_sub_count") or 0) > 0:
-        return True                       # ever-paid: keep renewals accurate
-    stamp = cached.get("_cached_at")
-    if not stamp:
-        return True
-    try:
-        age = now_ts - datetime.fromisoformat(stamp).timestamp()
-    except Exception:
-        return True
-    return age > _ENRICH_MAX_AGE_DAYS * 86400
-
-
 def rc_enrich_customers(customers: list) -> list:
     """
     For each customer, fetch their attributes + subscriptions in parallel.
@@ -879,24 +969,63 @@ def rc_enrich_customers(customers: list) -> list:
 
     webhook_events = fetch_webhook_events()
 
-    # Enrichment is 2 RevenueCat calls per customer and the customer base only
-    # grows, so a full pass got slower every day (15 min in May -> 45+ min by
-    # August, overlapping its own hourly trigger). Serve unchanged customers
-    # from the previous run's cache and only re-fetch what can still move:
-    # new customers, anyone with a recent webhook, and anyone who ever paid.
-    cache = load_enrich_cache()
-    now_ts = datetime.now(timezone.utc).timestamp()
-    to_enrich, from_cache = [], []
+    # ── Only enrich customers who can appear in a revenue table ─────────────
+    # The revenue/channel/campaign/keyword tables are built exclusively from
+    # customers with transactions. Enriching everyone meant 2 RevenueCat calls
+    # for every person who ever opened the app -- hundreds of thousands who
+    # paid nothing -- so runtime tracked total install history rather than
+    # revenue activity: 15 min in May, 4+ hours by August, at which point runs
+    # outlasted their own hourly trigger and data.json silently froze.
+    #
+    # The webhook log already identifies everyone who transacted, and it keeps
+    # 60 days while the widest reporting window is 30 -- so it fully covers
+    # every range the dashboard reports, with 30 days of headroom.
+    #
+    # Customers with no transactions are given explicit zeroed fields rather
+    # than being dropped, so cohort/retention and totals still see the full
+    # population; they simply cost no API calls.
+    recent_cutoff_ms = (datetime.now(timezone.utc) - timedelta(days=60)).timestamp() * 1000
+
+    def _seen_recently(c) -> bool:
+        """Installed inside the webhook window -- may have paid without us
+        having captured the webhook yet. Cheap insurance against undercounting
+        brand-new payers."""
+        fs = c.get("first_seen_at")
+        if not fs:
+            return False
+        try:
+            if isinstance(fs, (int, float)):
+                return float(fs) >= recent_cutoff_ms
+            return datetime.fromisoformat(
+                str(fs).replace("Z", "+00:00")
+            ).timestamp() * 1000 >= recent_cutoff_ms
+        except Exception:
+            return True          # unparseable -> enrich, never silently skip
+
+    to_enrich, skipped = [], []
     for c in customers:
-        cached = cache.get(c["id"])
-        if _needs_refetch(c, cached, webhook_events, now_ts):
+        if c["id"] in webhook_events or _seen_recently(c):
             to_enrich.append(c)
         else:
-            for k, v in cached.items():
-                c[k] = v
-            from_cache.append(c)
-    print(f"  Enriching {len(to_enrich)} customers "
-          f"({len(from_cache)} served from cache, {len(customers)} total)...")
+            skipped.append(c)
+
+    for c in skipped:
+        c["_attrs"] = {}
+        c["_revenue"] = 0.0
+        c["_active"] = False
+        c["_canceled"] = False
+        c["_renewals"] = 0
+        c["_tier"] = "none"
+        c["_tier_counts"] = {}
+        c["_tier_revenue"] = {}
+        c["_sub_count"] = 0
+        c["_transactions"] = []
+        c["_txn_source"] = "none"
+
+    pct = (len(to_enrich) / len(customers) * 100) if customers else 0
+    print(f"  Enriching {len(to_enrich)} customers with revenue activity "
+          f"({pct:.1f}% of {len(customers)}); {len(skipped)} never transacted "
+          f"-> zero API calls")
 
     def enrich_one(customer):
         cid = customer["id"]
@@ -939,10 +1068,9 @@ def rc_enrich_customers(customers: list) -> list:
             if done % 100 == 0:
                 print(f"    {done}/{len(to_enrich)}")
 
-    # Cached customers are already fully populated — fold them back in so every
-    # downstream consumer still sees the complete customer list.
-    enriched.extend(from_cache)
-    save_enrich_cache(enriched)
+    # Non-transacting customers carry zeroed fields — fold them back so
+    # cohort/retention and population counts still see everyone.
+    enriched.extend(skipped)
 
     asa_count = sum(1 for c in enriched if c.get("_attrs", {}).get("$mediaSource") == "Apple Search Ads")
     with_subs = sum(1 for c in enriched if (c.get("_sub_count") or 0) > 0)
@@ -1568,19 +1696,38 @@ def main() -> None:
         )
         sys.exit(1)
 
-    if ASA_ENABLED:
-        google_token = get_google_access_token()
-        config = sheets_read(google_token, "_Config!B1:B1")
-        if not config or not config[0]:
-            print("⚠ ASA token cell empty — running RC-only.")
-            asa_token = None
+    # Prefer Apple Ads Platform API v1: it mints its own token, so the old
+    # Google-Sheets relay (which expired constantly and took ASA + RC data down
+    # with it) is not involved. Falls back to the v5/Sheets path if the v1
+    # credentials are not configured. v5 retires 2027-01-26.
+    use_v1 = ASA_V1_ENABLED
+    asa_token = None
+    if use_v1:
+        try:
+            asa_v1_token()
+            print("ASA: using Apple Ads Platform API v1")
+        except Exception as e:
+            print(f"⚠ ASA v1 auth failed ({e}) — falling back to v5.")
+            use_v1 = False
+    if not use_v1:
+        if ASA_ENABLED:
+            google_token = get_google_access_token()
+            config = sheets_read(google_token, "_Config!B1:B1")
+            if not config or not config[0]:
+                print("⚠ ASA token cell empty — running RC-only.")
+                asa_token = None
+            else:
+                asa_token = config[0][0]
+                print("ASA: using legacy Campaign Management API v5 (retires 2027-01-26)")
         else:
-            asa_token = config[0][0]
-    else:
-        print("⚠ SPREADSHEET_ID / GOOGLE_SERVICE_ACCOUNT_JSON not set — skipping ASA fetch, running RC-only.")
-        asa_token = None
+            print("⚠ No ASA credentials (v1 or Sheets) — skipping ASA fetch, running RC-only.")
+            asa_token = None
 
-    if asa_token:
+    if use_v1:
+        print("Fetching campaigns (v1)...")
+        campaigns = asa_v1_paged("/campaigns/query", {})
+        print(f"Found {len(campaigns)} campaigns")
+    elif asa_token:
         print("Fetching campaigns...")
         campaigns = asa_get_campaigns(asa_token)
         print(f"Found {len(campaigns)} campaigns")
@@ -1753,6 +1900,17 @@ def main() -> None:
         for key in r_data:
             kw_union.add(key)
 
+    # Apple's search-volume score per term (v1 only). Landing it on the same
+    # row as revenue/cost-per-sub is what makes "does volume predict profit?"
+    # answerable directly from data.json instead of by eye.
+    keyword_popularity = {}
+    if use_v1:
+        try:
+            terms = sorted({kw for (_cid, kw) in kw_union if kw})
+            keyword_popularity = asa_v1_keyword_popularity(terms)
+        except Exception as e:
+            print(f"  popularity lookup skipped: {e}")
+
     keywords_out = []
     for (cid, kw_lower) in kw_union:
         meta = campaign_meta.get(cid, {})
@@ -1789,6 +1947,9 @@ def main() -> None:
             "status": status,
             "bid": bid,
             "impression_share": is_share,
+            # Apple search-volume score. None when unavailable (v5, or term not
+            # resolved) — the dashboard should treat None as "unknown", not 0.
+            "popularity": keyword_popularity.get(kw_lower),
         }
         for r in ranges:
             d = asa_keyword_data[r].get((cid, kw_lower), {"spend": 0, "impressions": 0, "taps": 0, "installs": 0, "cpt": 0})
