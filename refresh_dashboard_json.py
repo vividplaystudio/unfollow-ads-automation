@@ -1882,6 +1882,16 @@ def main() -> None:
             rev_data = rev_index["by_campaign"].get(meta["name"], {}).get(r) or {}
             row[f"revenue_{r}"] = round(rev_data.get("revenue", 0), 2)
             row[f"subs_{r}"] = rev_data.get("paid_subs", 0)
+
+            _sp = row[f"spend_{r}"]
+            _inst = row[f"installs_{r}"]
+            _subs = rev_data.get("paid_subs", 0)
+            _rev = rev_data.get("revenue", 0)
+            row[f"profit_{r}"] = round(_rev * 0.85 - _sp, 2)
+            row[f"inst_to_sub_{r}"] = round(_subs / _inst * 100, 1) if _inst else None
+            row[f"rev_per_install_{r}"] = round(_rev / _inst, 2) if _inst else None
+            row[f"cpa_{r}"] = round(_sp / _subs, 2) if _subs else None
+            row[f"roas_{r}"] = round(_rev / _sp * 100) if _sp else None
             row[f"asa_users_{r}"] = rev_data.get("users", 0)
             row[f"active_{r}"] = rev_data.get("active", 0)
             row[f"canceled_{r}"] = rev_data.get("canceled", 0)
@@ -1893,6 +1903,50 @@ def main() -> None:
             row[f"monthly_rev_{r}"] = round(rev_data.get("monthly_rev", 0), 2)
             row[f"yearly_rev_{r}"] = round(rev_data.get("yearly_rev", 0), 2)
         campaigns_out.append(row)
+
+    # ── Search terms: what people ACTUALLY typed ───────────────────────────
+    # Distinct from keywords, which is what you bid on. Two uses: spot spend on
+    # terms you never wanted (-> negatives), and spot terms converting well
+    # that you are not bidding on yet (-> promote to exact). No v5 equivalent.
+    searchterms_out = []
+    if use_v1:
+        try:
+            for r, (rs, re_) in ranges.items():
+                for row_ in asa_v1_report("searchterms", rs.isoformat(), re_.isoformat()):
+                    m = row_.get("metadata", {}) or {}
+                    t = row_.get("total", {}) or {}
+                    term = (m.get("searchTermText") or m.get("searchTerm") or "").strip()
+                    if not term:
+                        continue
+                    searchterms_out.append({
+                        "range": r,
+                        "search_term": term,
+                        "keyword": m.get("keyword", ""),
+                        "match": m.get("matchType", ""),
+                        "campaign_id": m.get("campaignId"),
+                        "ad_group_id": m.get("adGroupId"),
+                        "spend": round(float((t.get("localSpend") or {}).get("amount", 0) or 0), 2),
+                        "impressions": int(t.get("impressions", 0) or 0),
+                        "taps": int(t.get("taps", 0) or 0),
+                        "installs": int(t.get("totalInstalls", 0) or 0),
+                    })
+            print(f"  ASA v1: {len(searchterms_out)} search-term rows")
+        except Exception as e:
+            print(f"  search-terms fetch skipped: {e}")
+
+    # ── Apple's own recommendations ────────────────────────────────────────
+    recommendations_out = []
+    if use_v1:
+        for kind, path in (("daily_budget", "/recommendations/daily-budgets/query"),
+                           ("target_cpa", "/recommendations/target-cpas/query")):
+            try:
+                for rec in asa_v1_paged(path, {}):
+                    rec["_kind"] = kind
+                    recommendations_out.append(rec)
+            except Exception as e:
+                print(f"  {kind} recommendations skipped: {e}")
+        if recommendations_out:
+            print(f"  ASA v1: {len(recommendations_out)} recommendations")
 
     # Keywords list — merge across ranges by (campaign_id, keyword)
     kw_union = set()
@@ -1962,6 +2016,24 @@ def main() -> None:
             rev_data = rev_index["by_keyword"].get((meta.get("name", ""), kw_lower), {}).get(r) or {}
             row[f"revenue_{r}"] = round(rev_data.get("revenue", 0), 2)
             row[f"subs_{r}"] = rev_data.get("paid_subs", 0)
+
+            # Derived decision metrics. Arithmetic on columns already present,
+            # but computing them here means the dashboard never has to and the
+            # same definition is used everywhere.
+            _sp = row[f"spend_{r}"]
+            _inst = row[f"installs_{r}"]
+            _subs = rev_data.get("paid_subs", 0)
+            _rev = rev_data.get("revenue", 0)
+            # Profit in dollars after Apple's cut — ROAS tells you efficiency,
+            # dollars tell you what is actually worth scaling.
+            row[f"profit_{r}"] = round(_rev * 0.85 - _sp, 2)
+            # The number that separates a keyword buying cheap junk traffic
+            # from one buying buyers.
+            row[f"inst_to_sub_{r}"] = round(_subs / _inst * 100, 1) if _inst else None
+            # Comparable across keywords with very different volumes.
+            row[f"rev_per_install_{r}"] = round(_rev / _inst, 2) if _inst else None
+            row[f"cpa_{r}"] = round(_sp / _subs, 2) if _subs else None
+            row[f"roas_{r}"] = round(_rev / _sp * 100) if _sp else None
             row[f"asa_users_{r}"] = rev_data.get("users", 0)
             row[f"active_{r}"] = rev_data.get("active", 0)
             row[f"canceled_{r}"] = rev_data.get("canceled", 0)
@@ -2029,6 +2101,8 @@ def main() -> None:
     output = {
         "last_updated": datetime.now(timezone.utc).isoformat(),
         "campaigns": campaigns_out,
+        "search_terms": searchterms_out,
+        "recommendations": recommendations_out,
         "keywords": keywords_out,
         "ads": ads_out,
         "ad_groups": adgroups_out,
