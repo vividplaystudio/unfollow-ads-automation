@@ -237,18 +237,38 @@ def fetch_statuses(account_id: str, level: str) -> dict:
 
     level: 'campaigns' | 'adsets' | 'ads'
     """
+    # Budgets live on the campaign/adset OBJECT, never on insights — which is
+    # why the row-level tables carry no budget column. Pull them here so every
+    # consumer can compare spend against the cap that produced it.
+    fields = "id,name,status,effective_status"
+    if level in ("campaigns", "adsets"):
+        fields += ",daily_budget,lifetime_budget"
     params = {
-        "fields": "id,name,status,effective_status",
+        "fields": fields,
         "limit": 500,
     }
     rows = meta_paginated(f"act_{account_id}/{level}", params)
+
+    def _money(v):
+        """Meta returns budgets in minor units (cents). '5000' -> 50.0."""
+        if v in (None, ""):
+            return None
+        try:
+            return round(int(v) / 100.0, 2)
+        except (TypeError, ValueError):
+            return None
+
     out = {}
     for r in rows:
-        out[r["id"]] = {
+        entry = {
             "name": r.get("name", ""),
             "status": r.get("status", ""),
             "effective_status": r.get("effective_status", ""),
         }
+        if level in ("campaigns", "adsets"):
+            entry["daily_budget"] = _money(r.get("daily_budget"))
+            entry["lifetime_budget"] = _money(r.get("lifetime_budget"))
+        out[r["id"]] = entry
     return out
 
 

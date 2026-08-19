@@ -757,6 +757,113 @@ def rc_fetch_customer_active(customer_id: str) -> bool:
         return False
 
 
+ENRICH_CACHE_NAME = "rc_enrich_cache.json"
+# Fields produced by enrich_one that are safe to serve from cache.
+_ENRICH_FIELDS = (
+    "_attrs", "_revenue", "_active", "_canceled", "_renewals", "_tier",
+    "_tier_counts", "_tier_revenue", "_sub_count", "_transactions", "_txn_source",
+)
+# Re-check a cached customer at least this often even if nothing changed —
+# catches renewals/cancellations that never produced a webhook we saw.
+_ENRICH_MAX_AGE_DAYS = 7
+
+
+def _ftp_download(remote_name: str, local_path: str) -> bool:
+    """Best-effort FTPS download. Returns True on success."""
+    if not FTP_HOST:
+        return False
+    try:
+        ctx = ssl.create_default_context()
+        ctx.check_hostname = False
+        ctx.verify_mode = ssl.CERT_NONE
+        ftp = ftplib.FTP_TLS(FTP_HOST, timeout=60, context=ctx)
+        ftp.login(FTP_USER, FTP_PASS)
+        ftp.prot_p()
+        ftp.cwd(FTP_PATH)
+        with open(local_path, "wb") as f:
+            ftp.retrbinary(f"RETR {remote_name}", f.write)
+        ftp.quit()
+        return True
+    except Exception as e:
+        print(f"  [cache] FTP download of {remote_name} skipped: {e}")
+        return False
+
+
+def load_enrich_cache() -> dict:
+    """Load the previous enrichment cache. Any failure returns {} which makes
+    this run behave exactly like the old no-cache code — never fatal."""
+    path = None
+    if LOCAL_OUTPUT_DIR:
+        candidate = os.path.join(LOCAL_OUTPUT_DIR, ENRICH_CACHE_NAME)
+        if os.path.exists(candidate):
+            path = candidate
+    if path is None:
+        tmp = os.path.join(tempfile.gettempdir(), ENRICH_CACHE_NAME)
+        if _ftp_download(ENRICH_CACHE_NAME, tmp):
+            path = tmp
+    if path is None:
+        print("  [cache] no previous cache — enriching everyone (first run)")
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            blob = json.load(f)
+        entries = blob.get("customers") or {}
+        print(f"  [cache] loaded {len(entries)} cached customers "
+              f"(written {blob.get('generated_at','?')})")
+        return entries
+    except Exception as e:
+        print(f"  [cache] unreadable ({e}) — enriching everyone")
+        return {}
+
+
+def save_enrich_cache(enriched: list) -> None:
+    """Persist enrichment so the next run only re-fetches what changed."""
+    now = datetime.now(timezone.utc).isoformat()
+    out = {}
+    for c in enriched:
+        cid = c.get("id")
+        if not cid:
+            continue
+        entry = {k: c.get(k) for k in _ENRICH_FIELDS if k in c}
+        entry["_cached_at"] = c.get("_cached_at") or now
+        out[cid] = entry
+    blob = {"generated_at": now, "customers": out}
+    tmp = os.path.join(tempfile.gettempdir(), ENRICH_CACHE_NAME)
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(blob, f, separators=(",", ":"))
+        publish_output(tmp, ENRICH_CACHE_NAME)
+        print(f"  [cache] saved {len(out)} customers")
+    except Exception as e:
+        # Never let a cache write failure kill the refresh.
+        print(f"  [cache] save failed (non-fatal): {e}")
+
+
+def _needs_refetch(customer: dict, cached: dict, webhook_events: dict, now_ts: float) -> bool:
+    """Decide whether a customer must be re-fetched from RevenueCat.
+
+    Conservative on purpose: anything that could still be producing revenue is
+    always re-fetched, so cached data can only ever be stale for customers who
+    are inactive AND had no recent webhook activity.
+    """
+    if not cached:
+        return True                       # never seen
+    if customer["id"] in webhook_events:
+        return True                       # transacted recently
+    if cached.get("_active"):
+        return True                       # active subs renew / cancel
+    if (cached.get("_sub_count") or 0) > 0:
+        return True                       # ever-paid: keep renewals accurate
+    stamp = cached.get("_cached_at")
+    if not stamp:
+        return True
+    try:
+        age = now_ts - datetime.fromisoformat(stamp).timestamp()
+    except Exception:
+        return True
+    return age > _ENRICH_MAX_AGE_DAYS * 86400
+
+
 def rc_enrich_customers(customers: list) -> list:
     """
     For each customer, fetch their attributes + subscriptions in parallel.
@@ -771,8 +878,25 @@ def rc_enrich_customers(customers: list) -> list:
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     webhook_events = fetch_webhook_events()
-    to_enrich = list(customers)
-    print(f"  Enriching {len(to_enrich)} customers (no date cutoff)...")
+
+    # Enrichment is 2 RevenueCat calls per customer and the customer base only
+    # grows, so a full pass got slower every day (15 min in May -> 45+ min by
+    # August, overlapping its own hourly trigger). Serve unchanged customers
+    # from the previous run's cache and only re-fetch what can still move:
+    # new customers, anyone with a recent webhook, and anyone who ever paid.
+    cache = load_enrich_cache()
+    now_ts = datetime.now(timezone.utc).timestamp()
+    to_enrich, from_cache = [], []
+    for c in customers:
+        cached = cache.get(c["id"])
+        if _needs_refetch(c, cached, webhook_events, now_ts):
+            to_enrich.append(c)
+        else:
+            for k, v in cached.items():
+                c[k] = v
+            from_cache.append(c)
+    print(f"  Enriching {len(to_enrich)} customers "
+          f"({len(from_cache)} served from cache, {len(customers)} total)...")
 
     def enrich_one(customer):
         cid = customer["id"]
@@ -808,10 +932,17 @@ def rc_enrich_customers(customers: list) -> list:
     with ThreadPoolExecutor(max_workers=8) as executor:
         futures = [executor.submit(enrich_one, c) for c in to_enrich]
         for future in as_completed(futures):
-            enriched.append(future.result())
+            c = future.result()
+            c["_cached_at"] = datetime.now(timezone.utc).isoformat()
+            enriched.append(c)
             done += 1
             if done % 100 == 0:
                 print(f"    {done}/{len(to_enrich)}")
+
+    # Cached customers are already fully populated — fold them back in so every
+    # downstream consumer still sees the complete customer list.
+    enriched.extend(from_cache)
+    save_enrich_cache(enriched)
 
     asa_count = sum(1 for c in enriched if c.get("_attrs", {}).get("$mediaSource") == "Apple Search Ads")
     with_subs = sum(1 for c in enriched if (c.get("_sub_count") or 0) > 0)
