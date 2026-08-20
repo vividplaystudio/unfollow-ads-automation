@@ -73,12 +73,22 @@ def ingest_apple(conn, days: int = LOOKBACK_DAYS) -> dict:
     start, end = window[0], window[-1]
     t0 = time.time()
 
+    # Keyword reports are per-campaign in v1 (a campaignId filter is required),
+    # so the campaign list has to exist before this runs -- ingest_apple_dims()
+    # populates it, and main() calls that first.
+    campaign_ids = [
+        r["campaign_id"] for r in conn.execute(
+            "SELECT campaign_id FROM campaign_dim WHERE source='apple'"
+        )
+    ]
+    if not campaign_ids:
+        print("  [ads] no Apple campaigns known -- run ingest_apple_dims first")
+        return {"rows": 0}
+
     rows, kw_dim = [], []
-    try:
-        report = legacy.asa_v1_report("keywords", start, end, group_by=["countryOrRegion"])
-    except Exception as e:
-        print(f"  [ads] Apple keyword report failed: {type(e).__name__}: {e}")
-        report = []
+    report = legacy.asa_v1_report_all_campaigns(
+        "keywords", start, end, campaign_ids, group_by=["countryOrRegion"]
+    )
 
     for r in report:
         meta = r.get("metadata") or {}
@@ -116,7 +126,8 @@ def ingest_apple(conn, days: int = LOOKBACK_DAYS) -> dict:
     store.upsert_keyword_dim(conn, kw_dim)
     conn.commit()
     print(f"  [ads] apple: {n} keyword-days {start}..{end} "
-          f"({len(kw_dim)} keywords) in {time.time()-t0:.0f}s")
+          f"({len(kw_dim)} keywords across {len(campaign_ids)} campaigns) "
+          f"in {time.time()-t0:.0f}s")
     return {"rows": n}
 
 

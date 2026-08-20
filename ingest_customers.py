@@ -39,18 +39,18 @@ from ingest_rc import normalize_channel
 
 # Upper bound on how many customers get attribute lookups in a single run.
 #
-# Kept deliberately small. The 2026-08-20 backfill enriched 40,000 customers in
-# 744 seconds and found attribution for ZERO of them, because RevenueCat only
-# carries $mediaSource for Apple Search Ads installs -- Meta attribution lives
-# in Adjust and never reaches RC. Meanwhile the webhook log already delivers
-# ASA attribution for every payer, and gave 144 attributed customers where the
-# old full API walk found 23.
+# The initial backlog is drained; this now only sees new installs.
 #
-# So this backlog is worth draining slowly rather than urgently: its only
-# unique contribution is ASA-attributed NON-payers, which feed the asa_users
-# column, and Apple's own per-keyword installs metric measures that better.
-# Raise it (ATTR_BATCH=40000) for a deliberate one-off once ASA is running
-# again and there is actually something to find.
+# Worth recording how the yield behaves, because the first pass is misleading:
+# enriching the NEWEST 40,000 customers returned zero attribution, since recent
+# growth is Meta-driven and Meta attribution lives in Adjust, never reaching
+# RevenueCat. The next pass over the remaining 31,515 -- the older, Apple
+# Search Ads era -- returned 1,910 (6.1%). So a zero-yield batch means "these
+# particular customers came from a channel RC cannot see", not "this step is
+# useless".
+#
+# Steady state is roughly a day of installs, so a small cap is right. Raise it
+# (ATTR_BATCH=40000) only to drain a fresh backlog.
 ATTR_BATCH = int(os.environ.get("ATTR_BATCH", "2000"))
 ATTR_WORKERS = int(os.environ.get("ATTR_WORKERS", "8"))
 
@@ -137,9 +137,9 @@ def enrich_attribution(conn, limit: int = ATTR_BATCH) -> dict:
     print(f"  [cold] enriched {n} customers in {time.time()-t0:.0f}s: "
           f"{attributed} attributed ({yield_pct:.1f}% yield); {remaining} still unknown")
     if n >= 500 and attributed == 0:
-        print("  [cold] note: zero yield — RC only stores attribution for Apple "
-              "Search Ads installs, and those already arrive via the webhook. "
-              "Set ATTR_BATCH=0 to skip this step entirely.")
+        print("  [cold] note: zero yield on this batch -- expected while the "
+              "customers being enriched came from Meta, whose attribution "
+              "lives in Adjust and never reaches RevenueCat.")
     return {"fetched": n, "attributed": attributed, "remaining": remaining}
 
 

@@ -253,7 +253,14 @@ def asa_v1_paged(path: str, body: dict, page_size: int = 1000) -> list:
         payload = dict(body)
         payload["pagination"] = {"offset": offset, "pageSize": page_size}
         resp = asa_v1("POST", path, payload)
-        data = resp.get("data") or []
+        # The management endpoints (/campaigns/query, /adgroups/query) return
+        # their rows under "result"; the reporting endpoints use "data". We
+        # only ever read "data", so every campaign fetch came back empty and
+        # reported "0 campaigns" with nothing to explain it.
+        data = resp.get("data")
+        if data is None:
+            data = resp.get("result")
+        data = data or []
         if isinstance(data, dict):
             # Reporting endpoints nest rows under reportingDataResponse; the
             # management endpoints return a bare list. Try each known shape.
@@ -279,11 +286,16 @@ def asa_v1_paged(path: str, body: dict, page_size: int = 1000) -> list:
 
 
 def asa_v1_report(entity: str, start: str, end: str,
-                  group_by: list = None, extra_filters: list = None) -> list:
+                  group_by: list = None, extra_filters: list = None,
+                  campaign_id=None) -> list:
     """Reporting for APPS. entity: campaigns | adgroups | keywords | ads | searchterms.
 
-    v5 needed one keyword call PER CAMPAIGN; v1 returns everything from a single
-    endpoint. SEARCHTERM does not accept UTC, so it uses the org timezone.
+    Keyword and search-term reports are still PER CAMPAIGN in v1, exactly as
+    in v5 -- omitting the filter fails validation with "campaignId filter is
+    required for KEYWORD reports when promotedObjectType is APPS". Callers
+    should use asa_v1_report_all_campaigns() rather than handling that here.
+
+    SEARCHTERM does not accept UTC, so it uses the org timezone.
     """
     body = {
         "timeRange": {
@@ -298,11 +310,36 @@ def asa_v1_report(entity: str, start: str, end: str,
     }
     if group_by:
         body["groupBy"] = group_by
-    if extra_filters:
-        body["filters"] = extra_filters
-    if entity != "searchterms":
+    filters = list(extra_filters or [])
+    if campaign_id is not None:
+        filters.append({"field": "campaignId", "operator": "EQUALS",
+                        "values": [str(campaign_id)]})
+    if filters:
+        body["filters"] = filters
+    # EMPTY_METRICS is rejected alongside a campaignId filter, and it is only
+    # there to surface keywords that spent nothing -- which a per-campaign
+    # report already covers.
+    if entity not in ("searchterms", "keywords"):
         body["options"] = {"includeRows": ["EMPTY_METRICS"]}
     return asa_v1_paged(f"/reports/apps/{entity}/query", body)
+
+
+def asa_v1_report_all_campaigns(entity: str, start: str, end: str,
+                                campaign_ids, group_by: list = None) -> list:
+    """Run a per-campaign report across every campaign and concatenate.
+
+    One campaign failing must not lose the others, so failures are reported
+    and skipped rather than raised.
+    """
+    rows = []
+    for cid in campaign_ids:
+        try:
+            rows.extend(asa_v1_report(entity, start, end, group_by=group_by,
+                                      campaign_id=cid) or [])
+        except Exception as e:
+            print(f"  ASA v1 {entity} report failed for campaign {cid}: "
+                  f"{type(e).__name__}: {e}")
+    return rows
 
 
 def asa_v1_keyword_popularity(keywords: list, country: str = "US") -> dict:
