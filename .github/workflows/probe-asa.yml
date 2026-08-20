@@ -8,6 +8,16 @@ name: Probe Apple Ads API
 
 on:
   workflow_dispatch:
+    inputs:
+      path:
+        description: "Call ONE endpoint instead of the full sweep, e.g. /campaigns/query"
+        default: ""
+      method:
+        description: "HTTP method for that endpoint"
+        default: "POST"
+      body:
+        description: "JSON request body for that endpoint"
+        default: ""
 
 jobs:
   probe:
@@ -25,4 +35,7 @@ jobs:
           ASA_KEY_ID: ${{ secrets.ASA_KEY_ID }}
           ASA_PRIVATE_KEY_PEM: ${{ secrets.ASA_PRIVATE_KEY_PEM }}
           ASA_ORG_ID: ${{ secrets.ASA_ORG_ID }}
+          PROBE_PATH: ${{ inputs.path }}
+          PROBE_METHOD: ${{ inputs.method }}
+          PROBE_BODY: ${{ inputs.body }}
         run: python3 -u tools/probe_asa.py

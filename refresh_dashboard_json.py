@@ -276,7 +276,10 @@ def asa_v1_paged(path: str, body: dict, page_size: int = 1000) -> list:
                      if isinstance(resp.get("data"), dict) else ""))
         rows.extend(data)
         pg = (resp.get("pagination") or {})
-        total = pg.get("totalResults")
+        # v1 reports totalCount; v5 called it totalResults. Reading only the
+        # old name meant the early-exit never fired and paging relied purely
+        # on a short page.
+        total = pg.get("totalCount", pg.get("totalResults"))
         if not data or len(data) < page_size:
             break
         offset += page_size

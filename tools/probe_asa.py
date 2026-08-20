@@ -68,6 +68,43 @@ def attempt(label, fn):
         return None
 
 
+# Endpoints safe to call ad hoc. Apple's management API creates and mutates
+# campaigns through POST, so an open "call any path" tool could spend real
+# money by accident. Only read-shaped endpoints are allowed: the /query and
+# /find forms plus a short allowlist.
+READ_ONLY_SUFFIXES = ("/query", "/find")
+READ_ONLY_PATHS = ("/acls", "/me", "/campaigns", "/adgroups")
+
+
+def is_read_only(method: str, path: str) -> bool:
+    if method.upper() == "GET":
+        return True
+    p = path.split("?", 1)[0].rstrip("/")
+    return p.endswith(READ_ONLY_SUFFIXES) or p in READ_ONLY_PATHS
+
+
+def ad_hoc(method: str, path: str, body_json: str) -> int:
+    """Call one endpoint and dump the reply. Driven by workflow inputs so the
+    API can be explored without a code change and a deploy per question."""
+    if not is_read_only(method, path):
+        print(f"REFUSED: {method} {path} is not a read-only endpoint. "
+              f"Allowed: GET anything, or POST to a path ending in "
+              f"{READ_ONLY_SUFFIXES} or one of {READ_ONLY_PATHS}.")
+        return 2
+    try:
+        body = json.loads(body_json) if body_json.strip() else {}
+    except json.JSONDecodeError as e:
+        print(f"body is not valid JSON: {e}")
+        return 2
+    print(f"{method} {path}")
+    print(f"body: {json.dumps(body)[:2000]}")
+    resp = attempt(f"{method} {path}", lambda: legacy.asa_v1(method, path, body))
+    if resp:
+        print("\n--- full response (truncated to 12k) ---")
+        print(json.dumps(resp, indent=2, default=str)[:12000])
+    return 0
+
+
 def main() -> int:
     if not legacy.ASA_V1_ENABLED:
         print("ASA_V1_ENABLED is false — one of ASA_CLIENT_ID / ASA_TEAM_ID / "
@@ -82,6 +119,12 @@ def main() -> int:
         print(f"auth FAILED: {type(e).__name__}: {e}")
         return 1
 
+    # Ad-hoc mode: one endpoint, supplied by the caller.
+    path = os.environ.get("PROBE_PATH", "").strip()
+    if path:
+        return ad_hoc(os.environ.get("PROBE_METHOD", "POST").strip() or "POST",
+                      path, os.environ.get("PROBE_BODY", "") or "")
+
     today = datetime.now(timezone.utc).date()
     start = (today - timedelta(days=30)).isoformat()
     end = today.isoformat()
@@ -94,7 +137,7 @@ def main() -> int:
     camps_raw = attempt(
         "POST /campaigns/query (raw envelope)",
         lambda: legacy.asa_v1("POST", "/campaigns/query",
-                              {"pagination": {"offset": 0, "limit": 1000}}),
+                              {"pagination": {"offset": 0, "pageSize": 1000}}),
     )
     campaign_ids = []
     if isinstance(camps_raw, dict):
@@ -106,10 +149,6 @@ def main() -> int:
                 campaign_ids.append(str(c["id"]))
         print(f"\n  -> parsed {len(campaign_ids)} campaign ids: {campaign_ids[:6]}")
 
-    # Some tenants use GET /campaigns instead of the query form.
-    attempt("GET /campaigns?limit=5",
-            lambda: legacy.asa_v1("GET", "/campaigns?limit=5"))
-
     if not campaign_ids:
         print("\n!! No campaign ids parsed — later probes will be limited.")
 
@@ -118,11 +157,11 @@ def main() -> int:
         cid = campaign_ids[0]
         attempt(f"POST /campaigns/{cid}/adgroups/query",
                 lambda: legacy.asa_v1("POST", f"/campaigns/{cid}/adgroups/query",
-                                      {"pagination": {"offset": 0, "limit": 100}}))
+                                      {"pagination": {"offset": 0, "pageSize": 100}}))
         attempt(f"POST /campaigns/{cid}/adgroups/targetingkeywords/find",
                 lambda: legacy.asa_v1(
                     "POST", f"/campaigns/{cid}/adgroups/targetingkeywords/find",
-                    {"pagination": {"offset": 0, "limit": 100}}))
+                    {"pagination": {"offset": 0, "pageSize": 100}}))
 
     # ── Reporting ────────────────────────────────────────────────────────
     def report(entity, cid=None, group_by=None, tz="UTC", empty=False):
@@ -155,19 +194,43 @@ def main() -> int:
                 lambda: report("searchterms", cid=cid, tz="ORTZ"))
 
     # ── Insights: search volume ──────────────────────────────────────────
-    attempt("POST /insights/apps/search-term-popularity/query",
-            lambda: legacy.asa_v1(
-                "POST", "/insights/apps/search-term-popularity/query",
-                {"searchTerms": ["instagram unfollowers", "follower tracker"],
-                 "countriesOrRegions": ["US"]}))
+    # "searchTerms" is rejected as an unrecognized property; try the plausible
+    # alternatives in one pass rather than one deploy each.
+    TERMS = ["instagram unfollowers", "follower tracker"]
+    for body in (
+        {"searchTerms": TERMS, "countriesOrRegions": ["US"]},
+        {"searchTerms": TERMS, "countryOrRegion": "US"},
+        {"terms": TERMS, "countriesOrRegions": ["US"]},
+        {"keywords": TERMS, "countriesOrRegions": ["US"]},
+        {"query": TERMS, "countriesOrRegions": ["US"]},
+        {"selector": {"conditions": [
+            {"field": "searchTerm", "operator": "IN", "values": TERMS}]}},
+        {"filters": [{"field": "searchTerm", "operator": "IN", "values": TERMS},
+                     {"field": "countryOrRegion", "operator": "EQUALS",
+                      "values": ["US"]}]},
+        {"countriesOrRegions": ["US"]},
+        {},
+    ):
+        attempt(f"POST /insights/apps/search-term-popularity/query "
+                f"body={sorted(body.keys())}",
+                lambda b=body: legacy.asa_v1(
+                    "POST", "/insights/apps/search-term-popularity/query", b))
 
     # ── Recommendations ──────────────────────────────────────────────────
+    # "Filters are required and cannot be empty" — so supply one. Without a
+    # campaign id we can still learn the accepted filter shape from the error.
+    rec_filters = ([{"field": "campaignId", "operator": "IN",
+                     "values": campaign_ids[:20]}] if campaign_ids else
+                   [{"field": "status", "operator": "IN",
+                     "values": ["ACTIVE", "APPLIED", "DISMISSED"]}])
     for path in ("/recommendations/daily-budgets/query",
                  "/recommendations/target-cpas/query",
                  "/recommendations/keywords/query"):
         attempt(f"POST {path}",
-                lambda p=path: legacy.asa_v1("POST", p,
-                                             {"pagination": {"offset": 0, "limit": 50}}))
+                lambda p=path: legacy.asa_v1(
+                    "POST", p,
+                    {"filters": rec_filters,
+                     "pagination": {"offset": 0, "pageSize": 50}}))
 
     print(f"\n{'=' * 78}\nprobe complete\n{'=' * 78}")
     return 0
