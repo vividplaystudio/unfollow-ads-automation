@@ -154,6 +154,19 @@ def ingest_apple_popularity(conn) -> dict:
         r["campaign_id"]: (r["country"] or "US")
         for r in conn.execute("SELECT campaign_id, country FROM campaign_dim")
     }
+    # One request per term per country, so skip terms already scored this month
+    # rather than re-asking every night for a number that changes monthly.
+    already = {
+        r["keyword_id"] for r in conn.execute(
+            "SELECT keyword_id FROM keyword_dim "
+            "WHERE popularity IS NOT NULL AND popularity_month = ?",
+            (datetime.now(timezone.utc).strftime("%Y-%m"),))
+    }
+    rows = [r for r in rows if r["keyword_id"] not in already]
+    if not rows:
+        print("  [ads] popularity already current for every keyword this month")
+        return {"resolved": 0}
+
     by_country = {}
     for r in rows:
         c = countries.get(r["campaign_id"], "US") or "US"
@@ -187,31 +200,107 @@ def ingest_apple_popularity(conn) -> dict:
     return {"resolved": resolved}
 
 
+def _amount(obj):
+    """Apple wraps money as {"amount": "5", "currency": "USD"}."""
+    if isinstance(obj, dict):
+        obj = obj.get("amount")
+    try:
+        return float(obj)
+    except (TypeError, ValueError):
+        return None
+
+
+def _campaign_country(c: dict):
+    """Campaigns carry their market inside `targeting`, not at the top level."""
+    for holder in (c, c.get("targeting") or {}):
+        v = holder.get("countriesOrRegions")
+        if isinstance(v, list) and v:
+            return v[0]
+        if isinstance(v, str) and v:
+            return v
+    return None
+
+
 def ingest_apple_dims(conn) -> dict:
-    """Campaign + ad group metadata, including budgets."""
+    """Campaigns, ad groups and keywords -- the structure, not the metrics.
+
+    This has to exist independently of spend. Reports only return rows for
+    targeting that actually spent, so with every campaign paused the reporting
+    endpoints correctly return nothing and the dashboard would show no
+    keywords at all. The management endpoints list them regardless, which is
+    also what lets popularity be attached to a keyword before it has ever run.
+
+    Endpoint shapes, established by probing the live API:
+      /campaigns/query   no filter needed; result is a bare list
+      /adgroups/query    requires a campaignId filter
+      /keywords/query    requires an adGroupId OR campaignId condition
+    """
     if not legacy.ASA_V1_ENABLED:
-        return {"campaigns": 0}
+        return {"campaigns": 0, "adgroups": 0, "keywords": 0}
+
     try:
         camps = legacy.asa_v1_paged("/campaigns/query", {})
     except Exception as e:
-        print(f"  [ads] campaign fetch failed: {type(e).__name__}")
-        return {"campaigns": 0}
+        print(f"  [ads] campaign fetch failed: {type(e).__name__}: {e}")
+        return {"campaigns": 0, "adgroups": 0, "keywords": 0}
 
-    rows = []
+    camp_rows, camp_ids = [], []
     for c in camps:
-        budget = (c.get("dailyBudgetAmount") or {}).get("amount")
-        rows.append({
-            "campaign_id": str(c.get("id") or ""),
+        cid = str(c.get("id") or "")
+        if not cid:
+            continue
+        camp_ids.append(cid)
+        camp_rows.append({
+            "campaign_id": cid,
             "source": "apple",
             "name": c.get("name"),
-            "country": (c.get("countriesOrRegions") or [None])[0],
+            "country": _campaign_country(c),
             "status": c.get("status") or c.get("displayStatus"),
-            "daily_budget": float(budget) if budget else None,
+            "daily_budget": _amount(c.get("dailyBudget")),
         })
-    store.upsert_campaign_dim(conn, [r for r in rows if r["campaign_id"]])
+    store.upsert_campaign_dim(conn, camp_rows)
+
+    ag_rows, kw_rows = [], []
+    for cid in camp_ids:
+        f = [{"field": "campaignId", "operator": "EQUALS", "value": cid}]
+        try:
+            for g in legacy.asa_v1_paged("/adgroups/query", {"filters": f}):
+                if not g.get("id"):
+                    continue
+                ag_rows.append({
+                    "adgroup_id": str(g["id"]),
+                    "campaign_id": str(g.get("campaignId") or cid),
+                    "source": "apple",
+                    "name": g.get("name"),
+                    "status": g.get("status") or g.get("displayStatus"),
+                    "daily_budget": _amount(
+                        (g.get("bidStrategy") or {}).get("bid")),
+                })
+        except Exception as e:
+            print(f"  [ads] adgroups failed for campaign {cid}: {type(e).__name__}")
+        try:
+            for k in legacy.asa_v1_paged("/keywords/query", {"filters": f}):
+                if not k.get("id"):
+                    continue
+                kw_rows.append({
+                    "keyword_id": str(k["id"]),
+                    "campaign_id": str(k.get("campaignId") or cid),
+                    "adgroup_id": str(k.get("adGroupId") or ""),
+                    "text": k.get("text"),
+                    "match_type": k.get("matchType"),
+                    "bid": _amount(k.get("bid")),
+                    "status": k.get("status") or k.get("displayStatus"),
+                })
+        except Exception as e:
+            print(f"  [ads] keywords failed for campaign {cid}: {type(e).__name__}")
+
+    store.upsert_adgroup_dim(conn, ag_rows)
+    store.upsert_keyword_dim(conn, kw_rows)
     conn.commit()
-    print(f"  [ads] apple dims: {len(rows)} campaigns")
-    return {"campaigns": len(rows)}
+    print(f"  [ads] apple dims: {len(camp_rows)} campaigns, {len(ag_rows)} ad groups, "
+          f"{len(kw_rows)} keywords")
+    return {"campaigns": len(camp_rows), "adgroups": len(ag_rows),
+            "keywords": len(kw_rows)}
 
 
 def main() -> int:
