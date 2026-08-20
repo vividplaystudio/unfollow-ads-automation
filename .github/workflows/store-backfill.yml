@@ -93,9 +93,54 @@ jobs:
                   os.remove("store.db")
           PY
 
+      # The PHP endpoint only serves the LIVE rc_events.jsonl. The rotated
+      # .archive files hold everything older -- ~40 MB back to early July at
+      # the time of writing -- so a backfill that used HTTP would quietly load
+      # nine days instead of two months and look like it had succeeded.
+      # Pulling them over the FTP credentials we already have avoids both the
+      # endpoint's limits and the dashboard folder's basic auth.
+      - name: Download webhook archives
+        env:
+          FTP_HOST: ${{ secrets.FTP_HOST }}
+          FTP_USER: ${{ secrets.FTP_USER }}
+          FTP_PASS: ${{ secrets.FTP_PASS }}
+        run: |
+          mkdir -p rc_logs
+          python3 - <<'PY'
+          import ftplib, ssl, os
+          ctx = ssl.create_default_context()
+          ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
+          ftp = ftplib.FTP_TLS(os.environ["FTP_HOST"], timeout=300, context=ctx)
+          ftp.login(os.environ["FTP_USER"], os.environ["FTP_PASS"]); ftp.prot_p()
+          # The webhook logs live at the dashboard folder, which is FTP root
+          # here; walk up from the deepest form so this also works unchrooted.
+          for cand in ("/home/coinvohy/genivox.com/ads-upload",
+                       "/genivox.com/ads-upload", "/ads-upload", "/"):
+              try:
+                  ftp.cwd(cand); break
+              except ftplib.error_perm:
+                  continue
+          print(f"  webhook logs dir: {ftp.pwd()}")
+          names = [n for n in ftp.nlst()
+                   if n.endswith(".jsonl.archive") or n == "rc_events.jsonl"]
+          total = 0
+          for n in sorted(names):
+              local = os.path.join("rc_logs", os.path.basename(n))
+              with open(local, "wb") as fh:
+                  ftp.retrbinary(f"RETR {n}", fh.write)
+              size = os.path.getsize(local)
+              total += size
+              print(f"    {os.path.basename(n):48} {size:>12,} bytes")
+          print(f"  {len(names)} files, {total:,} bytes total")
+          ftp.quit()
+          PY
+
       - name: Ingest webhook events
         env:
           STORE_PATH: ${{ github.workspace }}/store.db
+          # Set so ingest_rc reads the downloaded archives from disk, oldest
+          # first, instead of falling back to the live-file-only HTTP path.
+          LOCAL_OUTPUT_DIR: ${{ github.workspace }}/rc_logs
           RC_WEBHOOK_SECRET: ${{ secrets.RC_WEBHOOK_SECRET }}
           RC_EVENTS_URL: https://genivox.com/ads-upload/rc_events.php
         run: python3 -u ingest_rc.py
