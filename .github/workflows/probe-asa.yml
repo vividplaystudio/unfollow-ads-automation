@@ -1,0 +1,28 @@
+name: Probe Apple Ads API
+
+# Dumps the real response shape of every Apple Ads endpoint we use.
+#
+# The credentials are write-only secrets, so these calls cannot be made from a
+# laptop. Without this, each wrong assumption about the API costs a full
+# push -> dispatch -> wait -> read-log cycle. One run of this settles them all.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Probe
+        env:
+          ASA_CLIENT_ID: ${{ secrets.ASA_CLIENT_ID }}
+          ASA_TEAM_ID: ${{ secrets.ASA_TEAM_ID }}
+          ASA_KEY_ID: ${{ secrets.ASA_KEY_ID }}
+          ASA_PRIVATE_KEY_PEM: ${{ secrets.ASA_PRIVATE_KEY_PEM }}
+          ASA_ORG_ID: ${{ secrets.ASA_ORG_ID }}
+        run: python3 -u tools/probe_asa.py

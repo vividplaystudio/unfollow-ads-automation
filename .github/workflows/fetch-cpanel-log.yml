@@ -25,18 +25,21 @@ jobs:
           ftp = ftplib.FTP_TLS(host, timeout=60, context=ctx)
           ftp.login(user, pw)
           ftp.prot_p()
-          # Chroot-safe: the scripts live under the site folder, not at FTP root.
+          # Try the full path then each shorter suffix until one resolves.
+          # The FTP account is chroot'd to the dashboard folder itself, so how
+          # much of the prefix survives is not knowable in advance; guessing a
+          # single fixed strip is what made this fail with 550.
           def navigate(path="/home/coinvohy/genivox.com/ads-upload/unfollow-ads"):
-              import re
-              def go(p):
-                  ftp.cwd("/")
-                  for part in p.strip("/").split("/"):
-                      ftp.cwd(part)
-              try:
-                  go(path)
-              except ftplib.error_perm:
-                  go(re.sub(r"^/home/[^/]+", "", path) or "/")
-              return ftp.pwd()
+              parts = path.strip("/").split("/")
+              last_err = None
+              for i in range(len(parts)):
+                  candidate = "/" + "/".join(parts[i:])
+                  try:
+                      ftp.cwd(candidate)
+                      return ftp.pwd()
+                  except ftplib.error_perm as e:
+                      last_err = e
+              raise RuntimeError(f"could not reach {path}: {last_err}")
           print(f"working dir: {navigate()}")
           print("Directory listing:")
           ftp.dir()
