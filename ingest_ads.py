@@ -1,0 +1,215 @@
+"""
+Ingest ad-side spend into the fact store.
+
+WHY A TRAILING WINDOW RATHER THAN "EVERYTHING"
+----------------------------------------------
+Ad spend is immutable after a short restatement period. Apple and Meta may
+revise the last couple of days as attribution settles; anything older is
+final and will never change again.
+
+So there is no reason to re-download months of history on every run. This
+fetches a trailing window (default 7 days, comfortably wider than the ~3-day
+restatement) and upserts it. Days outside the window keep whatever was last
+written -- which is the point of a store: settled facts stay settled.
+
+The composite primary key on ad_daily is what makes the overlap safe: a
+re-fetched day REPLACES its row rather than adding to it, so running this
+every 15 minutes cannot double-count.
+
+GRANULARITY
+-----------
+Apple reports at keyword level with DAILY granularity, which is exactly the
+grain the dashboard wants, so keyword rows go in as-is and campaign/adgroup
+totals are derived by summing them rather than stored twice. Meta has no
+keyword concept, so its rows carry keyword_id=''.
+"""
+
+import os
+import sys
+import time
+from datetime import datetime, timedelta, timezone
+
+import store
+import refresh_dashboard_json as legacy
+
+# Wider than the ~3-day attribution restatement window, narrow enough that a
+# refresh stays cheap. Override for a backfill.
+LOOKBACK_DAYS = int(os.environ.get("AD_LOOKBACK_DAYS", "7"))
+
+
+def _day_list(days: int):
+    today = datetime.now(timezone.utc).date()
+    return [(today - timedelta(days=i)).isoformat() for i in range(days - 1, -1, -1)]
+
+
+def _metric(d: dict, *names):
+    """Apple nests metrics under 'total'; names vary by entity."""
+    tot = d.get("total") or d
+    for n in names:
+        if n in tot and tot[n] is not None:
+            v = tot[n]
+            if isinstance(v, dict):          # localSpend -> {"amount": "1.23"}
+                v = v.get("amount", 0)
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                continue
+    return 0.0
+
+
+def ingest_apple(conn, days: int = LOOKBACK_DAYS) -> dict:
+    """Apple Ads keyword-level daily spend -> ad_daily."""
+    if not legacy.ASA_V1_ENABLED:
+        print("  [ads] Apple Ads v1 not configured -- skipped")
+        return {"rows": 0}
+
+    try:
+        legacy.asa_v1_token()
+    except Exception as e:
+        print(f"  [ads] Apple auth failed ({type(e).__name__}) -- skipped")
+        return {"rows": 0}
+
+    window = _day_list(days)
+    start, end = window[0], window[-1]
+    t0 = time.time()
+
+    rows, kw_dim = [], []
+    try:
+        report = legacy.asa_v1_report("keywords", start, end, group_by=["countryOrRegion"])
+    except Exception as e:
+        print(f"  [ads] Apple keyword report failed: {type(e).__name__}: {e}")
+        report = []
+
+    for r in report:
+        meta = r.get("metadata") or {}
+        kid = str(meta.get("keywordId") or "")
+        if not kid:
+            continue
+        kw_dim.append({
+            "keyword_id": kid,
+            "campaign_id": str(meta.get("campaignId") or ""),
+            "adgroup_id": str(meta.get("adGroupId") or ""),
+            "text": meta.get("keyword") or meta.get("keywordDisplayText"),
+            "match_type": meta.get("matchType"),
+            "bid": _metric(meta.get("bidAmount") or {}, "amount") or None,
+            "status": meta.get("keywordStatus") or meta.get("keywordDisplayStatus"),
+        })
+        # Apple returns one 'granularity' entry per day inside each row.
+        for g in (r.get("granularity") or []):
+            day = (g.get("date") or "")[:10]
+            if not day:
+                continue
+            rows.append({
+                "day": day,
+                "source": "apple",
+                "campaign_id": str(meta.get("campaignId") or ""),
+                "adgroup_id": str(meta.get("adGroupId") or ""),
+                "keyword_id": kid,
+                "country": meta.get("countryOrRegion") or "",
+                "spend": _metric(g, "localSpend"),
+                "impressions": int(_metric(g, "impressions")),
+                "taps": int(_metric(g, "taps")),
+                "installs": int(_metric(g, "totalInstalls", "installs", "conversions")),
+            })
+
+    n = store.upsert_ad_daily(conn, rows)
+    store.upsert_keyword_dim(conn, kw_dim)
+    conn.commit()
+    print(f"  [ads] apple: {n} keyword-days {start}..{end} "
+          f"({len(kw_dim)} keywords) in {time.time()-t0:.0f}s")
+    return {"rows": n}
+
+
+def ingest_apple_popularity(conn) -> dict:
+    """Attach Apple's search-volume score to every keyword we know about.
+
+    Popularity is a slow-moving property of the SEARCH TERM, not of a day, so
+    it belongs on the dimension and only needs refreshing occasionally --
+    nightly is plenty. NULL is preserved as 'unknown'; it must never become 0,
+    which would read as 'nobody searches this'.
+    """
+    if not legacy.ASA_V1_ENABLED:
+        return {"resolved": 0}
+    rows = list(conn.execute(
+        "SELECT keyword_id, text, campaign_id FROM keyword_dim "
+        "WHERE text IS NOT NULL AND text <> ''"
+    ))
+    if not rows:
+        return {"resolved": 0}
+
+    # Popularity is country-specific; group by the campaign's country so a US
+    # term is not scored against a UK audience.
+    countries = {
+        r["campaign_id"]: (r["country"] or "US")
+        for r in conn.execute("SELECT campaign_id, country FROM campaign_dim")
+    }
+    by_country = {}
+    for r in rows:
+        c = countries.get(r["campaign_id"], "US") or "US"
+        by_country.setdefault(c, []).append(r)
+
+    updates, resolved = [], 0
+    for country, group in by_country.items():
+        terms = sorted({(r["text"] or "").strip() for r in group if r["text"]})
+        try:
+            pop = legacy.asa_v1_keyword_popularity(terms, country=country)
+        except Exception as e:
+            print(f"  [ads] popularity lookup failed for {country}: {type(e).__name__}")
+            continue
+        for r in group:
+            v = pop.get((r["text"] or "").strip().lower())
+            if v is None:
+                continue
+            updates.append({"keyword_id": r["keyword_id"], "popularity": int(v)})
+            resolved += 1
+
+    if updates:
+        store.upsert_keyword_dim(conn, updates)
+        conn.commit()
+    print(f"  [ads] popularity resolved for {resolved}/{len(rows)} keywords")
+    return {"resolved": resolved}
+
+
+def ingest_apple_dims(conn) -> dict:
+    """Campaign + ad group metadata, including budgets."""
+    if not legacy.ASA_V1_ENABLED:
+        return {"campaigns": 0}
+    try:
+        camps = legacy.asa_v1_paged("/campaigns/query", {})
+    except Exception as e:
+        print(f"  [ads] campaign fetch failed: {type(e).__name__}")
+        return {"campaigns": 0}
+
+    rows = []
+    for c in camps:
+        budget = (c.get("dailyBudgetAmount") or {}).get("amount")
+        rows.append({
+            "campaign_id": str(c.get("id") or ""),
+            "source": "apple",
+            "name": c.get("name"),
+            "country": (c.get("countriesOrRegions") or [None])[0],
+            "status": c.get("status") or c.get("displayStatus"),
+            "daily_budget": float(budget) if budget else None,
+        })
+    store.upsert_campaign_dim(conn, [r for r in rows if r["campaign_id"]])
+    conn.commit()
+    print(f"  [ads] apple dims: {len(rows)} campaigns")
+    return {"campaigns": len(rows)}
+
+
+def main() -> int:
+    conn = store.open_store()
+    ingest_apple_dims(conn)
+    ingest_apple(conn)
+    if os.environ.get("REFRESH_POPULARITY", "1") == "1":
+        ingest_apple_popularity(conn)
+    store.set_meta(conn, "ads_ingested_at_ms", store.utc_now_ms())
+    conn.commit()
+    st = store.store_stats(conn)
+    print(f"  [ads] store: {st['ad_daily']} ad-days (latest {st['ad_daily_last']}), "
+          f"{st['keywords']} keywords, {st['keywords_with_popularity']} with popularity")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

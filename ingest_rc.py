@@ -287,7 +287,9 @@ def main() -> int:
             custs.append(c)
 
     n_txn = store.upsert_txns(conn, txns)
-    n_cust = store.upsert_customers(conn, custs)
+    # These came with real attribution attached to the purchase event, so
+    # they never need an API lookup -- mark them resolved.
+    n_cust = store.upsert_customers(conn, custs, attribution_resolved=True)
     n_state = rebuild_sub_state(conn)
     store.set_meta(conn, "rc_watermark_ms", newest)
     store.set_meta(conn, "rc_ingested_at", datetime.now(timezone.utc).isoformat())

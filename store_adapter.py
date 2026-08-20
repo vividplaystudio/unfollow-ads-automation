@@ -66,6 +66,8 @@ def customers_from_store(conn, include_non_payers: bool = True) -> list:
     """
     # ── transactions, grouped by customer ────────────────────────────────
     txns_by_cust = defaultdict(list)
+    first_txn_ms = {}
+    txn_country = {}
     rev = defaultdict(float)
     proceeds = defaultdict(float)
     renewals = defaultdict(int)
@@ -84,6 +86,16 @@ def customers_from_store(conn, include_non_payers: bool = True) -> list:
             "tier": t["tier"],
             "is_renewal": bool(t["is_renewal"]),
         })
+        # Cheapest safe stand-in for an unknown install date. build_revenue_index
+        # SKIPS any customer whose first_seen_at is falsy, so without this a
+        # payer who bought since the last nightly customer walk would drop out
+        # of the channel and keyword tables entirely -- revenue silently
+        # missing rather than visibly late. Their first transaction is an upper
+        # bound on install date and keeps them in the right reporting window.
+        if cid not in first_txn_ms:
+            first_txn_ms[cid] = t["ts_ms"]
+            if t["country"]:
+                txn_country[cid] = t["country"]
         rev[cid] += float(t["amount"])
         proceeds[cid] += float(t["proceeds"])
         if t["is_renewal"]:
@@ -124,8 +136,10 @@ def customers_from_store(conn, include_non_payers: bool = True) -> list:
         dominant = max(tc, key=tc.get) if tc else "none"
         out.append({
             "id": cid,
-            "first_seen_at": (a["first_seen_ms"] if a else None),
-            "last_seen_country": (a["country"] if a else ""),
+            "first_seen_at": (a["first_seen_ms"] if a and a["first_seen_ms"]
+                              else first_txn_ms.get(cid)),
+            "last_seen_country": ((a["country"] if a and a["country"] else None)
+                                  or txn_country.get(cid) or ""),
             "_attrs": _channel_to_attrs(a) if a else {},
             "_revenue": round(rev.get(cid, 0.0), 4),
             "_proceeds": round(proceeds.get(cid, 0.0), 4),

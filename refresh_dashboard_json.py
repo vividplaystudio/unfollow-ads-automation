@@ -64,6 +64,10 @@ ORG_ID = os.environ.get("ASA_ORG_ID", "8868820")
 # dashboard folder and the script will write directly there — no FTP.
 LOCAL_OUTPUT_DIR = os.environ.get("LOCAL_OUTPUT_DIR", "")
 
+# Read customers from the SQLite fact store instead of walking the RC API.
+# Set STORE_MODE=0 to force the old path (useful to A/B the two outputs).
+STORE_MODE = os.environ.get("STORE_MODE", "1") != "0"
+
 FTP_HOST = os.environ.get("FTP_HOST", "")
 FTP_USER = os.environ.get("FTP_USER", "")
 FTP_PASS = os.environ.get("FTP_PASS", "")
@@ -1847,10 +1851,45 @@ def main() -> None:
 
         print(f"  Keywords this range: {len(asa_keyword_data[range_name])}")
 
-    # Fetch RevenueCat
-    print("\n--- Fetching RevenueCat ---")
-    customers = rc_get_all_customers()
-    customers = rc_enrich_customers(customers)
+    # ── RevenueCat ───────────────────────────────────────────────────────
+    # STORE_MODE reads customers from the local SQLite fact store, which
+    # ingest_rc.py fills from the webhook log in well under a second. The
+    # legacy path below walks all ~111k customers over the REST API and takes
+    # 20-70 minutes, growing with total install history rather than with
+    # activity -- that is what outran the cron and froze the dashboard.
+    #
+    # The store returns the identical customer-dict shape, so everything
+    # downstream (revenue index, daily_rc, cohorts, every column) is unchanged.
+    # Falls back to the API path if the store is missing or empty, so a host
+    # that has not been backfilled yet still produces a correct dashboard.
+    customers = None
+    if STORE_MODE:
+        try:
+            import store as _store
+            import store_adapter as _adapter
+            _conn = _store.open_store()
+            _st = _store.store_stats(_conn)
+            if _st["txn"]:
+                print("\n--- RevenueCat (fact store) ---")
+                _t0 = time.time()
+                customers = _adapter.customers_from_store(_conn)
+                _a = _adapter.adapter_stats(customers)
+                print(f"  {_a['customers']} customers, {_a['paying']} paying, "
+                      f"{_a['active']} active  ({time.time()-_t0:.1f}s, zero API calls)")
+                print(f"  gross ${_a['gross']:,.2f} -> proceeds ${_a['proceeds']:,.2f} "
+                      f"({_a['proceeds']/_a['gross']*100:.1f}% take-home)"
+                      if _a["gross"] else "  no revenue in store")
+            else:
+                print("\n  [store] empty -- falling back to the API walk")
+        except Exception as e:
+            print(f"\n  [store] unavailable ({type(e).__name__}: {e}) -- falling back to the API walk")
+            customers = None
+
+    if customers is None:
+        print("\n--- Fetching RevenueCat (legacy API walk) ---")
+        customers = rc_get_all_customers()
+        customers = rc_enrich_customers(customers)
+
     rev_index = build_revenue_index(customers)
     # 31 days = today + 30 days back, so a "last 30 days excluding today"
     # view on the dashboard has all the data it needs.

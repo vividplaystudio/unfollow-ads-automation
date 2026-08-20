@@ -102,7 +102,14 @@ CREATE TABLE IF NOT EXISTS customer (
     adgroup       TEXT,
     keyword       TEXT,
     attrs_json    TEXT,
-    fetched_at_ms INTEGER
+    fetched_at_ms INTEGER,      -- row last touched
+    -- Set ONLY when attribution has actually been resolved for this customer,
+    -- whether or not the answer was 'no attribution'. NULL means 'never asked',
+    -- and is what the cold path's backlog query selects on. Keeping this apart
+    -- from fetched_at_ms is what makes the lookup once-per-customer-ever
+    -- instead of once-per-run: the customer-list walk touches every row, and
+    -- must not thereby claim their attribution is known.
+    attrs_fetched_ms INTEGER
 );
 CREATE INDEX IF NOT EXISTS ix_customer_first_day ON customer(first_day);
 CREATE INDEX IF NOT EXISTS ix_customer_channel   ON customer(channel);
@@ -281,21 +288,28 @@ def upsert_txns(conn, rows) -> int:
     return len(payload)
 
 
-def upsert_customers(conn, rows) -> int:
-    """Write attribution rows.
+def upsert_customers(conn, rows, attribution_resolved: bool = False) -> int:
+    """Write customer rows.
 
     Uses COALESCE on update so a later fetch that returns a blank field cannot
     erase a value we already captured -- RC occasionally returns partial
     attribute sets, and a blank there is 'unknown', not 'none'.
+
+    attribution_resolved=True marks these customers as "we have asked about
+    attribution and this is the answer", which permanently removes them from
+    the cold path's lookup backlog. Pass it only from a caller that actually
+    resolved attribution -- the plain customer-list walk must not, or every
+    customer would be marked known after the first night and never enriched.
     """
     now = utc_now_ms()
+    stamp = now if attribution_resolved else None
     payload = [
         (
             r["customer_id"], r.get("first_seen_ms"),
             r.get("first_day") or (ms_to_day(r["first_seen_ms"]) if r.get("first_seen_ms") else None),
             r.get("country"), r.get("media_source"), r.get("channel"),
             r.get("campaign"), r.get("adgroup"), r.get("keyword"),
-            r.get("attrs_json"), now,
+            r.get("attrs_json"), now, stamp,
         )
         for r in rows
     ]
@@ -304,8 +318,8 @@ def upsert_customers(conn, rows) -> int:
     conn.executemany(
         "INSERT INTO customer (customer_id, first_seen_ms, first_day, country, "
         "                      media_source, channel, campaign, adgroup, keyword, "
-        "                      attrs_json, fetched_at_ms) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?) "
+        "                      attrs_json, fetched_at_ms, attrs_fetched_ms) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?) "
         "ON CONFLICT(customer_id) DO UPDATE SET "
         "  first_seen_ms=COALESCE(excluded.first_seen_ms, customer.first_seen_ms), "
         "  first_day    =COALESCE(excluded.first_day,     customer.first_day), "
@@ -316,7 +330,8 @@ def upsert_customers(conn, rows) -> int:
         "  adgroup      =COALESCE(NULLIF(excluded.adgroup,''),      customer.adgroup), "
         "  keyword      =COALESCE(NULLIF(excluded.keyword,''),      customer.keyword), "
         "  attrs_json   =COALESCE(excluded.attrs_json, customer.attrs_json), "
-        "  fetched_at_ms=excluded.fetched_at_ms",
+        "  fetched_at_ms=excluded.fetched_at_ms, "
+        "  attrs_fetched_ms=COALESCE(excluded.attrs_fetched_ms, customer.attrs_fetched_ms)",
         payload,
     )
     return len(payload)
@@ -507,7 +522,8 @@ def store_stats(conn) -> dict:
         "txn_gross": one("SELECT ROUND(SUM(amount),2) FROM txn"),
         "txn_proceeds": one("SELECT ROUND(SUM(proceeds),2) FROM txn"),
         "customers": one("SELECT COUNT(*) FROM customer"),
-        "customers_attributed": one("SELECT COUNT(*) FROM customer WHERE channel IS NOT NULL AND channel <> ''"),
+        "customers_attributed": one("SELECT COUNT(*) FROM customer WHERE media_source IS NOT NULL AND media_source <> ''"),
+        "customers_attr_unknown": one("SELECT COUNT(*) FROM customer WHERE attrs_fetched_ms IS NULL"),
         "sub_state": one("SELECT COUNT(*) FROM sub_state"),
         "ad_daily": one("SELECT COUNT(*) FROM ad_daily"),
         "ad_daily_last": one("SELECT MAX(day) FROM ad_daily"),
