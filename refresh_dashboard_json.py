@@ -2322,6 +2322,16 @@ def main() -> None:
         hit = _vol.get((country, term))
         if hit:
             return hit
+        # The build-time lookup queries Apple with country="US", so its answer
+        # is only valid for the US. Using it elsewhere is what showed AU and CA
+        # the US score of 63 at rank 208 while GB, which the feed did cover,
+        # correctly showed 57 at rank 201.
+        #
+        # A term absent from its own market's feed means Apple does not rank it
+        # there. Reporting None is the honest answer; substituting another
+        # country's demand produces a number that looks researched and is not.
+        if country != "US":
+            return (None, None, None)
         live = live_lookup.get(term)
         if isinstance(live, dict):
             return (live.get("popularity"), live.get("rank_in_genre"),
