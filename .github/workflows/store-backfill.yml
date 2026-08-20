@@ -45,10 +45,25 @@ jobs:
           import ftplib, ssl, os
           ctx = ssl.create_default_context()
           ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
+          # The FTP user is chroot'd on this host, so "/home/<user>/unfollow-ads"
+          # and "/unfollow-ads" both need to work. Same fallback the installer
+          # uses -- keep them in step.
+          def navigate(ftp, path="/home/coinvohy/unfollow-ads"):
+              import re
+              def go(p):
+                  ftp.cwd("/")
+                  for part in p.strip("/").split("/"):
+                      ftp.cwd(part)
+              try:
+                  go(path)
+              except ftplib.error_perm:
+                  go(re.sub(r"^/home/[^/]+", "", path) or "/")
+              return ftp.pwd()
+
           try:
-              ftp = ftplib.FTP_TLS(os.environ["FTP_HOST"], timeout=60)
+              ftp = ftplib.FTP_TLS(os.environ["FTP_HOST"], timeout=60, context=ctx)
               ftp.login(os.environ["FTP_USER"], os.environ["FTP_PASS"]); ftp.prot_p()
-              ftp.cwd("unfollow-ads")
+              print(f"  working dir: {navigate(ftp)}")
               with open("store.db", "wb") as fh:
                   ftp.retrbinary("RETR store.db", fh.write)
               print(f"  downloaded existing store ({os.path.getsize('store.db'):,} bytes)")
@@ -115,9 +130,24 @@ jobs:
           import ftplib, ssl, os
           ctx = ssl.create_default_context()
           ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
-          ftp = ftplib.FTP_TLS(os.environ["FTP_HOST"], timeout=120)
+          # The FTP user is chroot'd on this host, so "/home/<user>/unfollow-ads"
+          # and "/unfollow-ads" both need to work. Same fallback the installer
+          # uses -- keep them in step.
+          def navigate(ftp, path="/home/coinvohy/unfollow-ads"):
+              import re
+              def go(p):
+                  ftp.cwd("/")
+                  for part in p.strip("/").split("/"):
+                      ftp.cwd(part)
+              try:
+                  go(path)
+              except ftplib.error_perm:
+                  go(re.sub(r"^/home/[^/]+", "", path) or "/")
+              return ftp.pwd()
+
+          ftp = ftplib.FTP_TLS(os.environ["FTP_HOST"], timeout=120, context=ctx)
           ftp.login(os.environ["FTP_USER"], os.environ["FTP_PASS"]); ftp.prot_p()
-          ftp.cwd("unfollow-ads")
+          print(f"  working dir: {navigate(ftp)}")
           # Upload to a temp name then rename, so a cron tick that fires
           # mid-transfer never opens a half-written database.
           with open("store.db", "rb") as fh:
