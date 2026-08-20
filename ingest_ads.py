@@ -201,9 +201,16 @@ def ingest_apple_popularity(conn) -> dict:
 
 
 def _amount(obj):
-    """Apple wraps money as {"amount": "5", "currency": "USD"}."""
-    if isinstance(obj, dict):
-        obj = obj.get("amount")
+    """Unwrap Apple's money shapes.
+
+    Keyword bids arrive as {"amount": "4", "currency": "USD"} but campaign
+    budgets add a level: {"value": {"amount": "100", "currency": "USD"}}.
+    Reading only the flat form stored every budget as None.
+    """
+    seen = 0
+    while isinstance(obj, dict) and seen < 4:
+        obj = obj.get("amount", obj.get("value"))
+        seen += 1
     try:
         return float(obj)
     except (TypeError, ValueError):
@@ -211,14 +218,32 @@ def _amount(obj):
 
 
 def _campaign_country(c: dict):
-    """Campaigns carry their market inside `targeting`, not at the top level."""
-    for holder in (c, c.get("targeting") or {}):
-        v = holder.get("countriesOrRegions")
-        if isinstance(v, list) and v:
-            return v[0]
-        if isinstance(v, str) and v:
-            return v
-    return None
+    """The campaign's market, from targeting.countryOrRegion.include.
+
+    Note the SINGULAR "countryOrRegion", and that it is an include/exclude
+    object rather than a list. Looking for a plural "countriesOrRegions"
+    matched nothing, so every campaign silently fell back to US -- and since
+    popularity is scored per country, UK and CA keywords were being looked up
+    against the US index and returning no rows. That is the difference between
+    29 and most of 1,152 keywords getting a volume score.
+    """
+    t = c.get("targeting") or {}
+    cor = t.get("countryOrRegion") or t.get("countriesOrRegions") or {}
+    if isinstance(cor, dict):
+        inc = cor.get("include")
+        if isinstance(inc, list) and inc:
+            return inc[0]
+        if isinstance(inc, str) and inc:
+            return inc
+    elif isinstance(cor, list) and cor:
+        return cor[0]
+    elif isinstance(cor, str) and cor:
+        return cor
+    # Fall back to the top level in case a campaign type reports it there.
+    v = c.get("countriesOrRegions") or c.get("countryOrRegion")
+    if isinstance(v, list) and v:
+        return v[0]
+    return v if isinstance(v, str) and v else None
 
 
 def ingest_apple_dims(conn) -> dict:
