@@ -1901,6 +1901,134 @@ def main() -> None:
     asa_keyword_data = {r: {} for r in ranges}
     asa_ad_data = {}  # keyed by (campaign_id, ad_name), multi-range within each
 
+    # ── Apple structure and spend from the fact store ────────────────────
+    # Only RevenueCat was wired to the store; Apple was still fetched live at
+    # build time. When that fetch came back empty the builder produced a
+    # data.json with 0 campaigns and 0 keywords, the pre-flight size check
+    # refused to publish it, and the dashboard silently sat on 06:30 data --
+    # the check did its job, but the cause was here.
+    #
+    # The store already holds campaigns, ad groups and keywords from the
+    # management API, which list them regardless of spend. Reading them here
+    # means a paused account shows its structure instead of looking empty.
+    if STORE_MODE:
+        try:
+            import store as _s
+            _sc = _s.open_store()
+            for _c in _sc.execute(
+                "SELECT campaign_id, name, status, country, daily_budget "
+                "FROM campaign_dim WHERE source='apple'"
+            ):
+                campaign_meta[_c["campaign_id"]] = {
+                    "id": _c["campaign_id"],
+                    "name": _c["name"] or "",
+                    "status": _c["status"] or "",
+                    "countries": _c["country"] or "",
+                    "budget": ("" if _c["daily_budget"] is None
+                               else str(_c["daily_budget"])),
+                }
+            _kw_meta = {
+                r["keyword_id"]: dict(r)
+                for r in _sc.execute(
+                    "SELECT keyword_id, campaign_id, adgroup_id, text, match_type, "
+                    "       bid, popularity, rank_in_genre, genre, status "
+                    "FROM keyword_dim")
+            }
+            _kw_text = {k: (v.get("text") or "").strip().lower()
+                        for k, v in _kw_meta.items()}
+
+            def _kw_fields(kid):
+                """The display fields the keyword table reads off each row."""
+                m = _kw_meta.get(kid, {})
+                return {
+                    "keyword": m.get("text") or "",
+                    "match": m.get("match_type") or "",
+                    "status": m.get("status") or "",
+                    "bid": m.get("bid") or 0,
+                    "is": "",
+                    "ad_group_id": m.get("adgroup_id") or None,
+                    "keyword_id": kid,
+                    "popularity": m.get("popularity"),
+                    "rank_in_genre": m.get("rank_in_genre"),
+                    "genre": m.get("genre"),
+                }
+
+            # Spend per range, summed from the daily facts. A range with no
+            # rows correctly contributes nothing rather than erroring.
+            for _r, (_start, _end) in ranges.items():
+                for _row in _sc.execute(
+                    "SELECT campaign_id, keyword_id, "
+                    "       ROUND(SUM(spend),2) spend, SUM(impressions) impr, "
+                    "       SUM(taps) taps, SUM(installs) inst "
+                    "FROM ad_daily WHERE source='apple' AND day BETWEEN ? AND ? "
+                    "GROUP BY campaign_id, keyword_id",
+                    (_start.isoformat(), _end.isoformat()),
+                ):
+                    _base = {
+                        "spend": float(_row["spend"] or 0),
+                        "impressions": int(_row["impr"] or 0),
+                        "taps": int(_row["taps"] or 0),
+                        "installs": int(_row["inst"] or 0),
+                        "cpt": 0.0, "cpa": 0.0, "ttr": 0.0,
+                    }
+                    if _row["taps"]:
+                        _base["cpt"] = round(_base["spend"] / _row["taps"], 4)
+                        if _row["impr"]:
+                            _base["ttr"] = round(_row["taps"] / _row["impr"] * 100, 4)
+                    if _row["inst"]:
+                        _base["cpa"] = round(_base["spend"] / _row["inst"], 4)
+
+                    _cid = _row["campaign_id"]
+                    if _row["keyword_id"]:
+                        _kw = _kw_text.get(_row["keyword_id"])
+                        if not _kw:
+                            continue
+                        _base.update(_kw_fields(_row["keyword_id"]))
+                        asa_keyword_data[_r][(_cid, _kw)] = _base
+                    else:
+                        _agg = asa_campaign_data[_r].setdefault(_cid, dict(_base))
+                        if _agg is not _base:
+                            for _k in ("spend", "impressions", "taps", "installs"):
+                                _agg[_k] += _base[_k]
+                # Campaign totals roll up from keyword rows when Apple reported
+                # at keyword grain only, so the campaign table is never blank
+                # while its keywords have spend.
+                _by_camp = {}
+                for (_cid, _kw), _d in asa_keyword_data[_r].items():
+                    _by_camp.setdefault(_cid, []).append(_d)
+                for _cid, _kws in _by_camp.items():
+                    if _cid in asa_campaign_data[_r]:
+                        continue
+                    asa_campaign_data[_r][_cid] = {
+                        "spend": round(sum(k["spend"] for k in _kws), 2),
+                        "impressions": sum(k["impressions"] for k in _kws),
+                        "taps": sum(k["taps"] for k in _kws),
+                        "installs": sum(k["installs"] for k in _kws),
+                        "cpt": 0.0, "cpa": 0.0, "ttr": 0.0,
+                    }
+
+            # Every keyword we target gets an "all" entry even with no spend,
+            # so a paused account still shows its keyword list with search
+            # volume attached -- which is the whole point of holding structure
+            # separately from metrics.
+            for _kid, _m in _kw_meta.items():
+                _kw = (_m.get("text") or "").strip().lower()
+                if not _kw:
+                    continue
+                _key = (_m.get("campaign_id"), _kw)
+                if _key not in asa_keyword_data["all"]:
+                    asa_keyword_data["all"][_key] = dict(
+                        spend=0.0, impressions=0, taps=0, installs=0,
+                        cpt=0.0, cpa=0.0, ttr=0.0, **_kw_fields(_kid))
+            print(f"  [store] Apple: {len(campaign_meta)} campaigns, "
+                  f"{len(_kw_meta)} keywords, "
+                  f"{sum(1 for m in _kw_meta.values() if m.get('popularity'))} with volume")
+        except Exception as e:
+            print(f"  [store] Apple structure unavailable ({type(e).__name__}: {e})")
+            _kw_meta = {}
+    else:
+        _kw_meta = {}
+
     for range_name, (start, end) in ranges.items():
         if not asa_token:
             break  # nothing to fetch from ASA, skip the whole loop
@@ -2142,6 +2270,34 @@ def main() -> None:
         except Exception as e:
             print(f"  popularity lookup skipped: {e}")
 
+    def _popularity_of(term, live_lookup, store_lookup):
+        """Store value first, then the build-time lookup, else None.
+
+        The build-time lookup returns a dict per term now, not a bare number,
+        so it has to be unwrapped rather than used directly.
+        """
+        v = store_lookup.get(term)
+        if v is not None:
+            return v
+        live = live_lookup.get(term)
+        if isinstance(live, dict):
+            return live.get("popularity")
+        return live
+
+    # Volume straight off the store rows, keyed by the same lowercase text the
+    # keyword table is built on.
+    _kw_pop, _kw_rank, _kw_genre = {}, {}, {}
+    for _m in (_kw_meta or {}).values():
+        _t = (_m.get("text") or "").strip().lower()
+        if not _t:
+            continue
+        if _m.get("popularity") is not None:
+            _kw_pop[_t] = _m["popularity"]
+        if _m.get("rank_in_genre") is not None:
+            _kw_rank[_t] = _m["rank_in_genre"]
+        if _m.get("genre"):
+            _kw_genre[_t] = _m["genre"]
+
     keywords_out = []
     for (cid, kw_lower) in kw_union:
         meta = campaign_meta.get(cid, {})
@@ -2180,7 +2336,13 @@ def main() -> None:
             "impression_share": is_share,
             # Apple search-volume score. None when unavailable (v5, or term not
             # resolved) — the dashboard should treat None as "unknown", not 0.
-            "popularity": keyword_popularity.get(kw_lower),
+            # Prefer the store's value: it was resolved against the keyword's
+            # OWN market and joined to Apple's volume feed, where the
+            # build-time lookup assumes US. None means "Apple does not rank
+            # this term", never zero volume.
+            "popularity": _popularity_of(kw_lower, keyword_popularity, _kw_pop),
+            "rank_in_genre": _kw_rank.get(kw_lower),
+            "genre": _kw_genre.get(kw_lower),
         }
         for r in ranges:
             d = asa_keyword_data[r].get((cid, kw_lower), {"spend": 0, "impressions": 0, "taps": 0, "installs": 0, "cpt": 0})
