@@ -30,3 +30,7 @@ export RC_EVENTS_URL="https://genivox.com/ads-upload/rc_events.php"
 export SPREADSHEET_ID="CHANGE_ME_OR_LEAVE_BLANK"
 export GOOGLE_SERVICE_ACCOUNT_JSON='CHANGE_ME_OR_LEAVE_BLANK'
 export ASA_ORG_ID="8868820"
+
+# Where the SQLite fact store lives. Keep it beside the scripts, NOT in the
+# web-served dashboard folder — it holds per-customer attribution.
+export STORE_PATH="$HOME/unfollow-ads/store.db"

@@ -36,6 +36,14 @@ jobs:
           REVENUECAT_API_KEY: ${{ secrets.REVENUECAT_API_KEY }}
           REVENUECAT_PROJECT_ID: ${{ secrets.REVENUECAT_PROJECT_ID }}
           RC_WEBHOOK_SECRET: ${{ secrets.RC_WEBHOOK_SECRET }}
+          # Apple Ads Platform API v1. These were never shipped to cPanel,
+          # so ASA_V1_ENABLED evaluated false there and every Apple fetch
+          # silently skipped -- the dashboard showed no ASA data and no error.
+          ASA_CLIENT_ID: ${{ secrets.ASA_CLIENT_ID }}
+          ASA_TEAM_ID: ${{ secrets.ASA_TEAM_ID }}
+          ASA_KEY_ID: ${{ secrets.ASA_KEY_ID }}
+          ASA_PRIVATE_KEY_PEM: ${{ secrets.ASA_PRIVATE_KEY_PEM }}
+          ASA_ORG_ID: ${{ secrets.ASA_ORG_ID }}
           TARGET_DIR: ${{ inputs.target_dir }}
           DASHBOARD_DIR: ${{ inputs.dashboard_dir }}
         run: |
@@ -91,7 +99,13 @@ jobs:
           # Upload script files (binary mode to preserve line endings)
           for fname in ["refresh_meta_ads.py", "refresh_adjust.py",
                         "refresh_dashboard_json.py",
-                        "refresh_daily_rc_fast.py"]:
+                        "refresh_daily_rc_fast.py",
+                        # Fact-store pipeline. store.py must ship with these
+                        # three or they cannot import; run.sh's `store` and
+                        # `store-cold` commands drive them.
+                        "store.py", "store_adapter.py",
+                        "ingest_rc.py", "ingest_customers.py",
+                        "ingest_ads.py"]:
               with open(fname, "rb") as f:
                   ftp.storbinary(f"STOR {fname}", f)
                   print(f"  ✅ uploaded {fname}")
@@ -133,6 +147,19 @@ jobs:
               f'export REVENUECAT_PROJECT_ID="{os.environ.get("REVENUECAT_PROJECT_ID","6afc72a9")}"\n'
               f'export RC_WEBHOOK_SECRET="{os.environ.get("RC_WEBHOOK_SECRET","")}"\n'
               'export RC_EVENTS_URL="https://genivox.com/ads-upload/rc_events.php"\n'
+              "\n# Apple Ads Platform API v1\n"
+              f'export ASA_CLIENT_ID="{os.environ.get("ASA_CLIENT_ID","")}"\n'
+              f'export ASA_TEAM_ID="{os.environ.get("ASA_TEAM_ID","")}"\n'
+              f'export ASA_KEY_ID="{os.environ.get("ASA_KEY_ID","")}"\n'
+              f'export ASA_ORG_ID="{os.environ.get("ASA_ORG_ID","8868820")}"\n'
+              # The PEM is multi-line; a heredoc keeps the newlines intact.
+              # Quoting the delimiter stops the shell expanding anything inside.
+              "export ASA_PRIVATE_KEY_PEM=$(cat <<'ASA_PEM_EOF'\n"
+              f'{os.environ.get("ASA_PRIVATE_KEY_PEM","")}\n'
+              "ASA_PEM_EOF\n"
+              ")\n"
+              "\n# Fact store (see store.py). Deliberately OUTSIDE the web root.\n"
+              f'export STORE_PATH="{target_dir}/store.db"\n'
           )
           ftp.storbinary("STOR config.sh", io.BytesIO(config.encode("utf-8")))
           print("  ✅ uploaded config.sh")

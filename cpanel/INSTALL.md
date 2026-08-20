@@ -57,7 +57,76 @@ cPanel → **Cron Jobs** → Add:
 |---|---|
 | Every 15 min: `*/15 * * * *` | `bash ~/unfollow-ads/run.sh meta` |
 | Every 15 min: `*/15 * * * *` | `bash ~/unfollow-ads/run.sh adjust` |
-| Every 30 min: `*/30 * * * *` | `bash ~/unfollow-ads/run.sh rc` |
+| Every 15 min: `*/15 * * * *` | `bash ~/unfollow-ads/run.sh store` |
+| Nightly: `20 3 * * *` | `bash ~/unfollow-ads/run.sh store-cold` |
+
+**Do not also schedule `rc`.** It is the legacy full refresh, kept only as a
+fallback. `store` replaces it and does the same job in seconds.
+
+---
+
+## Migrating an existing install to the fact store
+
+The old `rc` job re-derived every number from the RevenueCat API on each run,
+so its runtime tracked *total install history* rather than recent activity: 15
+minutes in May, 71 minutes by August at 111k customers. Once it exceeded its
+own 30-minute interval, runs overlapped and raced on `data.json`, which is how
+the dashboard came to be serving 2026-07-01 data in the middle of August.
+
+The store fixes that by keeping facts instead of re-fetching them. Cost becomes
+proportional to what happened since last time.
+
+### One-time cutover
+
+```bash
+# 1. Re-run the installer workflow (GitHub → Actions → "Install cPanel cron
+#    setup" → Run workflow). It now ships store.py, the three ingest scripts,
+#    the adapter, and the Apple Ads credentials that were previously missing.
+
+# 2. Load history into the store. Idempotent — safe to re-run.
+#    Replays every rotated rc_events archive, 90 days of ad spend, and
+#    resolves the attribution backlog.
+bash ~/unfollow-ads/run.sh store-backfill
+
+# 3. Confirm it worked
+tail -40 ~/unfollow-ads/cron.log
+```
+
+The backfill's customer walk takes roughly as long as one old `rc` run. It is
+the last time that walk ever blocks anything.
+
+### 4. Then swap the cron
+
+Replace the `*/30 ... run.sh rc` job with the two `store` jobs above.
+
+### Verifying
+
+```bash
+tail -30 ~/unfollow-ads/cron.log
+```
+
+A healthy hot-path run looks like:
+
+```
+[rc] read 8014 log records (0 unparseable)
+[rc] wrote 8014 txn, 13 attributed customers, 5023 sub_state
+[rc] store now: 8014 txn 2026-08-10..2026-08-20 | gross $43,307.30 -> proceeds $32,971.66
+[ads] apple: 112 keyword-days 2026-08-14..2026-08-20 (16 keywords)
+--- RevenueCat (fact store) ---
+  111351 customers, 11017 paying, 6602 active  (0.4s, zero API calls)
+```
+
+If you instead see `--- Fetching RevenueCat (legacy API walk) ---`, the store
+is empty or unreadable and the script has fallen back to the old path. Run the
+backfill and check `STORE_PATH` in `config.sh`.
+
+### Turning off the GitHub Actions refresh
+
+Once cPanel is running the store jobs, **disable the `Refresh Dashboard`
+workflow** (GitHub → Actions → Refresh Dashboard → ⋯ → Disable workflow).
+Leaving it on means two independent writers publishing `data.json` on
+different schedules, which is a second source of the same clobbering problem
+the store was built to end.
 
 Replace `~/unfollow-ads/` with the full absolute path (cron sometimes doesn't expand `~`). To get it: `cd ~/unfollow-ads && pwd`.
 

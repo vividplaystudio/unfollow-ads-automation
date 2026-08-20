@@ -5,8 +5,11 @@
 # Usage from cPanel cron:
 #   bash /home/<user>/unfollow-ads/run.sh meta
 #   bash /home/<user>/unfollow-ads/run.sh adjust
-#   bash /home/<user>/unfollow-ads/run.sh rc       — full refresh (slow, ~10 min)
+#   bash /home/<user>/unfollow-ads/run.sh rc       — LEGACY full refresh (slow, 20-70 min)
 #   bash /home/<user>/unfollow-ads/run.sh rc-fast  — daily_rc only (fast, ~5 s)
+#   bash /home/<user>/unfollow-ads/run.sh store         — hot path, replaces `rc`
+#   bash /home/<user>/unfollow-ads/run.sh store-cold    — nightly reconciliation
+#   bash /home/<user>/unfollow-ads/run.sh store-backfill — one-shot history load
 
 set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -211,8 +214,42 @@ case "$1" in
         echo "[$TS] === RC fast daily_rc refresh (using $PY) ===" >> "$LOG"
         "$PY" $PYFLAGS "$SCRIPT_DIR/refresh_daily_rc_fast.py" >> "$LOG" 2>&1
         ;;
+    store)
+        # HOT PATH — the one that runs often. Reads the webhook log off disk
+        # and a trailing week of ad spend, then rebuilds data.json from the
+        # store. Seconds, not minutes, and its cost does not grow with the
+        # size of the account. This replaces `rc`.
+        acquire_lock store || exit 0
+        echo "[$TS] === store hot path (using $PY) ===" >> "$LOG"
+        "$PY" $PYFLAGS "$SCRIPT_DIR/ingest_rc.py"  >> "$LOG" 2>&1 || \
+            echo "  (rc ingest failed — continuing; data.json will use the last good store)" >> "$LOG"
+        # Popularity is a slow-moving property of the search term, so the hot
+        # path skips it; store-cold refreshes it nightly.
+        REFRESH_POPULARITY=0 "$PY" $PYFLAGS "$SCRIPT_DIR/ingest_ads.py" >> "$LOG" 2>&1 || \
+            echo "  (ad ingest failed — continuing with previously stored spend)" >> "$LOG"
+        "$PY" $PYFLAGS "$SCRIPT_DIR/refresh_dashboard_json.py" >> "$LOG" 2>&1
+        ;;
+    store-cold)
+        # COLD PATH — nightly. The only job that still walks the full customer
+        # list, kept deliberately off the frequent schedule so its runtime
+        # cannot outrun its own interval the way the old `rc` job did.
+        acquire_lock store-cold || exit 0
+        echo "[$TS] === store cold path (using $PY) ===" >> "$LOG"
+        "$PY" $PYFLAGS "$SCRIPT_DIR/ingest_customers.py" >> "$LOG" 2>&1
+        "$PY" $PYFLAGS "$SCRIPT_DIR/ingest_ads.py" >> "$LOG" 2>&1
+        ;;
+    store-backfill)
+        # ONE-SHOT — replay every rotated webhook archive into the store and
+        # pull a wide window of ad history. Safe to re-run: every writer is
+        # idempotent by primary key.
+        acquire_lock store-cold || exit 0
+        echo "[$TS] === store BACKFILL (using $PY) ===" >> "$LOG"
+        "$PY" $PYFLAGS "$SCRIPT_DIR/ingest_rc.py" >> "$LOG" 2>&1
+        AD_LOOKBACK_DAYS="${2:-90}" "$PY" $PYFLAGS "$SCRIPT_DIR/ingest_ads.py" >> "$LOG" 2>&1
+        ATTR_BATCH="${3:-40000}" "$PY" $PYFLAGS "$SCRIPT_DIR/ingest_customers.py" >> "$LOG" 2>&1
+        ;;
     *)
-        echo "Usage: $0 {meta|adjust|rc|rc-fast}" >&2
+        echo "Usage: $0 {meta|adjust|rc|rc-fast|store|store-cold|store-backfill}" >&2
         exit 2
         ;;
 esac
