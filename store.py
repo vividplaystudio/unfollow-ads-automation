@@ -164,6 +164,25 @@ CREATE TABLE IF NOT EXISTS keyword_dim (
     updated_at_ms INTEGER
 );
 
+-- Apple's market-wide search volume, independent of whether we bid on a term.
+-- Unfiltered, the popularity endpoint returns the most-searched terms per
+-- country and genre, which is keyword RESEARCH rather than reporting: what
+-- people actually search, ranked, with a volume score. Kept per month because
+-- Apple publishes it monthly and the trend matters as much as the level.
+CREATE TABLE IF NOT EXISTS search_term_popularity (
+    month         TEXT NOT NULL,
+    country       TEXT NOT NULL,
+    genre         TEXT NOT NULL,
+    term          TEXT NOT NULL,
+    rank_in_genre INTEGER,
+    popularity    INTEGER,
+    popularity_1to5 INTEGER,
+    updated_at_ms INTEGER,
+    PRIMARY KEY (month, country, genre, term)
+);
+CREATE INDEX IF NOT EXISTS ix_stp_lookup ON search_term_popularity(country, term);
+CREATE INDEX IF NOT EXISTS ix_stp_rank   ON search_term_popularity(country, genre, rank_in_genre);
+
 CREATE TABLE IF NOT EXISTS campaign_dim (
     campaign_id   TEXT PRIMARY KEY,
     source        TEXT,
@@ -532,6 +551,29 @@ def upsert_adgroup_dim(conn, rows) -> int:
 
 # ── Queries used by ingest ───────────────────────────────────────────────
 
+def upsert_search_term_popularity(conn, rows) -> int:
+    now = utc_now_ms()
+    payload = [
+        (r["month"], r["country"], r.get("genre") or "", r["term"],
+         r.get("rank_in_genre"), r.get("popularity"), r.get("popularity_1to5"), now)
+        for r in rows if r.get("month") and r.get("country") and r.get("term")
+    ]
+    if not payload:
+        return 0
+    conn.executemany(
+        "INSERT INTO search_term_popularity (month, country, genre, term, "
+        "                                    rank_in_genre, popularity, "
+        "                                    popularity_1to5, updated_at_ms) "
+        "VALUES (?,?,?,?,?,?,?,?) "
+        "ON CONFLICT(month, country, genre, term) DO UPDATE SET "
+        "  rank_in_genre=excluded.rank_in_genre, popularity=excluded.popularity, "
+        "  popularity_1to5=excluded.popularity_1to5, "
+        "  updated_at_ms=excluded.updated_at_ms",
+        payload,
+    )
+    return len(payload)
+
+
 def customers_missing_attribution(conn, limit: int = None):
     """Payers we have transactions for but no attribution row yet.
 
@@ -593,4 +635,5 @@ def store_stats(conn) -> dict:
         "ad_daily_last": one("SELECT MAX(day) FROM ad_daily"),
         "keywords": one("SELECT COUNT(*) FROM keyword_dim"),
         "keywords_with_popularity": one("SELECT COUNT(*) FROM keyword_dim WHERE popularity IS NOT NULL"),
+        "search_terms_ranked": one("SELECT COUNT(*) FROM search_term_popularity"),
     }

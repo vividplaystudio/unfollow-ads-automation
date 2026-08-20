@@ -100,8 +100,10 @@ def ad_hoc(method: str, path: str, body_json: str) -> int:
     print(f"body: {json.dumps(body)[:2000]}")
     resp = attempt(f"{method} {path}", lambda: legacy.asa_v1(method, path, body))
     if resp:
-        print("\n--- full response (truncated to 12k) ---")
-        print(json.dumps(resp, indent=2, default=str)[:12000])
+        print("\n--- full response (truncated to 200k) ---")
+        # 12k truncated mid-object and made the reply unparseable, which
+        # defeats the point of dumping it.
+        print(json.dumps(resp, default=str)[:200000])
     return 0
 
 

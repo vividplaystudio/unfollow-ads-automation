@@ -328,17 +328,130 @@ def ingest_apple_dims(conn) -> dict:
             "keywords": len(kw_rows)}
 
 
+# Markets worth pulling the volume feed for. The keyword-research value is in
+# the markets we advertise in or plan to, not every storefront Apple has.
+DISCOVERY_MARKETS = [
+    m.strip().upper()
+    for m in os.environ.get(
+        "DISCOVERY_MARKETS", "US,GB,CA,AU,DE,FR,IT,ES,BR,MX"
+    ).split(",") if m.strip()
+]
+# Genres an unfollower/analytics app competes in.
+DISCOVERY_GENRES = [
+    g.strip().upper()
+    for g in os.environ.get(
+        "DISCOVERY_GENRES", "SOCIAL_NETWORKING,PHOTO_AND_VIDEO,UTILITIES"
+    ).split(",") if g.strip()
+]
+
+
+def ingest_top_search_terms(conn, markets=None, genres=None,
+                            page_size: int = 1000) -> dict:
+    """Apple's most-searched terms per market and genre.
+
+    The same endpoint used for per-keyword volume, but WITHOUT a searchTerm
+    filter, which turns it from a lookup into a research feed: what people
+    actually search, ranked, with a volume score, whether or not we bid on it.
+
+    Only ~3% of our 1,152 existing keywords are ranked by Apple, so asking
+    term-by-term mostly returns nothing. Reading the feed the other way round
+    -- here is what IS searched -- is how you build a keyword list rather than
+    grade one you already guessed.
+    """
+    if not legacy.ASA_V1_ENABLED:
+        return {"rows": 0}
+    markets = markets or DISCOVERY_MARKETS
+    genres = genres or DISCOVERY_GENRES
+
+    today = datetime.now(timezone.utc).date()
+    start = (today - timedelta(days=75)).replace(day=1).isoformat()
+    t0, total = time.time(), 0
+
+    for country in markets:
+        for genre in genres:
+            try:
+                rows = legacy.asa_v1_paged(
+                    "/insights/apps/search-term-popularity/query",
+                    {
+                        "timeRange": {"start": start, "end": today.isoformat(),
+                                      "timeZone": "UTC", "granularity": "MONTHLY"},
+                        "filters": [
+                            {"field": "countryOrRegion", "operator": "EQUALS",
+                             "value": country},
+                            {"field": "genre", "operator": "EQUALS",
+                             "value": genre},
+                        ],
+                    },
+                    page_size=page_size,
+                )
+            except Exception as e:
+                print(f"  [ads] volume feed failed for {country}/{genre}: "
+                      f"{type(e).__name__}")
+                continue
+            payload = [{
+                "month": r.get("month"),
+                "country": r.get("countryOrRegion") or country,
+                "genre": r.get("genre") or genre,
+                "term": (r.get("searchTerm") or "").strip(),
+                "rank_in_genre": r.get("rankInGenre"),
+                "popularity": r.get("searchPopularity1to100"),
+                "popularity_1to5": r.get("searchPopularity1to5"),
+            } for r in rows if r.get("searchTerm")]
+            total += store.upsert_search_term_popularity(conn, payload)
+    conn.commit()
+    print(f"  [ads] volume feed: {total} term-months across "
+          f"{len(markets)} markets x {len(genres)} genres in {time.time()-t0:.0f}s")
+    return {"rows": total}
+
+
+def backfill_keyword_popularity_from_feed(conn) -> int:
+    """Score our own keywords from the feed we already downloaded.
+
+    Cheaper and more complete than asking per term: the feed is one request per
+    market/genre, and a keyword that appears in it gets its volume for free.
+    """
+    n = conn.execute("""
+        UPDATE keyword_dim SET
+            popularity = (
+                SELECT s.popularity FROM search_term_popularity s
+                JOIN campaign_dim c ON c.campaign_id = keyword_dim.campaign_id
+                WHERE LOWER(s.term) = LOWER(keyword_dim.text)
+                  AND s.country = COALESCE(c.country, 'US')
+                ORDER BY s.month DESC LIMIT 1),
+            rank_in_genre = (
+                SELECT s.rank_in_genre FROM search_term_popularity s
+                JOIN campaign_dim c ON c.campaign_id = keyword_dim.campaign_id
+                WHERE LOWER(s.term) = LOWER(keyword_dim.text)
+                  AND s.country = COALESCE(c.country, 'US')
+                ORDER BY s.month DESC LIMIT 1)
+        WHERE popularity IS NULL AND text IS NOT NULL AND EXISTS (
+            SELECT 1 FROM search_term_popularity s
+            JOIN campaign_dim c ON c.campaign_id = keyword_dim.campaign_id
+            WHERE LOWER(s.term) = LOWER(keyword_dim.text)
+              AND s.country = COALESCE(c.country, 'US'))
+    """).rowcount
+    conn.commit()
+    if n:
+        print(f"  [ads] scored {n} of our keywords from the volume feed")
+    return n
+
+
 def main() -> int:
     conn = store.open_store()
     ingest_apple_dims(conn)
     ingest_apple(conn)
     if os.environ.get("REFRESH_POPULARITY", "1") == "1":
+        # Feed first: it scores most of our keywords in a handful of requests,
+        # so the per-term pass that follows has far less left to ask about.
+        ingest_top_search_terms(conn)
+        backfill_keyword_popularity_from_feed(conn)
         ingest_apple_popularity(conn)
     store.set_meta(conn, "ads_ingested_at_ms", store.utc_now_ms())
     conn.commit()
     st = store.store_stats(conn)
     print(f"  [ads] store: {st['ad_daily']} ad-days (latest {st['ad_daily_last']}), "
-          f"{st['keywords']} keywords, {st['keywords_with_popularity']} with popularity")
+          f"{st['keywords']} keywords, {st['keywords_with_popularity']} with popularity, "
+          f"{st['search_terms_ranked']} ranked terms in the volume feed")
     return 0
 
 

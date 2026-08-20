@@ -2275,8 +2275,28 @@ def main() -> None:
             row[f"yearly_subs_{r}"] = rd.get("yearly_subs", 0)
         channels_out.append(row)
 
+    # Apple's market-wide search volume, from the store. This is keyword
+    # RESEARCH, not reporting: the most-searched terms per market whether or
+    # not we bid on them, which is what makes "which keywords should we buy"
+    # answerable without guessing.
+    keyword_volume = []
+    if STORE_MODE:
+        try:
+            import store as _s
+            _c = _s.open_store()
+            keyword_volume = [dict(r) for r in _c.execute(
+                "SELECT country, genre, term, rank_in_genre, popularity, month "
+                "FROM search_term_popularity "
+                "WHERE month = (SELECT MAX(month) FROM search_term_popularity) "
+                "ORDER BY country, genre, rank_in_genre LIMIT 20000")]
+            if keyword_volume:
+                print(f"  keyword volume feed: {len(keyword_volume)} ranked terms")
+        except Exception as e:
+            print(f"  [store] keyword volume unavailable ({type(e).__name__})")
+
     output = {
         "last_updated": datetime.now(timezone.utc).isoformat(),
+        "keyword_volume": keyword_volume,
         "campaigns": campaigns_out,
         "search_terms": searchterms_out,
         "recommendations": recommendations_out,
