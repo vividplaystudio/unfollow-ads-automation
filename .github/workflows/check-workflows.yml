@@ -1,0 +1,39 @@
+name: Check workflow Python
+
+# Catches syntax errors in the Python embedded in workflow heredocs. YAML
+# validates such a block happily, so without this the first sign of a stray
+# indentation error is a failed run on a real dispatch, minutes into a job.
+
+on:
+  push:
+    paths:
+      - ".github/workflows/**"
+      - "tools/check_workflow_python.py"
+  pull_request:
+    paths:
+      - ".github/workflows/**"
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python3 tools/check_workflow_python.py
+      - name: Validate YAML
+        run: |
+          python3 - <<'PY'
+          import glob, sys, yaml
+          bad = 0
+          for p in sorted(glob.glob(".github/workflows/*.yml")):
+              try:
+                  yaml.safe_load(open(p, encoding="utf-8"))
+              except yaml.YAMLError as e:
+                  print(f"{p}: {e}")
+                  bad += 1
+          print(f"{'FAILED' if bad else 'OK'}: {bad} invalid workflow files")
+          sys.exit(1 if bad else 0)
+          PY

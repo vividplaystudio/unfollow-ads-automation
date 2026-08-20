@@ -73,12 +73,6 @@ jobs:
               )
 
           try:
-                  go(path)
-              except ftplib.error_perm:
-                  go(re.sub(r"^/home/[^/]+", "", path) or "/")
-              return ftp.pwd()
-
-          try:
               ftp = ftplib.FTP_TLS(os.environ["FTP_HOST"], timeout=60, context=ctx)
               ftp.login(os.environ["FTP_USER"], os.environ["FTP_PASS"]); ftp.prot_p()
               print(f"  working dir: {navigate(ftp)}")
@@ -219,12 +213,6 @@ jobs:
               raise RuntimeError(
                   f"could not reach {path} over FTP at any chroot depth: {last_err}"
               )
-
-          try:
-                  go(path)
-              except ftplib.error_perm:
-                  go(re.sub(r"^/home/[^/]+", "", path) or "/")
-              return ftp.pwd()
 
           ftp = ftplib.FTP_TLS(os.environ["FTP_HOST"], timeout=120, context=ctx)
           ftp.login(os.environ["FTP_USER"], os.environ["FTP_PASS"]); ftp.prot_p()
