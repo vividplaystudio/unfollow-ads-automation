@@ -38,9 +38,20 @@ import refresh_dashboard_json as legacy
 from ingest_rc import normalize_channel
 
 # Upper bound on how many customers get attribute lookups in a single run.
-# At ~2k installs/day the steady state is far below this; the cap only bites
-# while the initial backlog drains, and keeps any one night bounded.
-ATTR_BATCH = int(os.environ.get("ATTR_BATCH", "8000"))
+#
+# Kept deliberately small. The 2026-08-20 backfill enriched 40,000 customers in
+# 744 seconds and found attribution for ZERO of them, because RevenueCat only
+# carries $mediaSource for Apple Search Ads installs -- Meta attribution lives
+# in Adjust and never reaches RC. Meanwhile the webhook log already delivers
+# ASA attribution for every payer, and gave 144 attributed customers where the
+# old full API walk found 23.
+#
+# So this backlog is worth draining slowly rather than urgently: its only
+# unique contribution is ASA-attributed NON-payers, which feed the asa_users
+# column, and Apple's own per-keyword installs metric measures that better.
+# Raise it (ATTR_BATCH=40000) for a deliberate one-off once ASA is running
+# again and there is actually something to find.
+ATTR_BATCH = int(os.environ.get("ATTR_BATCH", "2000"))
 ATTR_WORKERS = int(os.environ.get("ATTR_WORKERS", "8"))
 
 
@@ -122,8 +133,13 @@ def enrich_attribution(conn, limit: int = ATTR_BATCH) -> dict:
     remaining = conn.execute(
         "SELECT COUNT(*) FROM customer WHERE attrs_fetched_ms IS NULL"
     ).fetchone()[0]
-    print(f"  [cold] enriched {n} customers ({attributed} attributed) in "
-          f"{time.time()-t0:.0f}s; {remaining} still unknown")
+    yield_pct = (attributed / n * 100) if n else 0
+    print(f"  [cold] enriched {n} customers in {time.time()-t0:.0f}s: "
+          f"{attributed} attributed ({yield_pct:.1f}% yield); {remaining} still unknown")
+    if n >= 500 and attributed == 0:
+        print("  [cold] note: zero yield — RC only stores attribution for Apple "
+              "Search Ads installs, and those already arrive via the webhook. "
+              "Set ATTR_BATCH=0 to skip this step entirely.")
     return {"fetched": n, "attributed": attributed, "remaining": remaining}
 
 

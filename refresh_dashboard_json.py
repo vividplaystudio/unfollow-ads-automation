@@ -255,7 +255,18 @@ def asa_v1_paged(path: str, body: dict, page_size: int = 1000) -> list:
         resp = asa_v1("POST", path, payload)
         data = resp.get("data") or []
         if isinstance(data, dict):
-            data = data.get("rows") or data.get("results") or []
+            # Reporting endpoints nest rows under reportingDataResponse; the
+            # management endpoints return a bare list. Try each known shape.
+            data = (data.get("rows") or data.get("results")
+                    or (data.get("reportingDataResponse") or {}).get("row") or [])
+        if offset == 0 and not data:
+            # Returning [] silently here is how "0 campaigns" appeared with no
+            # explanation. Surface what actually came back so the next run
+            # diagnoses itself instead of needing another round trip.
+            print(f"  ASA v1 {path}: no rows. response keys="
+                  f"{sorted(resp.keys())} data type={type(resp.get('data')).__name__}"
+                  + (f" data keys={sorted(resp['data'].keys())}"
+                     if isinstance(resp.get("data"), dict) else ""))
         rows.extend(data)
         pg = (resp.get("pagination") or {})
         total = pg.get("totalResults")
@@ -281,7 +292,9 @@ def asa_v1_report(entity: str, start: str, end: str,
             "timeZone": "ORTZ" if entity == "searchterms" else "UTC",
             "granularity": "DAILY",
         },
-        "sorting": [{"field": "localSpend", "order": "DESCENDING"}],
+        # v1 renamed the sort order values: v5 accepted DESCENDING, v1 rejects
+        # it with VALIDATION_ERROR and takes only ASC/DESC.
+        "sorting": [{"field": "localSpend", "order": "DESC"}],
     }
     if group_by:
         body["groupBy"] = group_by
