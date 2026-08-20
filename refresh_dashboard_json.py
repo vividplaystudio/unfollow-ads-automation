@@ -984,12 +984,25 @@ def rc_enrich_customers(customers: list) -> list:
     # Customers with no transactions are given explicit zeroed fields rather
     # than being dropped, so cohort/retention and totals still see the full
     # population; they simply cost no API calls.
-    recent_cutoff_ms = (datetime.now(timezone.utc) - timedelta(days=60)).timestamp() * 1000
+    # The insurance window below is deliberately SHORT. It was first written as
+    # 60 days -- matching the webhook window -- which enriched every install of
+    # the last 60 days and defeated the whole point: the Aug 19 run enriched
+    # 73,401 of 109,917 customers (66.8%) and 62,044 of those came back with no
+    # subscription at all. Those 62k are ~124k round trips spent confirming that
+    # non-payers did not pay.
+    #
+    # Webhooks arrive within seconds of a purchase, so the only payers the log
+    # can miss are ones bought during a receiver outage. Two days covers that
+    # and costs ~2 days of installs instead of 60.
+    INSURANCE_DAYS = 2
+    recent_cutoff_ms = (
+        datetime.now(timezone.utc) - timedelta(days=INSURANCE_DAYS)
+    ).timestamp() * 1000
 
     def _seen_recently(c) -> bool:
-        """Installed inside the webhook window -- may have paid without us
-        having captured the webhook yet. Cheap insurance against undercounting
-        brand-new payers."""
+        """Installed within INSURANCE_DAYS -- may have paid during a webhook
+        receiver outage. Cheap insurance against undercounting brand-new
+        payers, bounded so it cannot dominate the run."""
         fs = c.get("first_seen_at")
         if not fs:
             return False
@@ -1023,9 +1036,10 @@ def rc_enrich_customers(customers: list) -> list:
         c["_txn_source"] = "none"
 
     pct = (len(to_enrich) / len(customers) * 100) if customers else 0
-    print(f"  Enriching {len(to_enrich)} customers with revenue activity "
-          f"({pct:.1f}% of {len(customers)}); {len(skipped)} never transacted "
-          f"-> zero API calls")
+    print(f"  Enriching {len(to_enrich)} customers "
+          f"({pct:.1f}% of {len(customers)}): {len(webhook_events)} from the "
+          f"webhook log + installs from the last {INSURANCE_DAYS}d; "
+          f"{len(skipped)} skipped -> zero API calls")
 
     def enrich_one(customer):
         cid = customer["id"]
