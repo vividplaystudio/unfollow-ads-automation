@@ -2232,10 +2232,20 @@ def main() -> None:
     # terms you never wanted (-> negatives), and spot terms converting well
     # that you are not bidding on yet (-> promote to exact). No v5 equivalent.
     searchterms_out = []
-    if use_v1:
+    if use_v1 and campaign_meta:
         try:
             for r, (rs, re_) in ranges.items():
-                for row_ in asa_v1_report("searchterms", rs.isoformat(), re_.isoformat()):
+                # Apple rejects DAILY granularity beyond ~90 days, so the "all"
+                # range (from 2026-03-01) fails outright. Report the widest
+                # window it will accept instead of losing the range entirely.
+                if (re_ - rs).days > 89:
+                    rs = re_ - timedelta(days=89)
+                # SEARCHTERM reports require a campaignId filter exactly as
+                # KEYWORD reports do; without it every call 400s and the retry
+                # loop turns a fast build into a slow one.
+                for row_ in asa_v1_report_all_campaigns(
+                        "searchterms", rs.isoformat(), re_.isoformat(),
+                        list(campaign_meta.keys())):
                     m = row_.get("metadata", {}) or {}
                     t = row_.get("total", {}) or {}
                     term = (m.get("searchTermText") or m.get("searchTerm") or "").strip()
@@ -2259,11 +2269,24 @@ def main() -> None:
 
     # ── Apple's own recommendations ────────────────────────────────────────
     recommendations_out = []
-    if use_v1:
+    # Apple requires filters on promotedObjectId AND promotedObjectType:
+    #   "REQUIRED_VALUE_FIELD filters.promotedObjectId ... filters.promotedObjectType"
+    # promotedObjectId is the App Store app id, which every campaign carries.
+    _promoted_id = os.environ.get("ASA_APP_ID", "6758404269")
+    if use_v1 and _promoted_id:
+        _rec_body = {
+            "filters": [
+                {"field": "promotedObjectId", "operator": "EQUALS",
+                 "value": str(_promoted_id)},
+                {"field": "promotedObjectType", "operator": "EQUALS",
+                 "value": "APPSTORE_APP"},
+            ],
+            "pagination": {"offset": 0, "pageSize": 200},
+        }
         for kind, path in (("daily_budget", "/recommendations/daily-budgets/query"),
                            ("target_cpa", "/recommendations/target-cpas/query")):
             try:
-                for rec in asa_v1_paged(path, {}):
+                for rec in asa_v1_paged(path, _rec_body):
                     rec["_kind"] = kind
                     recommendations_out.append(rec)
             except Exception as e:
