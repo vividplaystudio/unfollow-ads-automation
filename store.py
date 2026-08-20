@@ -156,7 +156,10 @@ CREATE TABLE IF NOT EXISTS keyword_dim (
     text          TEXT,
     match_type    TEXT,
     bid           REAL,
-    popularity    INTEGER,          -- NULL when Apple did not return it
+    popularity    INTEGER,          -- Apple's 1-100 volume score; NULL = unknown, never 0
+    rank_in_genre INTEGER,
+    genre         TEXT,
+    popularity_month TEXT,
     status        TEXT,
     updated_at_ms INTEGER
 );
@@ -222,8 +225,48 @@ def open_store(path: str = None) -> sqlite3.Connection:
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.executescript(SCHEMA)
+    _migrate(conn)
     conn.commit()
     return conn
+
+
+# Columns added after a store may already exist in the field. CREATE TABLE IF
+# NOT EXISTS does nothing to a table that is already there, so a new column in
+# SCHEMA would be silently absent on every deployed store and the next upsert
+# would fail with "table has no column named ...". Each entry here is applied
+# with ALTER TABLE when missing.
+#
+# Append-only: never remove an entry, or a store that skipped that release
+# stops migrating. SQLite ALTER TABLE ADD COLUMN is cheap and rewrites nothing.
+MIGRATIONS = [
+    ("txn", "proceeds", "REAL NOT NULL DEFAULT 0"),
+    ("txn", "tax_pct", "REAL"),
+    ("txn", "commission_pct", "REAL"),
+    ("txn", "expiration_ms", "INTEGER"),
+    ("txn", "event_type", "TEXT"),
+    ("customer", "attrs_fetched_ms", "INTEGER"),
+    ("keyword_dim", "rank_in_genre", "INTEGER"),
+    ("keyword_dim", "genre", "TEXT"),
+    ("keyword_dim", "popularity_month", "TEXT"),
+]
+
+
+def _migrate(conn) -> None:
+    applied = []
+    for table, column, decl in MIGRATIONS:
+        try:
+            cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+        except Exception:
+            continue                     # table not created yet; SCHEMA covers it
+        if not cols or column in cols:
+            continue
+        try:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+            applied.append(f"{table}.{column}")
+        except Exception as e:
+            print(f"  [store] migration {table}.{column} failed: {e}")
+    if applied:
+        print(f"  [store] migrated: {', '.join(applied)}")
 
 
 # ── Watermarks ───────────────────────────────────────────────────────────
@@ -408,7 +451,8 @@ def upsert_keyword_dim(conn, rows) -> int:
         (
             str(r["keyword_id"]), r.get("campaign_id"), r.get("adgroup_id"),
             r.get("text"), r.get("match_type"), r.get("bid"),
-            r.get("popularity"), r.get("status"), now,
+            r.get("popularity"), r.get("rank_in_genre"), r.get("genre"),
+            r.get("popularity_month"), r.get("status"), now,
         )
         for r in rows
     ]
@@ -416,8 +460,9 @@ def upsert_keyword_dim(conn, rows) -> int:
         return 0
     conn.executemany(
         "INSERT INTO keyword_dim (keyword_id, campaign_id, adgroup_id, text, "
-        "                         match_type, bid, popularity, status, updated_at_ms) "
-        "VALUES (?,?,?,?,?,?,?,?,?) "
+        "                         match_type, bid, popularity, rank_in_genre, "
+        "                         genre, popularity_month, status, updated_at_ms) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?) "
         "ON CONFLICT(keyword_id) DO UPDATE SET "
         "  campaign_id=COALESCE(excluded.campaign_id, keyword_dim.campaign_id), "
         "  adgroup_id =COALESCE(excluded.adgroup_id,  keyword_dim.adgroup_id), "
@@ -425,6 +470,9 @@ def upsert_keyword_dim(conn, rows) -> int:
         "  match_type =COALESCE(excluded.match_type,  keyword_dim.match_type), "
         "  bid        =COALESCE(excluded.bid,         keyword_dim.bid), "
         "  popularity =COALESCE(excluded.popularity,  keyword_dim.popularity), "
+        "  rank_in_genre=COALESCE(excluded.rank_in_genre, keyword_dim.rank_in_genre), "
+        "  genre      =COALESCE(excluded.genre,       keyword_dim.genre), "
+        "  popularity_month=COALESCE(excluded.popularity_month, keyword_dim.popularity_month), "
         "  status     =COALESCE(excluded.status,      keyword_dim.status), "
         "  updated_at_ms=excluded.updated_at_ms",
         payload,

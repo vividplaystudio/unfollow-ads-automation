@@ -315,8 +315,12 @@ def asa_v1_report(entity: str, start: str, end: str,
         body["groupBy"] = group_by
     filters = list(extra_filters or [])
     if campaign_id is not None:
+        # SINGULAR "value". A "values" array is rejected with the misleading
+        # "Filter value required. Field: campaignId" -- the field is named in
+        # the error, so it reads like the id is missing rather than the key
+        # being wrong. campaignId also only accepts EQUALS, never IN.
         filters.append({"field": "campaignId", "operator": "EQUALS",
-                        "values": [str(campaign_id)]})
+                        "value": str(campaign_id)})
     if filters:
         body["filters"] = filters
     # EMPTY_METRICS is rejected alongside a campaignId filter, and it is only
@@ -345,33 +349,100 @@ def asa_v1_report_all_campaigns(entity: str, start: str, end: str,
     return rows
 
 
-def asa_v1_keyword_popularity(keywords: list, country: str = "US") -> dict:
-    """Apple's search-volume score per term -> {keyword_lower: popularity}.
+def asa_v1_keyword_popularity(keywords: list, country: str = "US",
+                              month_start: str = None,
+                              month_end: str = None) -> dict:
+    """Apple's search-volume score per term.
 
-    This is the field that makes 'does volume predict profit?' answerable: it
+    Returns {term_lower: {"popularity", "rank_in_genre", "genre", "month"}}.
+
+    This is the field that makes "does volume predict profit?" answerable: it
     lands on the same row as revenue and cost-per-sub in data.json.
+
+    The endpoint's contract, established by probing it directly:
+      * timeRange is REQUIRED, and its granularity must be MONTHLY or
+        WEEKLY_SUN_SAT -- DAILY is rejected.
+      * Filters use a SINGULAR "value"; a "values" array comes back as
+        "Unrecognized property 'values'", so terms cannot be batched and it is
+        one request per term per country.
+      * Unfiltered, it returns the most-searched terms per country and genre,
+        which makes it a keyword DISCOVERY feed as well as a lookup.
+
+    searchPopularity1to100 is the useful number: Apple's 1-100 volume score.
+    A term Apple does not rank simply returns no row, and is recorded as None
+    rather than 0 -- "unknown" and "nobody searches this" are different facts.
     """
     if not keywords:
         return {}
-    out, CHUNK = {}, 100
-    for i in range(0, len(keywords), CHUNK):
-        chunk = keywords[i:i + CHUNK]
+
+    if not month_start or not month_end:
+        today = datetime.now(timezone.utc).date()
+        # Apple publishes this monthly and the current month is incomplete, so
+        # look back far enough to always cover a settled one.
+        month_start = (today - timedelta(days=60)).replace(day=1).isoformat()
+        month_end = today.isoformat()
+
+    out = {}
+    for term in keywords:
+        term = (term or "").strip()
+        if not term:
+            continue
         resp = asa_v1("POST", "/insights/apps/search-term-popularity/query", {
-            "searchTerms": chunk,
-            "countriesOrRegions": [country],
+            "timeRange": {"start": month_start, "end": month_end,
+                          "timeZone": "UTC", "granularity": "MONTHLY"},
+            "filters": [
+                {"field": "countryOrRegion", "operator": "EQUALS", "value": country},
+                {"field": "searchTerm", "operator": "EQUALS", "value": term},
+            ],
+            "pagination": {"offset": 0, "pageSize": 12},
         })
-        rows = resp.get("data") or []
-        if isinstance(rows, dict):
-            rows = rows.get("rows") or rows.get("results") or []
-        for r in rows:
-            term = (r.get("searchTerm") or r.get("keyword") or "").strip().lower()
-            if not term:
-                continue
-            pop = r.get("searchTermPopularity", r.get("popularity"))
-            if pop is not None:
-                out[term] = pop
-    print(f"  ASA v1: popularity resolved for {len(out)}/{len(keywords)} terms")
+        rows = ((resp.get("result") or {}).get("rows")
+                if isinstance(resp.get("result"), dict) else None) or []
+        if not rows:
+            continue
+        # Several months may come back; keep the most recent.
+        row = max(rows, key=lambda r: r.get("month") or "")
+        pop = row.get("searchPopularity1to100")
+        if pop is None:
+            continue
+        out[term.lower()] = {
+            "popularity": int(pop),
+            "rank_in_genre": row.get("rankInGenre"),
+            "genre": row.get("genre"),
+            "month": row.get("month"),
+        }
+
+    print(f"  ASA v1: popularity resolved for {len(out)}/{len(keywords)} terms "
+          f"in {country}")
     return out
+
+
+def asa_v1_top_search_terms(country: str = "US", genre: str = None,
+                            limit: int = 200) -> list:
+    """The unfiltered popularity feed: Apple's most-searched terms.
+
+    Same endpoint with no searchTerm filter, which turns it into keyword
+    discovery -- what people in a market actually search, ranked, with a
+    volume score. Useful for building a keyword list rather than guessing one.
+    """
+    today = datetime.now(timezone.utc).date()
+    body = {
+        "timeRange": {
+            "start": (today - timedelta(days=60)).replace(day=1).isoformat(),
+            "end": today.isoformat(),
+            "timeZone": "UTC", "granularity": "MONTHLY",
+        },
+        "filters": [{"field": "countryOrRegion", "operator": "EQUALS",
+                     "value": country}],
+        "pagination": {"offset": 0, "pageSize": min(int(limit), 1000)},
+    }
+    if genre:
+        body["filters"].append({"field": "genre", "operator": "EQUALS",
+                                "value": genre})
+    resp = asa_v1("POST", "/insights/apps/search-term-popularity/query", body)
+    rows = ((resp.get("result") or {}).get("rows")
+            if isinstance(resp.get("result"), dict) else None) or []
+    return rows
 
 
 def asa_request(asa_token: str, method: str, path: str, body: dict = None) -> dict:

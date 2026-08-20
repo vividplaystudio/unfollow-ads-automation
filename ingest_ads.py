@@ -169,9 +169,15 @@ def ingest_apple_popularity(conn) -> dict:
             continue
         for r in group:
             v = pop.get((r["text"] or "").strip().lower())
-            if v is None:
+            if not v:
                 continue
-            updates.append({"keyword_id": r["keyword_id"], "popularity": int(v)})
+            updates.append({
+                "keyword_id": r["keyword_id"],
+                "popularity": v["popularity"],
+                "rank_in_genre": v.get("rank_in_genre"),
+                "genre": v.get("genre"),
+                "popularity_month": v.get("month"),
+            })
             resolved += 1
 
     if updates:
