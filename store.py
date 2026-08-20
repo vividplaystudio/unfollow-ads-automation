@@ -511,6 +511,22 @@ def paying_customers(conn, since_day: str = None):
     return [r["customer_id"] for r in rows]
 
 
+def checkpoint_and_close(conn) -> None:
+    """Fold the WAL back into the main .db file, then close.
+
+    Required before copying or uploading the store: in WAL mode the most
+    recent writes live in a sibling -wal file, so shipping store.db alone
+    would silently deliver a database missing everything written since the
+    last automatic checkpoint.
+    """
+    try:
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    except Exception:
+        pass
+    conn.commit()
+    conn.close()
+
+
 def store_stats(conn) -> dict:
     def one(sql):
         r = conn.execute(sql).fetchone()

@@ -1,0 +1,136 @@
+name: Store Backfill
+
+# One-shot: build the SQLite fact store from scratch and ship it to cPanel.
+#
+# Exists so the migration needs no shell access on the host. Everything the
+# backfill reads is reachable over HTTP or an API, so it can run here just as
+# well as there -- and the result is a single file we upload.
+#
+# Safe to re-run: every writer in store.py is idempotent by primary key, and
+# the workflow always starts from whatever store.db is already on cPanel, so
+# a second run tops up rather than duplicating.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ad_lookback_days:
+        description: "Days of ad spend history to load"
+        default: "90"
+      attr_batch:
+        description: "Max attribution lookups this run (0 to skip the customer walk entirely)"
+        default: "40000"
+      fresh:
+        description: "Ignore the existing store on cPanel and rebuild from empty"
+        type: boolean
+        default: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Download the existing store from cPanel
+        if: ${{ !inputs.fresh }}
+        env:
+          FTP_HOST: ${{ secrets.FTP_HOST }}
+          FTP_USER: ${{ secrets.FTP_USER }}
+          FTP_PASS: ${{ secrets.FTP_PASS }}
+        run: |
+          python3 - <<'PY'
+          import ftplib, ssl, os
+          ctx = ssl.create_default_context()
+          ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
+          try:
+              ftp = ftplib.FTP_TLS(os.environ["FTP_HOST"], timeout=60)
+              ftp.login(os.environ["FTP_USER"], os.environ["FTP_PASS"]); ftp.prot_p()
+              ftp.cwd("unfollow-ads")
+              with open("store.db", "wb") as fh:
+                  ftp.retrbinary("RETR store.db", fh.write)
+              print(f"  downloaded existing store ({os.path.getsize('store.db'):,} bytes)")
+              ftp.quit()
+          except Exception as e:
+              # No store yet is the normal first-run case, not a failure.
+              print(f"  no existing store to resume from ({type(e).__name__}: {e}) — starting fresh")
+              if os.path.exists("store.db") and os.path.getsize("store.db") == 0:
+                  os.remove("store.db")
+          PY
+
+      - name: Ingest webhook events
+        env:
+          STORE_PATH: ${{ github.workspace }}/store.db
+          RC_WEBHOOK_SECRET: ${{ secrets.RC_WEBHOOK_SECRET }}
+          RC_EVENTS_URL: https://genivox.com/ads-upload/rc_events.php
+        run: python3 -u ingest_rc.py
+
+      - name: Ingest Apple Ads history
+        env:
+          STORE_PATH: ${{ github.workspace }}/store.db
+          AD_LOOKBACK_DAYS: ${{ inputs.ad_lookback_days }}
+          ASA_CLIENT_ID: ${{ secrets.ASA_CLIENT_ID }}
+          ASA_TEAM_ID: ${{ secrets.ASA_TEAM_ID }}
+          ASA_KEY_ID: ${{ secrets.ASA_KEY_ID }}
+          ASA_PRIVATE_KEY_PEM: ${{ secrets.ASA_PRIVATE_KEY_PEM }}
+          ASA_ORG_ID: ${{ secrets.ASA_ORG_ID }}
+          REVENUECAT_API_KEY: ${{ secrets.REVENUECAT_API_KEY }}
+          REVENUECAT_PROJECT_ID: ${{ secrets.REVENUECAT_PROJECT_ID }}
+        run: python3 -u ingest_ads.py
+
+      - name: Reconcile customers
+        if: ${{ inputs.attr_batch != '0' }}
+        env:
+          STORE_PATH: ${{ github.workspace }}/store.db
+          ATTR_BATCH: ${{ inputs.attr_batch }}
+          REVENUECAT_API_KEY: ${{ secrets.REVENUECAT_API_KEY }}
+          REVENUECAT_PROJECT_ID: ${{ secrets.REVENUECAT_PROJECT_ID }}
+        run: python3 -u ingest_customers.py
+
+      - name: Checkpoint and summarise
+        env:
+          STORE_PATH: ${{ github.workspace }}/store.db
+        run: |
+          python3 - <<'PY'
+          import os, store
+          conn = store.open_store()
+          st = store.store_stats(conn)
+          # Must checkpoint before upload: in WAL mode the newest writes sit in
+          # store.db-wal, so uploading store.db alone would ship a stale file.
+          store.checkpoint_and_close(conn)
+          for k, v in st.items():
+              print(f"  {k:26} {v}")
+          print(f"  {'db size':26} {os.path.getsize(os.environ['STORE_PATH']):,} bytes")
+          PY
+
+      - name: Upload the store to cPanel
+        env:
+          FTP_HOST: ${{ secrets.FTP_HOST }}
+          FTP_USER: ${{ secrets.FTP_USER }}
+          FTP_PASS: ${{ secrets.FTP_PASS }}
+        run: |
+          python3 - <<'PY'
+          import ftplib, ssl, os
+          ctx = ssl.create_default_context()
+          ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
+          ftp = ftplib.FTP_TLS(os.environ["FTP_HOST"], timeout=120)
+          ftp.login(os.environ["FTP_USER"], os.environ["FTP_PASS"]); ftp.prot_p()
+          ftp.cwd("unfollow-ads")
+          # Upload to a temp name then rename, so a cron tick that fires
+          # mid-transfer never opens a half-written database.
+          with open("store.db", "rb") as fh:
+              ftp.storbinary("STOR store.db.new", fh)
+          try:
+              ftp.delete("store.db")
+          except Exception:
+              pass
+          ftp.rename("store.db.new", "store.db")
+          # Stale WAL/SHM siblings would shadow the uploaded file's contents.
+          for junk in ("store.db-wal", "store.db-shm"):
+              try: ftp.delete(junk)
+              except Exception: pass
+          print(f"  uploaded store.db ({os.path.getsize('store.db'):,} bytes)")
+          ftp.quit()
+          PY

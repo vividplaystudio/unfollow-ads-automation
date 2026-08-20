@@ -78,22 +78,34 @@ proportional to what happened since last time.
 
 ### One-time cutover
 
+**1. Re-run the installer.** GitHub → Actions → **Install cPanel cron setup**
+→ Run workflow. It ships `store.py`, the adapter, the three ingest scripts, and
+the Apple Ads credentials that were previously missing.
+
+**2. Build the store.** GitHub → Actions → **Store Backfill** → Run workflow.
+
+This needs no shell access: everything the backfill reads is reachable over
+HTTP or an API, so it runs on the GitHub runner and uploads the finished
+`store.db` to `~/unfollow-ads/` over FTP. It resumes from whatever store is
+already on the host, so it is safe to run more than once.
+
+Inputs:
+
+| Input | Default | Meaning |
+|---|---|---|
+| `ad_lookback_days` | 90 | How much ad-spend history to load |
+| `attr_batch` | 40000 | Cap on attribution lookups; `0` skips the customer walk |
+| `fresh` | false | Ignore the existing store and rebuild from empty |
+
+The customer walk inside it takes roughly as long as one old `rc` run. That is
+the last time that walk ever blocks anything.
+
+**If you would rather do it on the host** (cPanel → Terminal), the same thing:
+
 ```bash
-# 1. Re-run the installer workflow (GitHub → Actions → "Install cPanel cron
-#    setup" → Run workflow). It now ships store.py, the three ingest scripts,
-#    the adapter, and the Apple Ads credentials that were previously missing.
-
-# 2. Load history into the store. Idempotent — safe to re-run.
-#    Replays every rotated rc_events archive, 90 days of ad spend, and
-#    resolves the attribution backlog.
 bash ~/unfollow-ads/run.sh store-backfill
-
-# 3. Confirm it worked
 tail -40 ~/unfollow-ads/cron.log
 ```
-
-The backfill's customer walk takes roughly as long as one old `rc` run. It is
-the last time that walk ever blocks anything.
 
 ### 4. Then swap the cron
 
