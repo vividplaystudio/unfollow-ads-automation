@@ -228,7 +228,11 @@ def asa_v1(method: str, path: str, body: dict = None, retries: int = 3) -> dict:
             with urllib.request.urlopen(req, timeout=90) as resp:
                 return json.loads(resp.read().decode())
         except urllib.error.HTTPError as e:
-            detail = e.read().decode()[:300]
+            # 2000, not 300: Apple's validation errors carry the allowed values
+            # for the field that failed, and that list is exactly what turns a
+            # rejection into a fix. Truncating at 300 cut it off mid-list and
+            # cost another round trip to learn what it already told us.
+            detail = e.read().decode()[:2000]
             if e.code == 401 and attempt < retries - 1:
                 _ASA_V1_TOKEN["value"] = None      # force refresh, retry
                 continue
@@ -280,7 +284,15 @@ def asa_v1_paged(path: str, body: dict, page_size: int = 1000) -> list:
         # old name meant the early-exit never fired and paging relied purely
         # on a short page.
         total = pg.get("totalCount", pg.get("totalResults"))
-        if not data or len(data) < page_size:
+        if not data:
+            break
+        # "shorter page means last page" is only true if the server honoured
+        # the page size we asked for. The popularity feed caps a page at 500
+        # however much you request, so asking for 1000 made every first page
+        # look like the last one and silently truncated the feed to its top
+        # 500 terms per market. Trust the server's own page size.
+        served = pg.get("pageSize") or page_size
+        if len(data) < min(page_size, served):
             break
         offset += page_size
         if total is not None and offset >= total:

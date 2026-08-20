@@ -337,16 +337,19 @@ DISCOVERY_MARKETS = [
     ).split(",") if m.strip()
 ]
 # Genres an unfollower/analytics app competes in.
+# Apple validates this against a fixed vocabulary and rejects anything else,
+# so only names it confirmed belong here. SOCIAL_NETWORKING is where an
+# Instagram-adjacent app competes; add others only after the API accepts them.
 DISCOVERY_GENRES = [
     g.strip().upper()
     for g in os.environ.get(
-        "DISCOVERY_GENRES", "SOCIAL_NETWORKING,PHOTO_AND_VIDEO,UTILITIES"
+        "DISCOVERY_GENRES", "SOCIAL_NETWORKING"
     ).split(",") if g.strip()
 ]
 
 
 def ingest_top_search_terms(conn, markets=None, genres=None,
-                            page_size: int = 1000) -> dict:
+                            page_size: int = 500) -> dict:
     """Apple's most-searched terms per market and genre.
 
     The same endpoint used for per-keyword volume, but WITHOUT a searchTerm
