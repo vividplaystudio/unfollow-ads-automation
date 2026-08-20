@@ -1927,10 +1927,16 @@ def main() -> None:
         try:
             import store as _s
             _sc = _s.open_store()
-            for _c in _sc.execute(
+            _store_camps = list(_sc.execute(
                 "SELECT campaign_id, name, status, country, daily_budget "
-                "FROM campaign_dim WHERE source='apple'"
-            ):
+                "FROM campaign_dim WHERE source='apple'"))
+            # Replace, do not merge. The legacy fetch may already have filled
+            # campaign_meta with the same campaigns under integer ids while the
+            # store uses strings, so merging produced two rows per campaign --
+            # 38 rows for 19 campaigns, every name duplicated.
+            if _store_camps:
+                campaign_meta.clear()
+            for _c in _store_camps:
                 campaign_meta[_c["campaign_id"]] = {
                     "id": _c["campaign_id"],
                     "name": _c["name"] or "",
@@ -2282,33 +2288,42 @@ def main() -> None:
         except Exception as e:
             print(f"  popularity lookup skipped: {e}")
 
-    def _popularity_of(term, live_lookup, store_lookup):
-        """Store value first, then the build-time lookup, else None.
+    def _volume_of(country, term, live_lookup):
+        """(popularity, rank, genre) for a term IN ITS OWN MARKET.
 
-        The build-time lookup returns a dict per term now, not a bare number,
-        so it has to be unwrapped rather than used directly.
+        Falls back to the build-time lookup only when the market-specific feed
+        has nothing, and unwraps it because it returns a dict per term rather
+        than a bare number. None means Apple does not rank the term, which is
+        different from zero volume and must stay distinguishable.
         """
-        v = store_lookup.get(term)
-        if v is not None:
-            return v
+        hit = _vol.get((country, term))
+        if hit:
+            return hit
         live = live_lookup.get(term)
         if isinstance(live, dict):
-            return live.get("popularity")
-        return live
+            return (live.get("popularity"), live.get("rank_in_genre"),
+                    live.get("genre"))
+        return (live, None, None)
 
-    # Volume straight off the store rows, keyed by the same lowercase text the
-    # keyword table is built on.
-    _kw_pop, _kw_rank, _kw_genre = {}, {}, {}
-    for _m in (_kw_meta or {}).values():
-        _t = (_m.get("text") or "").strip().lower()
-        if not _t:
-            continue
-        if _m.get("popularity") is not None:
-            _kw_pop[_t] = _m["popularity"]
-        if _m.get("rank_in_genre") is not None:
-            _kw_rank[_t] = _m["rank_in_genre"]
-        if _m.get("genre"):
-            _kw_genre[_t] = _m["genre"]
+    # Volume per (country, term). Keying by term alone let one market's number
+    # stand in for every other: "instagram unfollowers" showed the US score of
+    # 63 (rank 208) in AU, CA and GB, where Britain's actual figure is 57
+    # (rank 201). Search volume is a property of a market, so the market has to
+    # be part of the key.
+    _vol = {}
+    if STORE_MODE:
+        try:
+            import store as _s2
+            for _r in _s2.open_store().execute(
+                "SELECT country, LOWER(term) t, popularity, rank_in_genre, genre "
+                "FROM search_term_popularity "
+                "WHERE month = (SELECT MAX(month) FROM search_term_popularity)"
+            ):
+                _vol[(_r["country"], _r["t"])] = (
+                    _r["popularity"], _r["rank_in_genre"], _r["genre"])
+            print(f"  volume lookup: {len(_vol)} (market, term) pairs")
+        except Exception as e:
+            print(f"  [store] volume lookup unavailable ({type(e).__name__})")
 
     keywords_out = []
     for (cid, kw_lower) in kw_union:
@@ -2335,6 +2350,8 @@ def main() -> None:
                 keyword_id = d.get("keyword_id") or keyword_id
                 break
 
+        _vol_pop, _vol_rank, _vol_genre = _volume_of(country, kw_lower,
+                                                     keyword_popularity)
         row = {
             "keyword": kw_display,
             "campaign_id": cid,
@@ -2352,9 +2369,9 @@ def main() -> None:
             # OWN market and joined to Apple's volume feed, where the
             # build-time lookup assumes US. None means "Apple does not rank
             # this term", never zero volume.
-            "popularity": _popularity_of(kw_lower, keyword_popularity, _kw_pop),
-            "rank_in_genre": _kw_rank.get(kw_lower),
-            "genre": _kw_genre.get(kw_lower),
+            "popularity": _vol_pop,
+            "rank_in_genre": _vol_rank,
+            "genre": _vol_genre,
         }
         for r in ranges:
             d = asa_keyword_data[r].get((cid, kw_lower), {"spend": 0, "impressions": 0, "taps": 0, "installs": 0, "cpt": 0})
