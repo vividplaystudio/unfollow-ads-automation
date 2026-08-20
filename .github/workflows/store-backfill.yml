@@ -48,7 +48,7 @@ jobs:
           # The FTP user is chroot'd on this host, so "/home/<user>/unfollow-ads"
           # and "/unfollow-ads" both need to work. Same fallback the installer
           # uses -- keep them in step.
-          def navigate(ftp, path="/home/coinvohy/unfollow-ads"):
+          def navigate(ftp, path="/home/coinvohy/genivox.com/ads-upload/unfollow-ads"):
               import re
               def go(p):
                   ftp.cwd("/")
@@ -133,7 +133,7 @@ jobs:
           # The FTP user is chroot'd on this host, so "/home/<user>/unfollow-ads"
           # and "/unfollow-ads" both need to work. Same fallback the installer
           # uses -- keep them in step.
-          def navigate(ftp, path="/home/coinvohy/unfollow-ads"):
+          def navigate(ftp, path="/home/coinvohy/genivox.com/ads-upload/unfollow-ads"):
               import re
               def go(p):
                   ftp.cwd("/")

@@ -10,7 +10,8 @@ on:
     inputs:
       target_dir:
         description: "Absolute path on the cPanel host where scripts will live"
-        default: "/home/coinvohy/unfollow-ads"
+        # Must match the path the live cPanel cron jobs already invoke.
+        default: "/home/coinvohy/genivox.com/ads-upload/unfollow-ads"
       dashboard_dir:
         description: "Where the JSON files should land (LOCAL_OUTPUT_DIR)"
         default: "/home/coinvohy/genivox.com/ads-upload"
@@ -158,7 +159,10 @@ jobs:
               f'{os.environ.get("ASA_PRIVATE_KEY_PEM","")}\n'
               "ASA_PEM_EOF\n"
               ")\n"
-              "\n# Fact store (see store.py). Deliberately OUTSIDE the web root.\n"
+              # This folder lives under the web root, so the .htaccess written
+              # below (deny all) is what keeps store.db and config.sh
+              # unreachable over HTTP. Do not remove it.
+              "\n# Fact store (see store.py).\n"
               f'export STORE_PATH="{target_dir}/store.db"\n'
           )
           ftp.storbinary("STOR config.sh", io.BytesIO(config.encode("utf-8")))

@@ -5,14 +5,14 @@ Once set up, your dashboard refreshes **every 15 min for Meta + Adjust** and **e
 ## One-time setup (~15 min)
 
 ### 1. Pick a folder on your cPanel host
-A standard place to put scripts is `~/unfollow-ads/`. From cPanel Terminal:
+A standard place to put scripts is `/home/coinvohy/genivox.com/ads-upload/unfollow-ads/`. From cPanel Terminal:
 
 ```bash
 mkdir -p ~/unfollow-ads && cd ~/unfollow-ads
 ```
 
 ### 2. Upload the files
-Copy these files from this repo into `~/unfollow-ads/`:
+Copy these files from this repo into `/home/coinvohy/genivox.com/ads-upload/unfollow-ads/`:
 - `refresh_meta_ads.py`
 - `refresh_adjust.py`
 - `refresh_dashboard_json.py` (only if you want the slow RC refresh here too)
@@ -39,14 +39,14 @@ The important values to fill in:
 
 ### 4. Test manually
 ```bash
-~/unfollow-ads/run.sh meta
+/home/coinvohy/genivox.com/ads-upload/unfollow-ads/run.sh meta
 ```
-Then check `~/unfollow-ads/cron.log` for errors and verify `meta_ads.json` was updated in your dashboard folder.
+Then check `/home/coinvohy/genivox.com/ads-upload/unfollow-ads/cron.log` for errors and verify `meta_ads.json` was updated in your dashboard folder.
 
 If it worked, run the other two:
 ```bash
-~/unfollow-ads/run.sh adjust
-~/unfollow-ads/run.sh rc      # only if you moved this one too
+/home/coinvohy/genivox.com/ads-upload/unfollow-ads/run.sh adjust
+/home/coinvohy/genivox.com/ads-upload/unfollow-ads/run.sh rc      # only if you moved this one too
 ```
 
 ### 5. Add cron jobs in cPanel
@@ -55,10 +55,10 @@ cPanel → **Cron Jobs** → Add:
 
 | Schedule | Command |
 |---|---|
-| Every 15 min: `*/15 * * * *` | `bash ~/unfollow-ads/run.sh meta` |
-| Every 15 min: `*/15 * * * *` | `bash ~/unfollow-ads/run.sh adjust` |
-| Every 15 min: `*/15 * * * *` | `bash ~/unfollow-ads/run.sh store` |
-| Nightly: `20 3 * * *` | `bash ~/unfollow-ads/run.sh store-cold` |
+| Every 15 min: `*/15 * * * *` | `bash /home/coinvohy/genivox.com/ads-upload/unfollow-ads/run.sh meta` |
+| Every 15 min: `*/15 * * * *` | `bash /home/coinvohy/genivox.com/ads-upload/unfollow-ads/run.sh adjust` |
+| Every 15 min: `*/15 * * * *` | `bash /home/coinvohy/genivox.com/ads-upload/unfollow-ads/run.sh store` |
+| Nightly: `20 3 * * *` | `bash /home/coinvohy/genivox.com/ads-upload/unfollow-ads/run.sh store-cold` |
 
 **Do not also schedule `rc`.** It is the legacy full refresh, kept only as a
 fallback. `store` replaces it and does the same job in seconds.
@@ -86,7 +86,7 @@ the Apple Ads credentials that were previously missing.
 
 This needs no shell access: everything the backfill reads is reachable over
 HTTP or an API, so it runs on the GitHub runner and uploads the finished
-`store.db` to `~/unfollow-ads/` over FTP. It resumes from whatever store is
+`store.db` to `/home/coinvohy/genivox.com/ads-upload/unfollow-ads/` over FTP. It resumes from whatever store is
 already on the host, so it is safe to run more than once.
 
 Inputs:
@@ -103,8 +103,8 @@ the last time that walk ever blocks anything.
 **If you would rather do it on the host** (cPanel → Terminal), the same thing:
 
 ```bash
-bash ~/unfollow-ads/run.sh store-backfill
-tail -40 ~/unfollow-ads/cron.log
+bash /home/coinvohy/genivox.com/ads-upload/unfollow-ads/run.sh store-backfill
+tail -40 /home/coinvohy/genivox.com/ads-upload/unfollow-ads/cron.log
 ```
 
 ### 4. Then swap the cron
@@ -114,7 +114,7 @@ Replace the `*/30 ... run.sh rc` job with the two `store` jobs above.
 ### Verifying
 
 ```bash
-tail -30 ~/unfollow-ads/cron.log
+tail -30 /home/coinvohy/genivox.com/ads-upload/unfollow-ads/cron.log
 ```
 
 A healthy hot-path run looks like:
@@ -140,7 +140,7 @@ Leaving it on means two independent writers publishing `data.json` on
 different schedules, which is a second source of the same clobbering problem
 the store was built to end.
 
-Replace `~/unfollow-ads/` with the full absolute path (cron sometimes doesn't expand `~`). To get it: `cd ~/unfollow-ads && pwd`.
+Replace `/home/coinvohy/genivox.com/ads-upload/unfollow-ads/` with the full absolute path (cron sometimes doesn't expand `~`). To get it: `cd ~/unfollow-ads && pwd`.
 
 ### 6. Turn off the GitHub workflows (optional)
 Once cPanel is reliable, you can disable the GitHub workflows so they stop burning Actions minutes:
@@ -151,7 +151,7 @@ Once cPanel is reliable, you can disable the GitHub workflows so they stop burni
 
 Check the log:
 ```bash
-tail -50 ~/unfollow-ads/cron.log
+tail -50 /home/coinvohy/genivox.com/ads-upload/unfollow-ads/cron.log
 ```
 
 Or check the file timestamps:

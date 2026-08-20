@@ -25,7 +25,19 @@ jobs:
           ftp = ftplib.FTP_TLS(host, timeout=60, context=ctx)
           ftp.login(user, pw)
           ftp.prot_p()
-          ftp.cwd("/unfollow-ads")
+          # Chroot-safe: the scripts live under the site folder, not at FTP root.
+          def navigate(path="/home/coinvohy/genivox.com/ads-upload/unfollow-ads"):
+              import re
+              def go(p):
+                  ftp.cwd("/")
+                  for part in p.strip("/").split("/"):
+                      ftp.cwd(part)
+              try:
+                  go(path)
+              except ftplib.error_perm:
+                  go(re.sub(r"^/home/[^/]+", "", path) or "/")
+              return ftp.pwd()
+          print(f"working dir: {navigate()}")
           print("Directory listing:")
           ftp.dir()
           print()
