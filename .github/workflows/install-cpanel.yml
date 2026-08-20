@@ -69,34 +69,26 @@ jobs:
           ftp.dir()
           print()
 
-          # FTP user is chroot'd. Try the absolute path first; if it fails
-          # with "no such directory", strip a common chroot prefix and
-          # treat the path as relative to FTP root.
+          # Try the full path, then each shorter suffix, until one resolves.
+          # The FTP account is chroot'd to the dashboard folder, so how much of
+          # the prefix survives is not knowable in advance. Never mkdir: the
+          # previous version created whatever was missing, so a wrong path
+          # reported success while writing where nothing runs.
           def try_navigate(path):
               parts = path.strip("/").split("/")
-              ftp.cwd("/")
-              for p in parts[:-1]:
-                  ftp.cwd(p)
-              try:
-                  ftp.cwd(parts[-1])
-              except ftplib.error_perm:
-                  ftp.mkd(parts[-1])
-                  ftp.cwd(parts[-1])
+              last_err = None
+              for i in range(len(parts)):
+                  candidate = "/" + "/".join(parts[i:])
+                  try:
+                      ftp.cwd(candidate)
+                      return
+                  except ftplib.error_perm as e:
+                      last_err = e
+              raise ftplib.error_perm(
+                  f"could not reach {path} at any chroot depth: {last_err}")
 
-          try:
-              try_navigate(target_dir)
-              print(f"  Working dir (absolute): {ftp.pwd()}")
-          except ftplib.error_perm:
-              # Strip "/home/<user>" prefix — FTP root is already the home
-              import re
-              stripped = re.sub(r"^/home/[^/]+", "", target_dir) or "/"
-              if stripped != target_dir:
-                  print(f"  Absolute path failed (chroot). Trying {stripped} relative to FTP root…")
-                  try_navigate(stripped)
-                  print(f"  Working dir (chroot): {ftp.pwd()}")
-              else:
-                  raise
-
+          try_navigate(target_dir)
+          print(f"  Working dir: {ftp.pwd()}")
           # Upload script files (binary mode to preserve line endings)
           for fname in ["refresh_meta_ads.py", "refresh_adjust.py",
                         "refresh_dashboard_json.py",

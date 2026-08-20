@@ -45,16 +45,34 @@ jobs:
           import ftplib, ssl, os
           ctx = ssl.create_default_context()
           ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
-          # The FTP user is chroot'd on this host, so "/home/<user>/unfollow-ads"
-          # and "/unfollow-ads" both need to work. Same fallback the installer
-          # uses -- keep them in step.
+          # The FTP account is chroot'd to the dashboard folder itself
+          # (/home/coinvohy/genivox.com/ads-upload), so an OS-absolute path
+          # never resolves over FTP and we cannot know in advance how much of
+          # the prefix the chroot swallows. Rather than guess, try the full
+          # path and then each shorter suffix until one works:
+          #   /home/coinvohy/genivox.com/ads-upload/unfollow-ads   (no chroot)
+          #   /genivox.com/ads-upload/unfollow-ads                 (chroot at ~)
+          #   /ads-upload/unfollow-ads                             (chroot at site)
+          #   /unfollow-ads                                        (actual)
+          # This is correct for every chroot depth instead of only one, and it
+          # never CREATES a directory -- silently creating the wrong folder is
+          # how the scripts ended up somewhere cron does not look.
           def navigate(ftp, path="/home/coinvohy/genivox.com/ads-upload/unfollow-ads"):
-              import re
-              def go(p):
-                  ftp.cwd("/")
-                  for part in p.strip("/").split("/"):
-                      ftp.cwd(part)
-              try:
+              parts = path.strip("/").split("/")
+              last_err = None
+              for i in range(len(parts)):
+                  candidate = "/" + "/".join(parts[i:])
+                  try:
+                      ftp.cwd(candidate)
+                      return ftp.pwd()
+                  except ftplib.error_perm as e:
+                      last_err = e
+                      continue
+              raise RuntimeError(
+                  f"could not reach {path} over FTP at any chroot depth: {last_err}"
+              )
+
+          try:
                   go(path)
               except ftplib.error_perm:
                   go(re.sub(r"^/home/[^/]+", "", path) or "/")
@@ -130,16 +148,34 @@ jobs:
           import ftplib, ssl, os
           ctx = ssl.create_default_context()
           ctx.check_hostname = False; ctx.verify_mode = ssl.CERT_NONE
-          # The FTP user is chroot'd on this host, so "/home/<user>/unfollow-ads"
-          # and "/unfollow-ads" both need to work. Same fallback the installer
-          # uses -- keep them in step.
+          # The FTP account is chroot'd to the dashboard folder itself
+          # (/home/coinvohy/genivox.com/ads-upload), so an OS-absolute path
+          # never resolves over FTP and we cannot know in advance how much of
+          # the prefix the chroot swallows. Rather than guess, try the full
+          # path and then each shorter suffix until one works:
+          #   /home/coinvohy/genivox.com/ads-upload/unfollow-ads   (no chroot)
+          #   /genivox.com/ads-upload/unfollow-ads                 (chroot at ~)
+          #   /ads-upload/unfollow-ads                             (chroot at site)
+          #   /unfollow-ads                                        (actual)
+          # This is correct for every chroot depth instead of only one, and it
+          # never CREATES a directory -- silently creating the wrong folder is
+          # how the scripts ended up somewhere cron does not look.
           def navigate(ftp, path="/home/coinvohy/genivox.com/ads-upload/unfollow-ads"):
-              import re
-              def go(p):
-                  ftp.cwd("/")
-                  for part in p.strip("/").split("/"):
-                      ftp.cwd(part)
-              try:
+              parts = path.strip("/").split("/")
+              last_err = None
+              for i in range(len(parts)):
+                  candidate = "/" + "/".join(parts[i:])
+                  try:
+                      ftp.cwd(candidate)
+                      return ftp.pwd()
+                  except ftplib.error_perm as e:
+                      last_err = e
+                      continue
+              raise RuntimeError(
+                  f"could not reach {path} over FTP at any chroot depth: {last_err}"
+              )
+
+          try:
                   go(path)
               except ftplib.error_perm:
                   go(re.sub(r"^/home/[^/]+", "", path) or "/")
