@@ -22,6 +22,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+      # setup-python gives a bare interpreter — PyYAML is not stdlib, so the
+      # Validate YAML step below died with ModuleNotFoundError on every push
+      # that touched a workflow. The check that exists to catch broken
+      # workflows was itself broken.
+      - run: pip install --quiet pyyaml
       - run: python3 tools/check_workflow_python.py
       - name: Validate YAML
         run: |
