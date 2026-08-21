@@ -31,11 +31,12 @@ month iterating — paywall, creative, hook — and cutting at 30 days killed ap
 right before their ads started converting.
 
 Outputs:
-  app_watchlist.json   — full tracking state, script-only, several MB
+  app_watchlist.json.gz — full tracking state, script-only, ~9 MB gzipped (~49 MB raw)
   discovery.json       — top apps by score, sized for the browser
   discovery_state.json — velocity baseline (discovery itself is stateless now)
 """
 
+import base64
 import gzip
 import json
 import os
@@ -51,7 +52,14 @@ from refresh_opportunity_radar import (
     AD_LIBRARY_URL, PREV_PASS, PREV_USER, get_json, upload_to_ftp,
 )
 
-WATCHLIST_OUTPUT = "app_watchlist.json"
+# GZIPPED. The plain-JSON watchlist reached 41 MB and grows with the tracked
+# set. Every run pushed all of it over an FTP link that intermittently refuses
+# connections, and a transfer dying partway is what corrupted it into a
+# readable-but-empty file. Compression cuts it to a few MB, shrinking the window
+# in which that can happen. WATCHLIST_LEGACY is read once so the existing
+# uncompressed file migrates without losing a single first_seen date.
+WATCHLIST_OUTPUT = "app_watchlist.json.gz"
+WATCHLIST_LEGACY = "app_watchlist.json"
 DISCOVERY_OUTPUT = "discovery.json"
 STATE_OUTPUT = "discovery_state.json"
 BASE_URL = os.environ.get("RADAR_BASE_URL") or "https://genivox.com/ads-upload"
@@ -68,6 +76,8 @@ SCAN_MINUTES = float(os.environ.get("DISCOVERY_SCAN_MINUTES") or 25)
 
 MAX_AGE_DAYS = int(os.environ.get("DISCOVERY_MAX_AGE_DAYS") or 180)
 BROWSER_TOP_N = int(os.environ.get("DISCOVERY_BROWSER_TOP") or 1500)
+
+_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
 
 
 
@@ -103,6 +113,38 @@ def fetch_json(name: str, default, required: bool = False):
         return default
 
 
+def fetch_json_gz(name: str, default):
+    """Read a gzipped JSON artifact.
+
+    get_json cannot serve this — it decodes as text and json.loads the result,
+    which chokes on gzip bytes. Basic auth is built by hand for the same reason.
+
+    Returns `default` on 404 (the migration run, before the .gz exists) and on
+    any other failure, because the caller falls back to the legacy plain file
+    and that read carries required=True. Hard-failing here would abort the
+    migration itself.
+    """
+    token = base64.b64encode(f"{PREV_USER}:{PREV_PASS}".encode()).decode()
+    req = urllib.request.Request(
+        f"{BASE_URL}/{name}",
+        headers={"User-Agent": _UA, "Authorization": f"Basic {token}"})
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(req, timeout=120) as r:
+                return json.loads(gzip.decompress(r.read()).decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                return default
+            print(f"  {name}: HTTP {e.code}")
+            return default
+        except Exception as e:  # noqa: BLE001
+            if attempt == 2:
+                print(f"  {name}: {e}")
+                return default
+            time.sleep(2 ** attempt)
+    return default
+
+
 def lookup_ids(ids: list) -> tuple:
     """One batched lookup. Returns (apps, total_results).
 
@@ -133,7 +175,6 @@ def lookup_ids(ids: list) -> tuple:
 
 SITEMAP_INDEX = (os.environ.get("DISCOVERY_SITEMAP_INDEX")
                  or "https://apps.apple.com/sitemaps_apps_index_new-app_1.xml")
-_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
 
 
 def crawl_new_app_sitemaps(deadline: float = None) -> set:
@@ -248,7 +289,12 @@ def main() -> None:
     state = fetch_json(STATE_OUTPUT, {})
     # required=True: an unreadable watchlist must abort the run, never
     # silently become an empty one that overwrites the real thing.
-    wl = fetch_json(WATCHLIST_OUTPUT, {}, required=True)
+    # required=False here: a 404 on the .gz is expected exactly once, on the
+    # run that migrates. Only if BOTH are absent/unreadable do we hard-fail.
+    wl = fetch_json_gz(WATCHLIST_OUTPUT, None)
+    if wl is None:
+        print(f"  {WATCHLIST_OUTPUT} absent — migrating from {WATCHLIST_LEGACY}")
+        wl = fetch_json(WATCHLIST_LEGACY, {}, required=True)
     watch = wl.get("apps", {})
 
     # A READABLE but EMPTY watchlist is the failure the required= guard misses,
@@ -359,7 +405,7 @@ def main() -> None:
     ranked = sorted(watch.items(), key=lambda kv: -kv[1]["score"])
 
     # ── Write ──
-    with open(WATCHLIST_OUTPUT, "w") as f:
+    with gzip.open(WATCHLIST_OUTPUT, "wt", encoding="utf-8") as f:
         json.dump({"generated_at": now.isoformat(), "count": len(watch),
                    "apps": watch}, f, separators=(",", ":"), default=str)
 

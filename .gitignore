@@ -29,6 +29,7 @@ adjust.json
 opportunity_radar.json
 niche_clusters.json
 app_watchlist.json
+app_watchlist.json.gz
 discovery.json
 discovery_state.json
 charting_index.json
