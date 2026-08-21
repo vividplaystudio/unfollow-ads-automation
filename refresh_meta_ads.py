@@ -417,6 +417,35 @@ def main() -> None:
         for window in ("today", "yesterday", "last_7_days", "last_30_days")
     }
 
+    # ── Attach budget/status to every row, keyed by ID ───────────────────
+    # Ad-set NAMES are not unique: duplicating an ad set keeps its name, and in
+    # this account 33 of 98 names map to several ids -- four different ad sets
+    # are called "HM-5". Any consumer that looks a budget up by name gets
+    # whichever copy it happens to find, usually a paused one with a stale
+    # figure, and there is nothing in the output to reveal the mismatch.
+    #
+    # So the budget travels ON the row. A caller reading adsets/ads never has
+    # to join, and therefore cannot join wrongly.
+    def _decorate(rows, level_key):
+        for row in rows:
+            acct = str(row.get("account_id") or "")
+            ent = ((combined_statuses.get(acct) or {}).get(level_key) or {})
+            info = ent.get(str(row.get(f"{level_key[:-1]}_id") or "")) or {}
+            if level_key == "ads":
+                # An ad has no budget of its own; carry its ad set's, so the
+                # per-day ad rows (the only ones with real history) are usable
+                # on their own.
+                aset = ((combined_statuses.get(acct) or {}).get("adsets") or {})
+                info = aset.get(str(row.get("adset_id") or "")) or {}
+            row["daily_budget"] = info.get("daily_budget")
+            row["lifetime_budget"] = info.get("lifetime_budget")
+            row["effective_status"] = info.get("effective_status")
+        return rows
+
+    _decorate(combined_adsets, "adsets")
+    _decorate(combined_ads, "ads")
+    _decorate(combined_campaigns, "campaigns")
+
     payload = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         # New multi-account fields — the dashboard should read these.
