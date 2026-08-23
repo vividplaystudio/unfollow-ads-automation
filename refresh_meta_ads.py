@@ -18,8 +18,10 @@ Runs hourly via GitHub Actions alongside refresh_dashboard_json.py.
 import ftplib
 import json
 import os
+import socket
 import ssl
 import sys
+import time
 import urllib.parse
 from typing import Union
 import urllib.request
@@ -101,18 +103,65 @@ TRACKED_ACTION_TYPES = None  # None = no filter, keep all action types
 # Meta Graph API helpers
 # ══════════════════════════════════════════════════════════════════
 
+# Meta error codes that mean "ask again later", not "your request is wrong".
+# 4/17/32/613 are the rate-limit family (app-, user-, page- and custom-level),
+# 1 and 2 are Meta's transient/unknown bucket, 341 is a temporary app cap.
+_TRANSIENT_CODES = {1, 2, 4, 17, 32, 341, 613}
+_RETRY_WAITS = (30, 60, 120)  # rate limits reset on the order of minutes
+
+
+def _is_transient(status: int, body: str) -> bool:
+    """Decide whether a failed Graph call is worth repeating.
+
+    Meta signals this inconsistently: sometimes is_transient, sometimes only a
+    code, and rate limits arrive as 403 rather than 429. A 403 that carries no
+    recognisable code is still treated as transient because the ones observed
+    in this pipeline ("Request body is not readable", "Application request
+    limit reached") both were, and a genuinely bad token fails every retry and
+    surfaces anyway a few minutes later.
+    """
+    if status in (500, 502, 503, 504):
+        return True
+    try:
+        err = json.loads(body).get("error", {})
+    except (ValueError, AttributeError):
+        return status == 403
+    if err.get("is_transient"):
+        return True
+    if err.get("code") in _TRANSIENT_CODES:
+        return True
+    return status == 403
+
+
 def meta_get(path: str, params: dict) -> dict:
-    """GET against Meta Graph API. Returns parsed JSON."""
+    """GET against Meta Graph API, retrying transient failures.
+
+    Without this a single rate-limit blip killed the whole dashboard refresh
+    and sent a failure email, even though the next run 20 minutes later
+    succeeded untouched. Permanent errors (bad token, malformed field) still
+    raise on the first attempt, so real breakage is not buried in retries.
+    """
     params = {**params, "access_token": META_ACCESS_TOKEN}
     url = f"https://graph.facebook.com/{META_API_VERSION}/{path}?" + urllib.parse.urlencode(params)
     req = urllib.request.Request(url, headers={"Accept": "application/json"})
-    try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8", errors="replace")
-        print(f"  ❌ Meta API error {e.code}: {body[:500]}")
-        raise
+    for attempt in range(len(_RETRY_WAITS) + 1):
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                return json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            body = e.read().decode("utf-8", errors="replace")
+            retryable, label, exc = _is_transient(e.code, body), f"Meta API error {e.code}", e
+        except (urllib.error.URLError, TimeoutError, socket.timeout) as e:
+            body, retryable, label, exc = str(e), True, "Meta API unreachable", e
+        # Re-raise explicitly: a bare `raise` here is outside the except block,
+        # so there is no active exception to propagate.
+        if not retryable or attempt == len(_RETRY_WAITS):
+            print(f"  ❌ {label}: {body[:500]}")
+            raise exc
+        wait = _RETRY_WAITS[attempt]
+        print(f"  ⚠️  {label} (transient) — retrying in {wait}s "
+              f"[{attempt + 1}/{len(_RETRY_WAITS)}]: {body[:200]}")
+        time.sleep(wait)
 
 
 def meta_paginated(path: str, params: dict) -> list:
