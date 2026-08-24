@@ -269,10 +269,14 @@ def ingest_apple_dims(conn) -> dict:
         print(f"  [ads] campaign fetch failed: {type(e).__name__}: {e}")
         return {"campaigns": 0, "adgroups": 0, "keywords": 0}
 
-    camp_rows, camp_ids = [], []
+    camp_rows, camp_ids, skipped = [], [], []
     for c in camps:
         cid = str(c.get("id") or "")
         if not cid:
+            continue
+        app = str(c.get("promotedObjectId") or "")
+        if ASA_APP_ID and app and app != ASA_APP_ID:
+            skipped.append((c.get("name"), app))
             continue
         camp_ids.append(cid)
         camp_rows.append({
@@ -282,8 +286,25 @@ def ingest_apple_dims(conn) -> dict:
             "country": _campaign_country(c),
             "status": c.get("status") or c.get("displayStatus"),
             "daily_budget": _amount(c.get("dailyBudget")),
+            "promoted_app_id": app or None,
         })
     store.upsert_campaign_dim(conn, camp_rows)
+    if skipped:
+        print(f"  [ads] skipped {len(skipped)} campaigns promoting another app: "
+              + ", ".join(f"{n} ({a})" for n, a in skipped[:4]))
+    # Purge anything a previous run stored before this filter existed, so the
+    # keyword and campaign tables do not keep serving another app's terms.
+    if ASA_APP_ID:
+        stale = [r["campaign_id"] for r in conn.execute(
+            "SELECT campaign_id FROM campaign_dim WHERE source='apple' "
+            "AND promoted_app_id IS NOT NULL AND promoted_app_id <> ?",
+            (ASA_APP_ID,))]
+        if stale:
+            q = ",".join("?" * len(stale))
+            for tbl in ("keyword_dim", "adgroup_dim", "ad_daily"):
+                conn.execute(f"DELETE FROM {tbl} WHERE campaign_id IN ({q})", stale)
+            conn.execute(f"DELETE FROM campaign_dim WHERE campaign_id IN ({q})", stale)
+            print(f"  [ads] purged {len(stale)} foreign-app campaigns and their keywords")
 
     ag_rows, kw_rows = [], []
     for cid in camp_ids:
@@ -336,6 +357,14 @@ DISCOVERY_MARKETS = [
         "DISCOVERY_MARKETS", "US,GB,CA,AU,DE,FR,IT,ES,BR,MX"
     ).split(",") if m.strip()
 ]
+# Only ingest campaigns promoting THIS app. One Apple Ads org can hold
+# campaigns for several apps -- this one also carries a step-counter app under
+# 6738957228 -- and revenue is joined from a RevenueCat project that knows
+# about Unfollow Tracker alone. Without this filter, another app's spend lands
+# in the dashboard against zero revenue and drags ASA ROAS down for a reason
+# nothing on the page explains. Empty string disables the filter.
+ASA_APP_ID = os.environ.get("ASA_APP_ID", "6758404269").strip()
+
 # Genres an unfollower/analytics app competes in.
 # Apple validates this against a fixed vocabulary and rejects anything else,
 # so only names it confirmed belong here. SOCIAL_NETWORKING is where an

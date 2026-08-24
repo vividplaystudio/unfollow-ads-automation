@@ -145,6 +145,10 @@ jobs:
               f'export ASA_TEAM_ID="{os.environ.get("ASA_TEAM_ID","")}"\n'
               f'export ASA_KEY_ID="{os.environ.get("ASA_KEY_ID","")}"\n'
               f'export ASA_ORG_ID="{os.environ.get("ASA_ORG_ID","8868820")}"\n'
+              # Only ingest campaigns promoting THIS app. The org also carries
+              # a step-counter app (6738957228) whose spend would post against
+              # zero revenue, since RevenueCat only knows Unfollow Tracker.
+              f'export ASA_APP_ID="{os.environ.get("ASA_APP_ID","6758404269")}"\n'
               # The PEM is multi-line; a heredoc keeps the newlines intact.
               # Quoting the delimiter stops the shell expanding anything inside.
               "export ASA_PRIVATE_KEY_PEM=$(cat <<'ASA_PEM_EOF'\n"

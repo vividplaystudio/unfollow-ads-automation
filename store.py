@@ -190,8 +190,16 @@ CREATE TABLE IF NOT EXISTS campaign_dim (
     country       TEXT,
     status        TEXT,
     daily_budget  REAL,
+    -- Which App Store app this campaign promotes. One Apple Ads org can carry
+    -- campaigns for several apps, and revenue here comes from a RevenueCat
+    -- project that knows about exactly one of them -- so a campaign for
+    -- another app would post spend against zero revenue and quietly drag the
+    -- whole ASA ROAS down. Stored so it can be filtered on rather than guessed
+    -- from campaign names.
+    promoted_app_id TEXT,
     updated_at_ms INTEGER
 );
+CREATE INDEX IF NOT EXISTS ix_campaign_app ON campaign_dim(promoted_app_id);
 
 CREATE TABLE IF NOT EXISTS adgroup_dim (
     adgroup_id    TEXT PRIMARY KEY,
@@ -267,6 +275,7 @@ MIGRATIONS = [
     ("keyword_dim", "rank_in_genre", "INTEGER"),
     ("keyword_dim", "genre", "TEXT"),
     ("keyword_dim", "popularity_month", "TEXT"),
+    ("campaign_dim", "promoted_app_id", "TEXT"),
 ]
 
 
@@ -503,21 +512,22 @@ def upsert_campaign_dim(conn, rows) -> int:
     now = utc_now_ms()
     payload = [
         (str(r["campaign_id"]), r.get("source"), r.get("name"), r.get("country"),
-         r.get("status"), r.get("daily_budget"), now)
+         r.get("status"), r.get("daily_budget"), r.get("promoted_app_id"), now)
         for r in rows
     ]
     if not payload:
         return 0
     conn.executemany(
         "INSERT INTO campaign_dim (campaign_id, source, name, country, status, "
-        "                          daily_budget, updated_at_ms) "
-        "VALUES (?,?,?,?,?,?,?) "
+        "                          daily_budget, promoted_app_id, updated_at_ms) "
+        "VALUES (?,?,?,?,?,?,?,?) "
         "ON CONFLICT(campaign_id) DO UPDATE SET "
         "  source=COALESCE(excluded.source, campaign_dim.source), "
         "  name  =COALESCE(excluded.name,   campaign_dim.name), "
         "  country=COALESCE(excluded.country, campaign_dim.country), "
         "  status=COALESCE(excluded.status, campaign_dim.status), "
         "  daily_budget=COALESCE(excluded.daily_budget, campaign_dim.daily_budget), "
+        "  promoted_app_id=COALESCE(excluded.promoted_app_id, campaign_dim.promoted_app_id), "
         "  updated_at_ms=excluded.updated_at_ms",
         payload,
     )
