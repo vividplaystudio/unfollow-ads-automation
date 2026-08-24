@@ -1,0 +1,48 @@
+name: ASA Keyword Volume
+
+# Looks up Apple's own search volume for a keyword list and prints a CSV.
+#
+# Apple's popularity endpoint cannot batch terms -- the filter takes a single
+# value -- so this is one request per keyword. A few hundred takes a couple of
+# minutes, which is fine here and impossible by hand.
+
+on:
+  workflow_dispatch:
+    inputs:
+      keyword_file:
+        description: "CSV in the repo with a `keyword` column"
+        default: "data/keywords_us.csv"
+      country:
+        description: "Storefront to price the volume against"
+        default: "US"
+      limit:
+        description: "Only look up the first N rows (0 = all)"
+        default: "0"
+
+jobs:
+  volume:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Look up volume
+        env:
+          KEYWORD_FILE: ${{ inputs.keyword_file }}
+          COUNTRY: ${{ inputs.country }}
+          LIMIT: ${{ inputs.limit }}
+          ASA_CLIENT_ID: ${{ secrets.ASA_CLIENT_ID }}
+          ASA_TEAM_ID: ${{ secrets.ASA_TEAM_ID }}
+          ASA_KEY_ID: ${{ secrets.ASA_KEY_ID }}
+          ASA_PRIVATE_KEY_PEM: ${{ secrets.ASA_PRIVATE_KEY_PEM }}
+          ASA_ORG_ID: ${{ secrets.ASA_ORG_ID }}
+        run: python3 -u tools/asa_bulk_volume.py > volume.csv
+      - name: Upload result
+        uses: actions/upload-artifact@v4
+        with:
+          name: keyword-volume-${{ inputs.country }}
+          path: volume.csv
+      - name: Print result
+        run: cat volume.csv
