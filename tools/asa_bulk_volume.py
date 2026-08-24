@@ -50,8 +50,13 @@ def main() -> int:
     terms = [r["keyword"].strip() for r in rows if r.get("keyword", "").strip()]
     print(f"looking up {len(terms)} terms in {COUNTRY}", file=sys.stderr)
 
+    # asa_v1_keyword_popularity prints progress to stdout, and stdout here is
+    # the CSV. Redirect it to stderr for the duration or the first data row is
+    # a log line and every consumer has to skip it.
+    import contextlib
     t0 = time.time()
-    found = legacy.asa_v1_keyword_popularity(terms, country=COUNTRY)
+    with contextlib.redirect_stdout(sys.stderr):
+        found = legacy.asa_v1_keyword_popularity(terms, country=COUNTRY)
     print(f"resolved {len(found)}/{len(terms)} in {time.time()-t0:.0f}s", file=sys.stderr)
 
     extra = ["apple_volume", "apple_rank", "apple_genre", "apple_month", "delta"]
