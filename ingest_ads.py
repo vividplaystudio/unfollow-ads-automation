@@ -391,6 +391,28 @@ def ingest_apple_dims(conn) -> dict:
 
     store.upsert_adgroup_dim(conn, ag_rows)
     store.upsert_keyword_dim(conn, kw_rows)
+
+    # Reconcile against Apple: anything the API no longer returns has been
+    # deleted there and should go here too. Without this the store only ever
+    # grows -- 19 campaigns deleted in Apple were still on the dashboard, with
+    # their keywords, because a row that is never re-fetched is also never
+    # re-examined. It is why the foreign-app filter missed CORE CATEGORY: that
+    # campaign stopped coming back before it was ever tagged with an app id.
+    #
+    # Guarded on a non-empty response so a failed or throttled call can never
+    # wipe the account.
+    if camp_ids:
+        live = set(camp_ids)
+        stale = [r["campaign_id"] for r in conn.execute(
+            "SELECT campaign_id FROM campaign_dim WHERE source='apple'")
+            if r["campaign_id"] not in live]
+        if stale:
+            q = ",".join("?" * len(stale))
+            for tbl in ("keyword_dim", "adgroup_dim", "ad_daily"):
+                conn.execute(f"DELETE FROM {tbl} WHERE campaign_id IN ({q})", stale)
+            conn.execute(f"DELETE FROM campaign_dim WHERE campaign_id IN ({q})", stale)
+            print(f"  [ads] removed {len(stale)} campaigns no longer in Apple "
+                  f"(and their keywords)")
     conn.commit()
     print(f"  [ads] apple dims: {len(camp_rows)} campaigns, {len(ag_rows)} ad groups, "
           f"{len(kw_rows)} keywords")
