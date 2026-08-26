@@ -84,8 +84,6 @@ CREATE TABLE IF NOT EXISTS txn (
     country      TEXT,
     event_type   TEXT
 );
-CREATE INDEX IF NOT EXISTS ix_txn_day      ON txn(day);
-CREATE INDEX IF NOT EXISTS ix_txn_customer ON txn(customer_id);
 
 -- Immutable per-customer attribution. Written once, then left alone.
 -- `channel` is the normalized media source the dashboard groups by; the raw
@@ -111,9 +109,6 @@ CREATE TABLE IF NOT EXISTS customer (
     -- must not thereby claim their attribution is known.
     attrs_fetched_ms INTEGER
 );
-CREATE INDEX IF NOT EXISTS ix_customer_first_day ON customer(first_day);
-CREATE INDEX IF NOT EXISTS ix_customer_channel   ON customer(channel);
-CREATE INDEX IF NOT EXISTS ix_customer_keyword   ON customer(campaign, keyword);
 
 -- Mutable subscription state. Only meaningful for customers who ever paid,
 -- so the refresher scopes itself to ids present in txn.
@@ -145,7 +140,6 @@ CREATE TABLE IF NOT EXISTS ad_daily (
     updated_at_ms INTEGER,
     PRIMARY KEY (day, source, campaign_id, adgroup_id, keyword_id, country)
 );
-CREATE INDEX IF NOT EXISTS ix_ad_daily_day ON ad_daily(day, source);
 
 -- ── Dimensions ───────────────────────────────────────────────────────────
 
@@ -180,8 +174,6 @@ CREATE TABLE IF NOT EXISTS search_term_popularity (
     updated_at_ms INTEGER,
     PRIMARY KEY (month, country, genre, term)
 );
-CREATE INDEX IF NOT EXISTS ix_stp_lookup ON search_term_popularity(country, term);
-CREATE INDEX IF NOT EXISTS ix_stp_rank   ON search_term_popularity(country, genre, rank_in_genre);
 
 CREATE TABLE IF NOT EXISTS campaign_dim (
     campaign_id   TEXT PRIMARY KEY,
@@ -199,7 +191,6 @@ CREATE TABLE IF NOT EXISTS campaign_dim (
     promoted_app_id TEXT,
     updated_at_ms INTEGER
 );
-CREATE INDEX IF NOT EXISTS ix_campaign_app ON campaign_dim(promoted_app_id);
 
 CREATE TABLE IF NOT EXISTS adgroup_dim (
     adgroup_id    TEXT PRIMARY KEY,
@@ -219,6 +210,24 @@ CREATE TABLE IF NOT EXISTS meta_kv (
     v TEXT
 );
 """
+
+# Indexes are created after _migrate(), not inside SCHEMA. An index on a
+# column added by a later release cannot be built until the ALTER TABLE has
+# run, and because executescript() aborts at the first failing statement, a
+# premature CREATE INDEX would take the migration down with it -- leaving the
+# column missing forever and every read of it failing.
+INDEXES = """
+CREATE INDEX IF NOT EXISTS ix_txn_day      ON txn(day);
+CREATE INDEX IF NOT EXISTS ix_txn_customer ON txn(customer_id);
+CREATE INDEX IF NOT EXISTS ix_customer_first_day ON customer(first_day);
+CREATE INDEX IF NOT EXISTS ix_customer_channel   ON customer(channel);
+CREATE INDEX IF NOT EXISTS ix_customer_keyword   ON customer(campaign, keyword);
+CREATE INDEX IF NOT EXISTS ix_ad_daily_day ON ad_daily(day, source);
+CREATE INDEX IF NOT EXISTS ix_stp_lookup ON search_term_popularity(country, term);
+CREATE INDEX IF NOT EXISTS ix_stp_rank   ON search_term_popularity(country, genre, rank_in_genre);
+CREATE INDEX IF NOT EXISTS ix_campaign_app ON campaign_dim(promoted_app_id);
+"""
+
 
 
 def utc_now_ms() -> int:
@@ -253,6 +262,7 @@ def open_store(path: str = None) -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys=ON")
     conn.executescript(SCHEMA)
     _migrate(conn)
+    conn.executescript(INDEXES)
     conn.commit()
     return conn
 
