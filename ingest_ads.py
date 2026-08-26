@@ -90,19 +90,30 @@ def ingest_apple(conn, days: int = LOOKBACK_DAYS) -> dict:
         "keywords", start, end, campaign_ids, group_by=["countryOrRegion"]
     )
 
+    skipped = 0
     for r in report:
         meta = r.get("metadata") or {}
-        kid = str(meta.get("keywordId") or "")
+        # A keyword row in v1 identifies itself with the generic "id"/"text",
+        # not v5's "keywordId"/"keyword". Reading only the v5 names meant kid
+        # was always empty and every row hit the continue below -- the report
+        # was returning full metrics the whole time and the ingest threw all
+        # of them away, which is indistinguishable from Apple sending nothing.
+        kid = str(meta.get("keywordId") or meta.get("id") or "")
         if not kid:
+            skipped += 1
             continue
         kw_dim.append({
             "keyword_id": kid,
             "campaign_id": str(meta.get("campaignId") or ""),
             "adgroup_id": str(meta.get("adGroupId") or ""),
-            "text": meta.get("keyword") or meta.get("keywordDisplayText"),
+            "text": (meta.get("keyword") or meta.get("keywordDisplayText")
+                     or meta.get("text")),
             "match_type": meta.get("matchType"),
-            "bid": _metric(meta.get("bidAmount") or {}, "amount") or None,
-            "status": meta.get("keywordStatus") or meta.get("keywordDisplayStatus"),
+            "bid": _metric(meta.get("bid") or meta.get("bidAmount") or {},
+                           "amount") or None,
+            "status": (meta.get("keywordStatus")
+                       or meta.get("keywordDisplayStatus")
+                       or meta.get("status")),
         })
         # v1 names the per-day array "granularMetrics"; v5 called it
         # "granularity". Reading the old name meant this loop never executed,
@@ -131,6 +142,9 @@ def ingest_apple(conn, days: int = LOOKBACK_DAYS) -> dict:
     print(f"  [ads] apple: {n} keyword-days {start}..{end} "
           f"({len(kw_dim)} keywords across {len(campaign_ids)} campaigns) "
           f"in {time.time()-t0:.0f}s")
+    if skipped:
+        print(f"  [ads] ⚠️  {skipped} of {len(report)} keyword rows had no "
+              f"usable id and were dropped -- check the report metadata keys")
     return {"rows": n}
 
 
