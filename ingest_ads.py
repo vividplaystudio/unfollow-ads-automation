@@ -104,8 +104,11 @@ def ingest_apple(conn, days: int = LOOKBACK_DAYS) -> dict:
             "bid": _metric(meta.get("bidAmount") or {}, "amount") or None,
             "status": meta.get("keywordStatus") or meta.get("keywordDisplayStatus"),
         })
-        # Apple returns one 'granularity' entry per day inside each row.
-        for g in (r.get("granularity") or []):
+        # v1 names the per-day array "granularMetrics"; v5 called it
+        # "granularity". Reading the old name meant this loop never executed,
+        # so ad_daily stayed empty and every spend column on the dashboard
+        # read $0 while the campaigns were actually spending.
+        for g in (r.get("granularMetrics") or r.get("granularity") or []):
             day = (g.get("date") or "")[:10]
             if not day:
                 continue
@@ -128,6 +131,52 @@ def ingest_apple(conn, days: int = LOOKBACK_DAYS) -> dict:
     print(f"  [ads] apple: {n} keyword-days {start}..{end} "
           f"({len(kw_dim)} keywords across {len(campaign_ids)} campaigns) "
           f"in {time.time()-t0:.0f}s")
+    return {"rows": n}
+
+
+def ingest_apple_campaigns(conn, days: int = LOOKBACK_DAYS) -> dict:
+    """Campaign-level spend into ad_daily with an empty keyword_id.
+
+    The builder reads campaign totals from ad_daily rows whose keyword_id is
+    blank. Only the keyword report was ever fetched, so those rows never
+    existed and campaign spend showed zero. Keyword rows alone are not a
+    substitute either: Apple reports spend against a keyword only once it has
+    activity, so a campaign can spend on broad/Search Match traffic that no
+    keyword row accounts for.
+    """
+    if not legacy.ASA_V1_ENABLED:
+        return {"rows": 0}
+    window = _day_list(days)
+    start, end = window[0], window[-1]
+    try:
+        report = legacy.asa_v1_report("campaigns", start, end)
+    except Exception as e:
+        print(f"  [ads] campaign report failed: {type(e).__name__}: {e}")
+        return {"rows": 0}
+
+    rows = []
+    for r in report:
+        meta = r.get("metadata") or {}
+        cid = str(meta.get("campaignId") or meta.get("id") or "")
+        if not cid:
+            continue
+        for g in (r.get("granularMetrics") or r.get("granularity") or []):
+            day = (g.get("date") or "")[:10]
+            if not day:
+                continue
+            rows.append({
+                "day": day, "source": "apple", "campaign_id": cid,
+                "adgroup_id": "", "keyword_id": "", "country": "",
+                "spend": _metric(g, "localSpend"),
+                "impressions": int(_metric(g, "impressions")),
+                "taps": int(_metric(g, "taps")),
+                "installs": int(_metric(g, "totalInstalls", "tapInstalls", "installs")),
+            })
+    n = store.upsert_ad_daily(conn, rows)
+    conn.commit()
+    spend = sum(r["spend"] for r in rows)
+    print(f"  [ads] apple campaigns: {n} campaign-days {start}..{end}, "
+          f"${spend:,.2f} spend")
     return {"rows": n}
 
 
@@ -471,6 +520,7 @@ def backfill_keyword_popularity_from_feed(conn) -> int:
 def main() -> int:
     conn = store.open_store()
     ingest_apple_dims(conn)
+    ingest_apple_campaigns(conn)
     ingest_apple(conn)
     if os.environ.get("REFRESH_POPULARITY", "1") == "1":
         # Feed first: it scores most of our keywords in a handful of requests,
