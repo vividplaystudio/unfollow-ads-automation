@@ -2018,8 +2018,16 @@ def main() -> None:
                         _base.update(_kw_fields(_row["keyword_id"]))
                         asa_keyword_data[_r][(_cid, _kw)] = _base
                     else:
-                        _agg = asa_campaign_data[_r].setdefault(_cid, dict(_base))
-                        if _agg is not _base:
+                        # setdefault() inserts a COPY, so the value it hands
+                        # back is never the same object as _base -- the old
+                        # "is not _base" guard was therefore always true and
+                        # every campaign got its first row added twice, on top
+                        # of the copy that already held it. That is why the
+                        # dashboard read exactly 2.00x Apple's spend.
+                        _agg = asa_campaign_data[_r].get(_cid)
+                        if _agg is None:
+                            asa_campaign_data[_r][_cid] = dict(_base)
+                        else:
                             for _k in ("spend", "impressions", "taps", "installs"):
                                 _agg[_k] += _base[_k]
                 # Campaign totals roll up from keyword rows when Apple reported
