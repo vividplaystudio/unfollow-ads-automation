@@ -1770,7 +1770,52 @@ def validate_full_data(new_data, prev_data):
         if new_size < prev_size * 0.5 and prev_size > 1000:
             return False, f"new size {new_size:,} < 50% of prev {prev_size:,}"
 
+        # Size alone cannot see a single section dying. data.json is dominated
+        # by Meta and RevenueCat, so the entire Apple section collapsing to
+        # zero moves the byte count by ~2% and sails through the check above.
+        # That is exactly how every ASA outage so far reached the dashboard:
+        # the build "succeeded", published zeros over good data, and reported
+        # success. A section that had data yesterday and has none today is a
+        # bug, never a fact -- spend and keyword counts do not retroactively
+        # become zero.
+        ok, why = _no_section_went_empty(new_data, prev_data)
+        if not ok:
+            return False, why
+
     return True, reason  # includes the daily_rc validation passed message
+
+
+def _asa_shape(data):
+    """(total Apple spend across all ranges, keyword count) for one build."""
+    spend = 0.0
+    for c in (data.get("campaigns") or []):
+        for k, v in c.items():
+            if k.startswith("spend_"):
+                try:
+                    spend += float(v or 0)
+                except (TypeError, ValueError):
+                    pass
+    return spend, len(data.get("keywords") or [])
+
+
+def _no_section_went_empty(new_data, prev_data):
+    """Refuse a build that zeroes out a section the last good build had.
+
+    Deliberately one-directional: going from data to nothing is blocked,
+    nothing to data is fine, and shrinking is fine. Only total collapse is
+    treated as a fault, so a genuinely paused account still publishes.
+    """
+    new_spend, new_kw = _asa_shape(new_data)
+    prev_spend, prev_kw = _asa_shape(prev_data)
+
+    if prev_spend > 0 and new_spend == 0:
+        return False, (f"Apple spend collapsed to $0 (was ${prev_spend:,.2f}). "
+                       "Spend never becomes zero retroactively -- the store "
+                       "read or the campaign-id join is broken.")
+    if prev_kw > 0 and new_kw == 0:
+        return False, (f"Apple keywords collapsed to 0 (was {prev_kw}). "
+                       "The keyword_dim read or its join is broken.")
+    return True, "sections intact"
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -1904,7 +1949,11 @@ def main() -> None:
 
     campaign_meta = {}
     for c in campaigns:
-        cid = c["id"]
+        # str() so this path keys campaigns exactly as the store does. When
+        # these disagreed, the spend was present and simply could not be
+        # found: campaign_meta held int 2144522532 while asa_campaign_data
+        # held "2144522532", and every lookup fell through to the zero default.
+        cid = str(c["id"])
         campaign_meta[cid] = {
             "id": cid,
             "name": c.get("name", ""),
@@ -1950,6 +1999,15 @@ def main() -> None:
             # 38 rows for 19 campaigns, every name duplicated.
             if _store_camps:
                 campaign_meta.clear()
+            else:
+                # Silence here is what turned a store problem into a dashboard
+                # of zeros: campaign_meta quietly kept the legacy API walk's
+                # rows, which key by a different type than the store-derived
+                # spend, so nothing joined and the build still reported
+                # success. Say it loudly instead.
+                print("  ⚠️  [store] campaign_dim returned NO Apple campaigns -- "
+                      "falling back to the API walk. Spend and keywords will "
+                      "not join. Run the Store Backfill workflow.")
             for _c in _store_camps:
                 campaign_meta[_c["campaign_id"]] = {
                     "id": _c["campaign_id"],
@@ -2082,7 +2140,7 @@ def main() -> None:
             for row in rows:
                 m = row.get("metadata", {})
                 t = row.get("total", {})
-                cid = m.get("campaignId")
+                cid = str(m.get("campaignId"))
                 asa_campaign_data[range_name][cid] = {
                     "spend": float(t.get("localSpend", {}).get("amount", 0) or 0),
                     "impressions": int(t.get("impressions", 0) or 0),
