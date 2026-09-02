@@ -16,6 +16,7 @@ Environment variables (provided as GitHub Secrets):
 
 import base64
 import ftplib
+import io
 import hashlib
 import json
 import os
@@ -201,6 +202,45 @@ def write_token_to_sheet(token: str, expires_at_iso: str) -> None:
         resp.read()
 
 
+def _retry(fn, what="call", attempts=3, base_delay=3):
+    """Run fn, retrying transient failures with backoff.
+
+    Apple, Google and the FTP host all return occasional 5xx. Those are not
+    faults worth an alert -- roughly 4% of runs hit one -- so retry before
+    giving up on that destination.
+    """
+    last = None
+    for i in range(1, attempts + 1):
+        try:
+            return fn()
+        except Exception as e:
+            last = e
+            code = getattr(e, "code", None)
+            transient = code is None or code >= 500 or code == 429
+            if not transient or i == attempts:
+                raise
+            wait = base_delay * i
+            print(f"  ⚠ {what} failed ({type(e).__name__}: {e}) — "
+                  f"retry {i}/{attempts - 1} in {wait}s")
+            time.sleep(wait)
+    raise last
+
+
+def _upload_token_to_cpanel(access_token: str) -> None:
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    ftp = ftplib.FTP_TLS(FTP_HOST, timeout=30, context=ctx)
+    ftp.login(FTP_USER, FTP_PASS)
+    ftp.prot_p()
+    try:
+        ftp.cwd(FTP_PATH)
+    except ftplib.error_perm:
+        pass
+    ftp.storbinary("STOR .token", io.BytesIO(access_token.encode()))
+    ftp.quit()
+
+
 def main() -> None:
     # Write private key to temp file
     with tempfile.NamedTemporaryFile(mode="w", suffix=".pem", delete=False) as f:
@@ -220,32 +260,40 @@ def main() -> None:
         )
         print(f"Got token, expires in {expires_in}s")
 
-        print("Writing to Google Sheet...")
-        write_token_to_sheet(access_token, expires_at)
-        print(f"✅ Sheet updated, token valid until {expires_at}")
-
-        # Also push token to cPanel so the dashboard PHP proxy can use it
+        # cPanel FIRST. This is the copy the live dashboard actually reads;
+        # Google Sheets is a convenience. They used to run the other way
+        # round with the Sheets call unguarded, so a Google 503 -- which has
+        # nothing to do with Apple -- aborted the script after the token was
+        # already in hand and the dashboard never received it, while the run
+        # reported "Refresh Apple Search Ads Token: failed".
+        delivered = []
         if FTP_HOST:
             try:
                 print("Uploading .token to cPanel...")
-                ctx = ssl.create_default_context()
-                ctx.check_hostname = False
-                ctx.verify_mode = ssl.CERT_NONE
-                ftp = ftplib.FTP_TLS(FTP_HOST, timeout=30, context=ctx)
-                ftp.login(FTP_USER, FTP_PASS)
-                ftp.prot_p()
-                # Navigate to dashboard folder
-                try:
-                    ftp.cwd(FTP_PATH)
-                except ftplib.error_perm:
-                    pass
-                # Write token as .token file
-                import io
-                ftp.storbinary("STOR .token", io.BytesIO(access_token.encode()))
-                ftp.quit()
+                _retry(lambda: _upload_token_to_cpanel(access_token),
+                       what="cPanel upload")
+                delivered.append("cPanel")
                 print("✅ Token uploaded to cPanel")
             except Exception as e:
-                print(f"⚠ FTP upload failed: {e}")
+                print(f"⚠ FTP upload failed after retries: {e}")
+
+        try:
+            print("Writing to Google Sheet...")
+            _retry(lambda: write_token_to_sheet(access_token, expires_at),
+                   what="Sheet write")
+            delivered.append("Google Sheets")
+            print("✅ Sheet updated")
+        except Exception as e:
+            print(f"⚠ Sheet write failed after retries: {e}")
+
+        if not delivered:
+            raise SystemExit(
+                "token was refreshed but could not be delivered to cPanel or "
+                "Google Sheets -- the dashboard will use the previous token "
+                "until the next run"
+            )
+        print(f"✅ token valid until {expires_at} · delivered to "
+              f"{', '.join(delivered)}")
     finally:
         os.unlink(key_path)
 
