@@ -133,16 +133,14 @@ def _is_transient(status: int, body: str) -> bool:
     return status == 403
 
 
-def meta_get(path: str, params: dict) -> dict:
-    """GET against Meta Graph API, retrying transient failures.
+def _get_with_retry(url: str, label: str) -> dict:
+    """One GET against Graph, retrying transient failures.
 
-    Without this a single rate-limit blip killed the whole dashboard refresh
-    and sent a failure email, even though the next run 20 minutes later
-    succeeded untouched. Permanent errors (bad token, malformed field) still
-    raise on the first attempt, so real breakage is not buried in retries.
+    Both meta_get and meta_paginated's page-2+ fetches go through here. They
+    used to differ: only the first page was retried, so a 500 on any later page
+    killed the whole refresh instantly with no retry logged -- and since
+    insights paginate heavily, most requests were on the unprotected path.
     """
-    params = {**params, "access_token": META_ACCESS_TOKEN}
-    url = f"https://graph.facebook.com/{META_API_VERSION}/{path}?" + urllib.parse.urlencode(params)
     req = urllib.request.Request(url, headers={"Accept": "application/json"})
     for attempt in range(len(_RETRY_WAITS) + 1):
         try:
@@ -150,18 +148,25 @@ def meta_get(path: str, params: dict) -> dict:
                 return json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
             body = e.read().decode("utf-8", errors="replace")
-            retryable, label, exc = _is_transient(e.code, body), f"Meta API error {e.code}", e
+            retryable, why, exc = _is_transient(e.code, body), f"{label} error {e.code}", e
         except (urllib.error.URLError, TimeoutError, socket.timeout) as e:
-            body, retryable, label, exc = str(e), True, "Meta API unreachable", e
+            body, retryable, why, exc = str(e), True, f"{label} unreachable", e
         # Re-raise explicitly: a bare `raise` here is outside the except block,
         # so there is no active exception to propagate.
         if not retryable or attempt == len(_RETRY_WAITS):
-            print(f"  ❌ {label}: {body[:500]}")
+            print(f"  ❌ {why}: {body[:500]}")
             raise exc
         wait = _RETRY_WAITS[attempt]
-        print(f"  ⚠️  {label} (transient) — retrying in {wait}s "
+        print(f"  ⚠️  {why} (transient) — retrying in {wait}s "
               f"[{attempt + 1}/{len(_RETRY_WAITS)}]: {body[:200]}")
         time.sleep(wait)
+
+
+def meta_get(path: str, params: dict) -> dict:
+    """GET against Meta Graph API, retrying transient failures."""
+    params = {**params, "access_token": META_ACCESS_TOKEN}
+    url = f"https://graph.facebook.com/{META_API_VERSION}/{path}?" + urllib.parse.urlencode(params)
+    return _get_with_retry(url, "Meta API")
 
 
 def meta_paginated(path: str, params: dict) -> list:
@@ -173,9 +178,7 @@ def meta_paginated(path: str, params: dict) -> list:
         next_url = page.get("paging", {}).get("next")
         if not next_url:
             break
-        req = urllib.request.Request(next_url, headers={"Accept": "application/json"})
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            page = json.loads(resp.read().decode("utf-8"))
+        page = _get_with_retry(next_url, "Meta API (page)")
     return out
 
 
