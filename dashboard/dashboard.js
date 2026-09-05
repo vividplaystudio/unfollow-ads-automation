@@ -954,39 +954,84 @@ function renderBulkInfo() {
 // Country here is the SUBSCRIBER's storefront (from RevenueCat), not the
 // campaign's targeting list -- both live ASA campaigns run worldwide, so the
 // campaign's own country field is one arbitrary market and says nothing about
-// where the money is. There is deliberately no ROAS column: Apple's Reports
-// API returns no rows for groupBy countryOrRegion, so per-country spend does
-// not exist and a ROAS here would be invented.
+// where the money is.
+//
+// There is deliberately no ROAS or spend column. Apple's Reports API returns
+// zero rows for groupBy countryOrRegion at both the campaign and keyword
+// level, so per-country spend does not exist; showing one would mean
+// inventing it. Keyword SPEND is real but is a worldwide total per keyword,
+// so it cannot be attributed to a single market either.
 function renderCountries() {
-  // dashboard.js has no shared escape helper; country codes come from
-  // RevenueCat, so escape defensively rather than trusting the feed.
+  // dashboard.js has no shared escape helper; country/keyword text comes from
+  // RevenueCat attribution, so escape defensively rather than trusting it.
   const esc = v => String(v == null ? "" : v).replace(/[&<>"']/g,
     c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  const money = v => "$" + (Number(v) || 0).toFixed(2);
   const body = document.getElementById("ctryBody");
   if (!body) return;
-  const rows = (STATE.data && STATE.data.asa_countries) || [];
+
+  const rows = ((STATE.data && STATE.data.asa_countries) || [])
+    .filter(r => (r.revenue_30d || 0) > 0 || (r.users_30d || 0) > 0);
   if (!rows.length) {
-    body.innerHTML = '<tr><td colspan="9" class="muted">No ASA-attributed revenue yet.</td></tr>';
+    body.innerHTML = '<tr><td colspan="13" class="muted">No ASA-attributed revenue yet.</td></tr>';
     return;
   }
+
+  // Group the keyword detail by country once, rather than re-scanning per row.
+  const kwByCountry = {};
+  ((STATE.data && STATE.data.asa_country_keywords) || []).forEach(k => {
+    (kwByCountry[k.country] = kwByCountry[k.country] || []).push(k);
+  });
+
   const total = rows.reduce((a, r) => a + (r.revenue_30d || 0), 0);
-  body.innerHTML = rows
-    .filter(r => (r.revenue_30d || 0) > 0 || (r.users_30d || 0) > 0)
-    .map(r => {
-      const share = total ? (r.revenue_30d / total * 100) : 0;
-      const rpi = r.rev_per_user_30d || 0;
-      return `<tr>
-        <td><b>${esc(r.country)}</b></td>
-        <td class="num">$${(r.revenue_7d || 0).toFixed(2)}</td>
-        <td class="num"><b>$${(r.revenue_30d || 0).toFixed(2)}</b></td>
-        <td class="num">${r.subs_30d || 0}</td>
-        <td class="num">${r.users_30d || 0}</td>
-        <td class="num">$${rpi.toFixed(2)}</td>
-        <td class="num">${r.active_30d || 0}</td>
-        <td class="num">${r.weekly_subs_30d || 0} / ${r.monthly_subs_30d || 0} / ${r.yearly_subs_30d || 0}</td>
-        <td class="num">${share.toFixed(1)}%</td>
-      </tr>`;
-    }).join("");
+  body.innerHTML = rows.map(r => {
+    const share = total ? (r.revenue_30d / total * 100) : 0;
+    const kws = kwByCountry[r.country] || [];
+    const main = `<tr class="ctry-row" data-ctry="${esc(r.country)}">
+      <td><span class="ctry-caret">${kws.length ? "\u203a" : "\u00a0"}</span> <b>${esc(r.country)}</b></td>
+      <td class="num">${money(r.revenue_7d)}</td>
+      <td class="num"><b>${money(r.revenue_30d)}</b></td>
+      <td class="num">${share.toFixed(1)}%</td>
+      <td class="num">${r.subs_30d || 0}</td>
+      <td class="num">${r.users_30d || 0}</td>
+      <td class="num">${(r.cvr_30d || 0).toFixed(1)}%</td>
+      <td class="num">${money(r.rev_per_user_30d)}</td>
+      <td class="num">${money(r.rev_per_sub_30d)}</td>
+      <td class="num">${r.active_30d || 0}</td>
+      <td class="num">${r.renewals_30d || 0}</td>
+      <td class="num">${r.weekly_subs_30d || 0} / ${r.monthly_subs_30d || 0} / ${r.yearly_subs_30d || 0}</td>
+      <td class="num">${money(r.weekly_rev_30d)} / ${money(r.monthly_rev_30d)} / ${money(r.yearly_rev_30d)}</td>
+    </tr>`;
+    if (!kws.length) return main;
+    const detail = `<tr class="ctry-kw" data-for="${esc(r.country)}" hidden><td colspan="13">
+      <div class="ctry-kw-inner"><table>
+        <thead><tr><th>Keyword</th><th>Campaign</th><th class="num">Rev 30d</th>
+          <th class="num">Subs</th><th class="num">Installs</th><th class="num">Active</th>
+          <th class="num">Renewals</th><th class="num">W / M / Y</th></tr></thead>
+        <tbody>${kws.map(k => `<tr>
+          <td><b>${esc(k.keyword)}</b></td>
+          <td class="muted">${esc(k.campaign)}</td>
+          <td class="num">${money(k.revenue_30d)}</td>
+          <td class="num">${k.subs_30d || 0}</td>
+          <td class="num">${k.users_30d || 0}</td>
+          <td class="num">${k.active_30d || 0}</td>
+          <td class="num">${k.renewals_30d || 0}</td>
+          <td class="num">${k.weekly_subs_30d || 0} / ${k.monthly_subs_30d || 0} / ${k.yearly_subs_30d || 0}</td>
+        </tr>`).join("")}</tbody>
+      </table></div></td></tr>`;
+    return main + detail;
+  }).join("");
+
+  // Toggle with el.hidden rather than style.display so the row stays in flow
+  // for the table layout.
+  body.querySelectorAll("tr.ctry-row").forEach(tr => {
+    tr.addEventListener("click", () => {
+      const d = body.querySelector(`tr.ctry-kw[data-for="${CSS.escape(tr.dataset.ctry)}"]`);
+      if (!d) return;
+      d.hidden = !d.hidden;
+      tr.classList.toggle("ctry-open", !d.hidden);
+    });
+  });
 }
 
 function render() {

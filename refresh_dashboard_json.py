@@ -1310,6 +1310,11 @@ def build_revenue_index(customers: list) -> dict:
     by_camp = defaultdict(lambda: defaultdict(_zero))
     by_adgroup = defaultdict(lambda: defaultdict(_zero))
     by_country = defaultdict(lambda: defaultdict(_zero))
+    # (country, campaign, keyword) -- the join the ASA API cannot give us.
+    # RevenueCat carries BOTH the subscriber's storefront and their $keyword,
+    # so the pairing exists on the revenue side even though Apple will not
+    # group spend by country.
+    by_ckw = defaultdict(lambda: defaultdict(_zero))
     by_channel = defaultdict(lambda: defaultdict(_zero))  # channel = media source
 
     for c in customers:
@@ -1401,12 +1406,14 @@ def build_revenue_index(customers: list) -> dict:
                 _apply(by_camp[campaign][r], r, in_cohort)
                 _apply(by_adgroup[(campaign, adgroup)][r], r, in_cohort)
                 _apply(by_country[country][r], r, in_cohort)
+                _apply(by_ckw[(country, campaign, keyword)][r], r, in_cohort)
 
     return {
         "by_keyword": by_kw,
         "by_campaign": by_camp,
         "by_adgroup": by_adgroup,
         "by_country": by_country,
+        "by_country_keyword": by_ckw,
         "by_channel": by_channel,
     }
 
@@ -2611,13 +2618,55 @@ def main() -> None:
             row[f"weekly_subs_{r}"] = rd.get("weekly_subs", 0)
             row[f"monthly_subs_{r}"] = rd.get("monthly_subs", 0)
             row[f"yearly_subs_{r}"] = rd.get("yearly_subs", 0)
+            row[f"weekly_rev_{r}"] = round(rd.get("weekly_rev", 0), 2)
+            row[f"monthly_rev_{r}"] = round(rd.get("monthly_rev", 0), 2)
+            row[f"yearly_rev_{r}"] = round(rd.get("yearly_rev", 0), 2)
             u = row[f"users_{r}"]
+            s_ = row[f"subs_{r}"]
             row[f"rev_per_user_{r}"] = round(row[f"revenue_{r}"] / u, 2) if u else 0.0
+            row[f"rev_per_sub_{r}"] = round(row[f"revenue_{r}"] / s_, 2) if s_ else 0.0
+            # install -> paid conversion, the number that says whether a market
+            # is worth targeting at all rather than merely cheap to reach.
+            row[f"cvr_{r}"] = round(s_ / u * 100, 1) if u else 0.0
         countries_out.append(row)
     countries_out.sort(key=lambda x: -x["revenue_30d"])
     if countries_out:
         print(f"  ASA countries: {len(countries_out)} with revenue or installs "
               f"(top 30d: {', '.join(c['country'] for c in countries_out[:5])})")
+
+    # Per-country KEYWORD detail.
+    #
+    # This pairing is only possible on the revenue side: RevenueCat carries
+    # both the subscriber's storefront and their $keyword, so "which keyword
+    # earned in which country" is answerable even though Apple will not group
+    # spend by country (five request shapes tried across the campaign and
+    # keyword report levels -- all return zero rows).
+    #
+    # Keywords with no attribution (Search Match, broad discovery) are kept as
+    # "(no keyword)" rather than dropped: for a worldwide campaign they are
+    # often the largest single bucket, and silently discarding them would make
+    # the per-country totals disagree with the country table above.
+    country_keywords_out = []
+    for (ctry, camp, kw), range_data in rev_index["by_country_keyword"].items():
+        rd30 = range_data.get("30d") or {}
+        if not (rd30.get("revenue") or rd30.get("users")):
+            continue
+        row = {"country": ctry or "Unknown", "campaign": camp or "(none)",
+               "keyword": kw or "(no keyword)"}
+        for r in ranges:
+            rd = range_data.get(r) or {}
+            row[f"revenue_{r}"] = round(rd.get("revenue", 0), 2)
+            row[f"subs_{r}"] = rd.get("paid_subs", 0)
+            row[f"users_{r}"] = rd.get("users", 0)
+            row[f"active_{r}"] = rd.get("active", 0)
+            row[f"renewals_{r}"] = rd.get("renewals", 0)
+            row[f"weekly_subs_{r}"] = rd.get("weekly_subs", 0)
+            row[f"monthly_subs_{r}"] = rd.get("monthly_subs", 0)
+            row[f"yearly_subs_{r}"] = rd.get("yearly_subs", 0)
+        country_keywords_out.append(row)
+    country_keywords_out.sort(key=lambda x: (x["country"], -x["revenue_30d"]))
+    if country_keywords_out:
+        print(f"  ASA country x keyword: {len(country_keywords_out)} rows")
 
     # Apple's market-wide search volume, from the store. This is keyword
     # RESEARCH, not reporting: the most-searched terms per market whether or
@@ -2649,6 +2698,7 @@ def main() -> None:
         "ad_groups": adgroups_out,
         "channels": channels_out,
         "asa_countries": countries_out,
+        "asa_country_keywords": country_keywords_out,
         "daily_rc": daily_rc,
         "cohort_retention": cohort_retention,
         "refunds": _LAST_REFUND_SUMMARY,

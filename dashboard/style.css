@@ -746,3 +746,16 @@ tbody tr.flash-error { animation: flashError 1.4s ease-out; }
 .staleness-stale   { color: #b91c1c; font-weight: 600; }
 .staleness-unknown { color: #6b7280; }
 
+
+
+/* ASA country table: rows expand to show that market's keywords. */
+#ctryTable tbody tr.ctry-row { cursor: pointer; }
+#ctryTable tbody tr.ctry-row:hover { background: var(--row-hover, rgba(127,127,127,.06)); }
+#ctryTable tbody tr.ctry-row .ctry-caret { display: inline-block; width: 10px; color: var(--text-muted); }
+#ctryTable tbody tr.ctry-open .ctry-caret { transform: rotate(90deg); }
+#ctryTable tbody tr.ctry-kw > td { padding: 0; border-top: 0; }
+#ctryTable .ctry-kw-inner { padding: 6px 10px 10px 30px; }
+#ctryTable .ctry-kw-inner table { width: 100%; font-size: 12.5px; }
+#ctryTable .ctry-kw-inner th { font-size: 10.5px; text-transform: uppercase;
+  letter-spacing: .05em; color: var(--text-muted); font-weight: 600; }
+#ctryTable .ctry-kw-inner td, #ctryTable .ctry-kw-inner th { padding: 4px 8px; }
