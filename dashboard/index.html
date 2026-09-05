@@ -344,6 +344,36 @@
       </table>
     </div>
 
+    <!-- ─── ASA revenue by country ───────────────────────────
+         Both live ASA campaigns target worldwide, so campaign-level
+         totals cannot say which markets earn. Country here is the
+         SUBSCRIBER's storefront from RevenueCat, not the campaign's
+         targeting list. Revenue only -- Apple's Reports API returns no
+         rows for groupBy countryOrRegion, so per-country spend (and
+         therefore per-country ROAS) is not available. -->
+    <div class="meta-header" style="margin-top:32px">
+      <h2>ASA Revenue by Country</h2>
+      <span class="meta-updated">subscriber storefront &middot; revenue only, no spend split available</span>
+    </div>
+    <div class="table-wrap">
+      <table id="ctryTable">
+        <thead>
+          <tr>
+            <th>Country</th>
+            <th class="num">Revenue 7d</th>
+            <th class="num">Revenue 30d</th>
+            <th class="num">Subs 30d</th>
+            <th class="num">Installs 30d</th>
+            <th class="num">Rev / install</th>
+            <th class="num">Active</th>
+            <th class="num">W / M / Y</th>
+            <th class="num">% of revenue</th>
+          </tr>
+        </thead>
+        <tbody id="ctryBody"><tr><td colspan="9" class="muted">Loading…</td></tr></tbody>
+      </table>
+    </div>
+
     <!-- ─── Subscription Health (global, from RevenueCat) ──── -->
     <div class="meta-header" style="margin-top:32px">
       <h2>Subscription Health</h2>

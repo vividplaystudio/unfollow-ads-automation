@@ -2579,6 +2579,46 @@ def main() -> None:
             row[f"yearly_subs_{r}"] = rd.get("yearly_subs", 0)
         channels_out.append(row)
 
+    # ASA revenue BY COUNTRY.
+    #
+    # by_country is already built and already scoped to Apple-Search-Ads
+    # customers (see build_revenue_index) -- it was computed and then never
+    # published, so the dashboard had no country dimension at all.
+    #
+    # This is the only honest per-country view available. Apple's Reports API
+    # accepts groupBy ["countryOrRegion"] on the campaigns report and returns
+    # ZERO rows (verified against the live account across four request shapes),
+    # so per-country SPEND cannot be fetched and per-country ROAS cannot be
+    # computed. What RevenueCat knows -- which country each subscriber is in
+    # and what they paid -- is real, and for worldwide campaigns it is the
+    # thing actually being asked: where is the money coming from.
+    #
+    # Country is the subscriber's storefront, not the campaign's targeting
+    # list. get_country_from_campaign takes the FIRST country of a campaign's
+    # targeting, so a campaign spanning 87 markets reports as one country;
+    # that field is unusable for this and is not used here.
+    countries_out = []
+    for country_code, range_data in rev_index["by_country"].items():
+        row = {"country": country_code or "Unknown"}
+        for r in ranges:
+            rd = range_data.get(r) or {}
+            row[f"users_{r}"] = rd.get("users", 0)
+            row[f"subs_{r}"] = rd.get("paid_subs", 0)
+            row[f"revenue_{r}"] = round(rd.get("revenue", 0), 2)
+            row[f"active_{r}"] = rd.get("active", 0)
+            row[f"canceled_{r}"] = rd.get("canceled", 0)
+            row[f"renewals_{r}"] = rd.get("renewals", 0)
+            row[f"weekly_subs_{r}"] = rd.get("weekly_subs", 0)
+            row[f"monthly_subs_{r}"] = rd.get("monthly_subs", 0)
+            row[f"yearly_subs_{r}"] = rd.get("yearly_subs", 0)
+            u = row[f"users_{r}"]
+            row[f"rev_per_user_{r}"] = round(row[f"revenue_{r}"] / u, 2) if u else 0.0
+        countries_out.append(row)
+    countries_out.sort(key=lambda x: -x["revenue_30d"])
+    if countries_out:
+        print(f"  ASA countries: {len(countries_out)} with revenue or installs "
+              f"(top 30d: {', '.join(c['country'] for c in countries_out[:5])})")
+
     # Apple's market-wide search volume, from the store. This is keyword
     # RESEARCH, not reporting: the most-searched terms per market whether or
     # not we bid on them, which is what makes "which keywords should we buy"
@@ -2608,6 +2648,7 @@ def main() -> None:
         "ads": ads_out,
         "ad_groups": adgroups_out,
         "channels": channels_out,
+        "asa_countries": countries_out,
         "daily_rc": daily_rc,
         "cohort_retention": cohort_retention,
         "refunds": _LAST_REFUND_SUMMARY,

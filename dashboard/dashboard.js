@@ -951,11 +951,50 @@ function renderBulkInfo() {
   }
 }
 
+// Country here is the SUBSCRIBER's storefront (from RevenueCat), not the
+// campaign's targeting list -- both live ASA campaigns run worldwide, so the
+// campaign's own country field is one arbitrary market and says nothing about
+// where the money is. There is deliberately no ROAS column: Apple's Reports
+// API returns no rows for groupBy countryOrRegion, so per-country spend does
+// not exist and a ROAS here would be invented.
+function renderCountries() {
+  // dashboard.js has no shared escape helper; country codes come from
+  // RevenueCat, so escape defensively rather than trusting the feed.
+  const esc = v => String(v == null ? "" : v).replace(/[&<>"']/g,
+    c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  const body = document.getElementById("ctryBody");
+  if (!body) return;
+  const rows = (STATE.data && STATE.data.asa_countries) || [];
+  if (!rows.length) {
+    body.innerHTML = '<tr><td colspan="9" class="muted">No ASA-attributed revenue yet.</td></tr>';
+    return;
+  }
+  const total = rows.reduce((a, r) => a + (r.revenue_30d || 0), 0);
+  body.innerHTML = rows
+    .filter(r => (r.revenue_30d || 0) > 0 || (r.users_30d || 0) > 0)
+    .map(r => {
+      const share = total ? (r.revenue_30d / total * 100) : 0;
+      const rpi = r.rev_per_user_30d || 0;
+      return `<tr>
+        <td><b>${esc(r.country)}</b></td>
+        <td class="num">$${(r.revenue_7d || 0).toFixed(2)}</td>
+        <td class="num"><b>$${(r.revenue_30d || 0).toFixed(2)}</b></td>
+        <td class="num">${r.subs_30d || 0}</td>
+        <td class="num">${r.users_30d || 0}</td>
+        <td class="num">$${rpi.toFixed(2)}</td>
+        <td class="num">${r.active_30d || 0}</td>
+        <td class="num">${r.weekly_subs_30d || 0} / ${r.monthly_subs_30d || 0} / ${r.yearly_subs_30d || 0}</td>
+        <td class="num">${share.toFixed(1)}%</td>
+      </tr>`;
+    }).join("");
+}
+
 function render() {
   if (!STATE.data) return;
   renderKPIs();
   renderCharts();
   renderTable();
+  renderCountries();
   renderBulkInfo();
 }
 
