@@ -2384,145 +2384,86 @@ def main() -> None:
         except Exception as e:
             print(f"  search-terms fetch skipped: {e}")
 
-    # ── Per-COUNTRY Apple metrics ─────────────────────────────────────
+    # ── Per-country / per-keyword Apple metrics, FROM THE STORE ───────
     #
-    # groupBy ["countryOrRegion"] works and always did. Earlier probes
-    # concluded it returned nothing because they omitted `pagination` from the
-    # request body -- Apple then answers with an empty rows array rather than
-    # an error. asa_v1_paged always sends pagination, so this path is fine;
-    # the wrong conclusion came from testing outside it.
+    # ingest_ads.py already fetches exactly this -- the keyword report grouped
+    # by countryOrRegion, read out of granularMetrics -- and upserts it into
+    # ad_daily keyed (day, source, campaign_id, adgroup_id, keyword_id,
+    # country). Re-fetching it here would be a second copy of a working
+    # pipeline plus several more Apple calls per run, so read the store.
     #
-    # This is the half Apple owns: spend, impressions, taps and installs per
-    # market. Revenue and subs per market come from RevenueCat
-    # (asa_countries), and the two together finally make per-country CPI, CTR
-    # and ROAS real rather than estimated.
-    country_daily_out, country_kw_out = [], []
-    if ASA_V1_ENABLED and campaign_meta:
-        c_end = datetime.now(timezone.utc).date()
-        c_start = c_end - timedelta(days=30)
+    # ad_daily.country is the only trustworthy per-market spend available: a
+    # campaign's own "country" is its targeting list, which for a worldwide
+    # campaign names one arbitrary market.
+    country_daily_out, country_kw_out, keyword_daily_out = [], [], []
+    if STORE_MODE:
         try:
-            for row_ in asa_v1_report("campaigns", c_start.isoformat(),
-                                      c_end.isoformat(),
-                                      group_by=["countryOrRegion"]) or []:
-                md = row_.get("metadata") or {}
-                cc = md.get("countryOrRegion")
-                if not cc:
-                    continue
-                cid = str(md.get("campaignId"))
-                cname = (campaign_meta.get(cid, {}) or {}).get("name", "")
-                for g in (row_.get("granularMetrics")
-                          or row_.get("granularity") or []):
-                    sp_ = float((g.get("localSpend") or {}).get("amount", 0) or 0)
-                    tp_ = int(g.get("taps", 0) or 0)
-                    im_ = int(g.get("impressions", 0) or 0)
-                    in_ = int(g.get("totalInstalls", 0) or 0)
-                    if not (sp_ or tp_ or in_):
-                        continue
-                    country_daily_out.append({
-                        "date": g.get("date"), "country": cc,
-                        "campaign": cname, "campaign_id": cid,
-                        "spend": round(sp_, 2), "impressions": im_,
-                        "taps": tp_, "installs": in_,
-                        "cpi": round(sp_ / in_, 2) if in_ else 0.0,
-                        "ctr": round(tp_ / im_ * 100, 2) if im_ else 0.0,
-                        "tap_to_install": round(in_ / tp_ * 100, 1) if tp_ else 0.0,
-                    })
-            country_daily_out.sort(key=lambda x: (x["date"], -x["spend"]))
-            print(f"  ASA v1: {len(country_daily_out)} country-day rows")
-        except Exception as e:
-            print(f"  country-daily fetch skipped: {e}")
+            import store as _s
+            _c = _s.open_store()
+            _since = (datetime.now(timezone.utc).date() - timedelta(days=30)).isoformat()
 
-        # Country x keyword, 30-day totals. Kept as totals rather than daily:
-        # the daily cross of ~100 markets x ~100 keywords would dominate the
-        # payload for detail nobody reads at that grain.
-        try:
-            for row_ in asa_v1_report_all_campaigns(
-                    "keywords", c_start.isoformat(), c_end.isoformat(),
-                    list(campaign_meta.keys()),
-                    group_by=["countryOrRegion"]) or []:
-                md = row_.get("metadata") or {}
-                cc = md.get("countryOrRegion")
-                kw = (md.get("keyword") or "").strip()
-                if not (cc and kw):
-                    continue
-                t_ = row_.get("totalMetrics") or row_.get("total") or {}
-                sp_ = float((t_.get("localSpend") or {}).get("amount", 0) or 0)
-                tp_ = int(t_.get("taps", 0) or 0)
-                im_ = int(t_.get("impressions", 0) or 0)
-                in_ = int(t_.get("totalInstalls", 0) or 0)
-                if not (sp_ or in_):
-                    continue
-                cid = str(md.get("campaignId"))
-                country_kw_out.append({
-                    "country": cc, "keyword": kw,
-                    "campaign": (campaign_meta.get(cid, {}) or {}).get("name", ""),
-                    "match": md.get("matchType", ""),
-                    "spend": round(sp_, 2), "impressions": im_,
-                    "taps": tp_, "installs": in_,
-                    "cpi": round(sp_ / in_, 2) if in_ else 0.0,
-                    "ctr": round(tp_ / im_ * 100, 2) if im_ else 0.0,
+            def _rate(n, d):
+                return round(n / d * 100, 2) if d else 0.0
+
+            def _cpi(sp, inst):
+                return round(sp / inst, 2) if inst else 0.0
+
+            for r in _c.execute(
+                    "SELECT day, country, SUM(spend) sp, SUM(impressions) im, "
+                    "SUM(taps) tp, SUM(installs) inst FROM ad_daily "
+                    "WHERE source='apple' AND day >= ? AND country <> '' "
+                    "GROUP BY day, country ORDER BY day, sp DESC", (_since,)):
+                sp = r["sp"] or 0
+                country_daily_out.append({
+                    "date": r["day"], "country": r["country"],
+                    "spend": round(sp, 2), "impressions": r["im"] or 0,
+                    "taps": r["tp"] or 0, "installs": r["inst"] or 0,
+                    "cpi": _cpi(sp, r["inst"] or 0),
+                    "ctr": _rate(r["tp"] or 0, r["im"] or 0),
+                    "tap_to_install": _rate(r["inst"] or 0, r["tp"] or 0),
                 })
-            country_kw_out.sort(key=lambda x: (x["country"], -x["spend"]))
-            print(f"  ASA v1: {len(country_kw_out)} country x keyword spend rows")
-        except Exception as e:
-            print(f"  country-keyword fetch skipped: {e}")
 
-    # ── Per-DAY, per-keyword Apple metrics ────────────────────────────
-    # Every other ASA figure here is fetched once per RANGE (today / 7d /
-    # 30d), which is why the dashboard could show a 7-day total but never a
-    # Tuesday. One DAILY-granularity report per campaign fills that in: each
-    # row carries a `granularity` list with one entry per day.
-    #
-    # Apple rejects DAILY beyond ~90 days, so this is capped at 30 -- long
-    # enough to see a trend, short enough to stay one cheap call per campaign.
-    keyword_daily_out = []
-    if ASA_V1_ENABLED and campaign_meta:
-        try:
-            d_end = datetime.now(timezone.utc).date()
-            d_start = d_end - timedelta(days=30)
-            for row_ in asa_v1_report_all_campaigns(
-                    "keywords", d_start.isoformat(), d_end.isoformat(),
-                    list(campaign_meta.keys())):
-                m = row_.get("metadata", {}) or {}
-                kw = (m.get("keyword") or "").strip()
-                if not kw:
-                    continue
-                # str(): campaign_meta is keyed by str(id) while the report
-                # returns campaignId as an int. Same mismatch the campaign
-                # lookup above documents -- it fails silently, not loudly.
-                cid = str(m.get("campaignId"))
-                cname = (campaign_meta.get(cid, {}) or {}).get("name", "")
-                # v1 renamed the per-day array to granularMetrics; the v4/v5
-                # name "granularity" is absent, so reading it yielded an empty
-                # list and the feed built successfully with zero rows -- a
-                # silent miss, not an error. Both names are read so the code
-                # survives either shape.
-                for g in (row_.get("granularMetrics")
-                          or row_.get("granularity") or []):
-                    spend_ = float((g.get("localSpend") or {}).get("amount", 0) or 0)
-                    taps_ = int(g.get("taps", 0) or 0)
-                    inst_ = int(g.get("totalInstalls", 0) or 0)
-                    impr_ = int(g.get("impressions", 0) or 0)
-                    if not (spend_ or taps_ or inst_):
-                        continue
-                    keyword_daily_out.append({
-                        "date": g.get("date"),
-                        "keyword": kw,
-                        "campaign": cname,
-                        "campaign_id": cid,
-                        "match": m.get("matchType", ""),
-                        "spend": round(spend_, 2),
-                        "impressions": impr_,
-                        "taps": taps_,
-                        "installs": inst_,
-                        "cpi": round(spend_ / inst_, 2) if inst_ else 0.0,
-                        "ctr": round(taps_ / impr_ * 100, 2) if impr_ else 0.0,
-                        "tap_to_install": round(inst_ / taps_ * 100, 1) if taps_ else 0.0,
-                    })
-            keyword_daily_out.sort(key=lambda x: (x["date"], -x["spend"]))
-            print(f"  ASA v1: {len(keyword_daily_out)} keyword-day rows")
+            for r in _c.execute(
+                    "SELECT a.country, COALESCE(k.text,'(unknown)') kw, "
+                    "MIN(a.campaign_id) campaign_id, SUM(a.spend) sp, "
+                    "SUM(a.impressions) im, SUM(a.taps) tp, SUM(a.installs) inst "
+                    "FROM ad_daily a "
+                    "LEFT JOIN keyword_dim k ON k.keyword_id = a.keyword_id "
+                    "WHERE a.source='apple' AND a.day >= ? AND a.country <> '' "
+                    "GROUP BY a.country, kw ORDER BY a.country, sp DESC", (_since,)):
+                sp = r["sp"] or 0
+                country_kw_out.append({
+                    "country": r["country"], "keyword": r["kw"],
+                    "campaign": (campaign_meta.get(str(r["campaign_id"]), {}) or {}).get("name", ""),
+                    "spend": round(sp, 2), "impressions": r["im"] or 0,
+                    "taps": r["tp"] or 0, "installs": r["inst"] or 0,
+                    "cpi": _cpi(sp, r["inst"] or 0),
+                    "ctr": _rate(r["tp"] or 0, r["im"] or 0),
+                })
+
+            for r in _c.execute(
+                    "SELECT a.day, COALESCE(k.text,'(unknown)') kw, "
+                    "MIN(a.campaign_id) campaign_id, SUM(a.spend) sp, "
+                    "SUM(a.impressions) im, SUM(a.taps) tp, SUM(a.installs) inst "
+                    "FROM ad_daily a "
+                    "LEFT JOIN keyword_dim k ON k.keyword_id = a.keyword_id "
+                    "WHERE a.source='apple' AND a.day >= ? "
+                    "GROUP BY a.day, kw ORDER BY a.day, sp DESC", (_since,)):
+                sp = r["sp"] or 0
+                keyword_daily_out.append({
+                    "date": r["day"], "keyword": r["kw"],
+                    "campaign": (campaign_meta.get(str(r["campaign_id"]), {}) or {}).get("name", ""),
+                    "spend": round(sp, 2), "impressions": r["im"] or 0,
+                    "taps": r["tp"] or 0, "installs": r["inst"] or 0,
+                    "cpi": _cpi(sp, r["inst"] or 0),
+                    "ctr": _rate(r["tp"] or 0, r["im"] or 0),
+                    "tap_to_install": _rate(r["inst"] or 0, r["tp"] or 0),
+                })
+            print(f"  ASA from store: {len(country_daily_out)} country-days, "
+                  f"{len(country_kw_out)} country x keyword, "
+                  f"{len(keyword_daily_out)} keyword-days")
         except Exception as e:
-            print(f"  keyword-daily fetch skipped: {e}")
+            print(f"  [store] ASA per-country read failed ({type(e).__name__}: {e})")
 
     # ── Apple's own recommendations ────────────────────────────────────────
     recommendations_out = []
