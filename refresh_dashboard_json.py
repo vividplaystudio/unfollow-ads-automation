@@ -2409,7 +2409,13 @@ def main() -> None:
                 # lookup above documents -- it fails silently, not loudly.
                 cid = str(m.get("campaignId"))
                 cname = (campaign_meta.get(cid, {}) or {}).get("name", "")
-                for g in row_.get("granularity") or []:
+                # v1 renamed the per-day array to granularMetrics; the v4/v5
+                # name "granularity" is absent, so reading it yielded an empty
+                # list and the feed built successfully with zero rows -- a
+                # silent miss, not an error. Both names are read so the code
+                # survives either shape.
+                for g in (row_.get("granularMetrics")
+                          or row_.get("granularity") or []):
                     spend_ = float((g.get("localSpend") or {}).get("amount", 0) or 0)
                     taps_ = int(g.get("taps", 0) or 0)
                     inst_ = int(g.get("totalInstalls", 0) or 0)
