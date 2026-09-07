@@ -1259,8 +1259,17 @@ def rc_enrich_customers(customers: list) -> list:
 # ══════════════════════════════════════════════════════════════════
 
 def get_country_from_campaign(name: str, countries: str) -> str:
+    """Best-effort single country for a campaign, or "Multi" when there isn't
+    one. Returning the FIRST of a targeting list made an 87-market campaign
+    report as Germany and a 28-market one as Norway -- a wrong answer that
+    looks like a real one. Anything past a small handful is reported as what
+    it is; use the per-country revenue feed for those."""
     if countries:
-        return countries.split(",")[0].strip()
+        cc = [c.strip() for c in countries.split(",") if c.strip()]
+        if len(cc) > 3:
+            return "Multi"
+        if cc:
+            return cc[0]
     n = name.lower()
     if "us " in n or n.startswith("us_") or "us —" in n: return "US"
     if "uk " in n or n.startswith("uk_") or "uk —" in n: return "GB"
@@ -1315,6 +1324,12 @@ def build_revenue_index(customers: list) -> dict:
     # so the pairing exists on the revenue side even though Apple will not
     # group spend by country.
     by_ckw = defaultdict(lambda: defaultdict(_zero))
+    # (day, country, campaign, keyword) -> revenue/subs for the last 30 days.
+    # The range buckets above answer "how is this keyword doing"; this answers
+    # "what happened on Tuesday", which is the only way to see a market or a
+    # keyword turning before a 7-day average admits it.
+    daily_ck = defaultdict(lambda: {"revenue": 0.0, "subs": 0, "renewals": 0})
+    daily_cutoff = (now - timedelta(days=30)).date()
     by_channel = defaultdict(lambda: defaultdict(_zero))  # channel = media source
 
     for c in customers:
@@ -1371,6 +1386,15 @@ def build_revenue_index(customers: list) -> dict:
                     if tier in ("weekly", "monthly", "yearly"):
                         bucket[f"{tier}_rev"] += amount
                     bucket["paid_in_range"] = True
+            # Day-level, ASA only. Bucketed by TRANSACTION date to match every
+            # other revenue figure on the dashboard.
+            if media_source == "Apple Search Ads" and dt.date() >= daily_cutoff:
+                dk = daily_ck[(dt.strftime("%Y-%m-%d"), country or "Unknown",
+                               campaign or "(none)", keyword or "(no keyword)")]
+                dk["revenue"] += amount
+                dk["subs"] += 1
+                if is_renewal:
+                    dk["renewals"] += 1
 
         def _apply(b, r, include_cohort):
             """include_cohort=True → also add users/active/canceled/new-sub counts."""
@@ -1414,6 +1438,7 @@ def build_revenue_index(customers: list) -> dict:
         "by_adgroup": by_adgroup,
         "by_country": by_country,
         "by_country_keyword": by_ckw,
+        "daily_country_keyword": daily_ck,
         "by_channel": by_channel,
     }
 
@@ -1965,7 +1990,12 @@ def main() -> None:
             "id": cid,
             "name": c.get("name", ""),
             "status": c.get("status", ""),
-            "countries": ",".join(c.get("countriesOrRegions", [])),
+            # v1 nests targeting; the v5 key countriesOrRegions is absent, so
+            # this silently produced "" for every campaign -- which is why the
+            # country column fell through to guessing from the campaign name.
+            "countries": ",".join(
+                ((c.get("targeting") or {}).get("countryOrRegion") or {}).get("include", [])
+                or c.get("countriesOrRegions", [])),
             "budget": c.get("dailyBudgetAmount", {}).get("amount", "") if c.get("dailyBudgetAmount") else "",
         }
 
@@ -2354,6 +2384,57 @@ def main() -> None:
         except Exception as e:
             print(f"  search-terms fetch skipped: {e}")
 
+    # ── Per-DAY, per-keyword Apple metrics ────────────────────────────
+    # Every other ASA figure here is fetched once per RANGE (today / 7d /
+    # 30d), which is why the dashboard could show a 7-day total but never a
+    # Tuesday. One DAILY-granularity report per campaign fills that in: each
+    # row carries a `granularity` list with one entry per day.
+    #
+    # Apple rejects DAILY beyond ~90 days, so this is capped at 30 -- long
+    # enough to see a trend, short enough to stay one cheap call per campaign.
+    keyword_daily_out = []
+    if ASA_V1_ENABLED and campaign_meta:
+        try:
+            d_end = datetime.now(timezone.utc).date()
+            d_start = d_end - timedelta(days=30)
+            for row_ in asa_v1_report_all_campaigns(
+                    "keywords", d_start.isoformat(), d_end.isoformat(),
+                    list(campaign_meta.keys())):
+                m = row_.get("metadata", {}) or {}
+                kw = (m.get("keyword") or "").strip()
+                if not kw:
+                    continue
+                # str(): campaign_meta is keyed by str(id) while the report
+                # returns campaignId as an int. Same mismatch the campaign
+                # lookup above documents -- it fails silently, not loudly.
+                cid = str(m.get("campaignId"))
+                cname = (campaign_meta.get(cid, {}) or {}).get("name", "")
+                for g in row_.get("granularity") or []:
+                    spend_ = float((g.get("localSpend") or {}).get("amount", 0) or 0)
+                    taps_ = int(g.get("taps", 0) or 0)
+                    inst_ = int(g.get("totalInstalls", 0) or 0)
+                    impr_ = int(g.get("impressions", 0) or 0)
+                    if not (spend_ or taps_ or inst_):
+                        continue
+                    keyword_daily_out.append({
+                        "date": g.get("date"),
+                        "keyword": kw,
+                        "campaign": cname,
+                        "campaign_id": cid,
+                        "match": m.get("matchType", ""),
+                        "spend": round(spend_, 2),
+                        "impressions": impr_,
+                        "taps": taps_,
+                        "installs": inst_,
+                        "cpi": round(spend_ / inst_, 2) if inst_ else 0.0,
+                        "ctr": round(taps_ / impr_ * 100, 2) if impr_ else 0.0,
+                        "tap_to_install": round(inst_ / taps_ * 100, 1) if taps_ else 0.0,
+                    })
+            keyword_daily_out.sort(key=lambda x: (x["date"], -x["spend"]))
+            print(f"  ASA v1: {len(keyword_daily_out)} keyword-day rows")
+        except Exception as e:
+            print(f"  keyword-daily fetch skipped: {e}")
+
     # ── Apple's own recommendations ────────────────────────────────────────
     recommendations_out = []
     # Apple requires filters on promotedObjectId AND promotedObjectType:
@@ -2668,6 +2749,18 @@ def main() -> None:
     if country_keywords_out:
         print(f"  ASA country x keyword: {len(country_keywords_out)} rows")
 
+    # Daily ASA revenue by country x keyword, from the store.
+    daily_ck_out = []
+    for (day, ctry, camp, kw), v in rev_index["daily_country_keyword"].items():
+        daily_ck_out.append({
+            "date": day, "country": ctry, "campaign": camp, "keyword": kw,
+            "revenue": round(v["revenue"], 2), "subs": v["subs"],
+            "renewals": v["renewals"],
+        })
+    daily_ck_out.sort(key=lambda x: (x["date"], -x["revenue"]))
+    if daily_ck_out:
+        print(f"  ASA daily country x keyword: {len(daily_ck_out)} rows")
+
     # Apple's market-wide search volume, from the store. This is keyword
     # RESEARCH, not reporting: the most-searched terms per market whether or
     # not we bid on them, which is what makes "which keywords should we buy"
@@ -2699,6 +2792,8 @@ def main() -> None:
         "channels": channels_out,
         "asa_countries": countries_out,
         "asa_country_keywords": country_keywords_out,
+        "asa_keyword_daily": keyword_daily_out,
+        "asa_daily_country_keyword": daily_ck_out,
         "daily_rc": daily_rc,
         "cohort_retention": cohort_retention,
         "refunds": _LAST_REFUND_SUMMARY,
