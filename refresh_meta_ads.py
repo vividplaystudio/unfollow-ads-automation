@@ -292,7 +292,10 @@ def fetch_statuses(account_id: str, level: str) -> dict:
     # Budgets live on the campaign/adset OBJECT, never on insights — which is
     # why the row-level tables carry no budget column. Pull them here so every
     # consumer can compare spend against the cap that produced it.
-    fields = "id,name,status,effective_status"
+    # updated_time is when the object was last edited (budget, status,
+    # targeting…) — the only way to see WHEN a budget change was made,
+    # since insights never return historical budgets.
+    fields = "id,name,status,effective_status,updated_time,created_time"
     if level in ("campaigns", "adsets"):
         fields += ",daily_budget,lifetime_budget"
     params = {
@@ -317,6 +320,8 @@ def fetch_statuses(account_id: str, level: str) -> dict:
             "status": r.get("status", ""),
             "effective_status": r.get("effective_status", ""),
         }
+        entry["updated_time"] = r.get("updated_time")
+        entry["created_time"] = r.get("created_time")
         if level in ("campaigns", "adsets"):
             entry["daily_budget"] = _money(r.get("daily_budget"))
             entry["lifetime_budget"] = _money(r.get("lifetime_budget"))
