@@ -333,6 +333,46 @@ def fetch_statuses(account_id: str, level: str) -> dict:
 # FTP upload (mirrors refresh_dashboard_json.py)
 # ══════════════════════════════════════════════════════════════════
 
+def fetch_activities(account_id: str, days: int = 14) -> list:
+    """Change log for ONE account: budget edits, pauses and new ad sets,
+    each with its timestamp and old/new value.
+
+    Object reads only ever return the CURRENT budget, and insights carry no
+    budget at all — this edge is the only Meta source for what a budget was
+    on a past day.
+    """
+    since = int((datetime.now(timezone.utc) - timedelta(days=days)).timestamp())
+    params = {
+        "fields": "event_time,event_type,translated_event_type,object_id,"
+                  "object_name,object_type,extra_data,actor_name",
+        "since": since,
+        "limit": 500,
+    }
+    keep = ("budget", "run_status", "create_ad_set", "create_campaign")
+    out = []
+    for r in meta_paginated(f"act_{account_id}/activities", params):
+        event_type = r.get("event_type") or ""
+        if not any(k in event_type for k in keep):
+            continue
+        extra = r.get("extra_data")
+        if isinstance(extra, str):
+            try:
+                extra = json.loads(extra)
+            except ValueError:
+                pass
+        out.append({
+            "event_time":  r.get("event_time"),
+            "event_type":  event_type,
+            "label":       r.get("translated_event_type"),
+            "object_id":   r.get("object_id"),
+            "object_name": r.get("object_name"),
+            "object_type": r.get("object_type"),
+            "actor":       r.get("actor_name"),
+            "extra_data":  extra,
+        })
+    return out
+
+
 def publish_output(local_file: str, remote_name: str) -> None:
     """Publish the JSON to the dashboard. When LOCAL_OUTPUT_DIR is set
     (script is running on the cPanel host), copy directly — no FTP.
@@ -396,6 +436,7 @@ def main() -> None:
     combined_adsets: list = []
     combined_ads: list = []
     combined_statuses: dict = {}  # { <account_id>: {campaigns:{}, adsets:{}, ads:{}} }
+    combined_activities: dict = {}  # { <account_id>: [change events] }
     per_account_summary: dict = {}  # { <account_id>: {today, yesterday, ...} }
 
     print(f"▶ Meta Ads refresh for {len(META_AD_ACCOUNT_IDS)} account(s): {META_AD_ACCOUNT_IDS}")
@@ -438,6 +479,14 @@ def main() -> None:
             "ads":       fetch_statuses(aid, "ads"),
         }
         combined_statuses[aid] = acct_statuses
+
+        print("  Fetching change log (budget edits, pauses, new ad sets, 14d)…")
+        try:
+            combined_activities[aid] = fetch_activities(aid)
+            print(f"    {len(combined_activities[aid])} change events")
+        except Exception as exc:  # informational only — never fail the refresh over it
+            print(f"    ⚠️ change log unavailable: {exc}")
+            combined_activities[aid] = []
         n_camp_active  = sum(1 for v in acct_statuses["campaigns"].values() if v["effective_status"] == "ACTIVE")
         n_adset_active = sum(1 for v in acct_statuses["adsets"].values()    if v["effective_status"] == "ACTIVE")
         n_ad_active    = sum(1 for v in acct_statuses["ads"].values()       if v["effective_status"] == "ACTIVE")
@@ -510,6 +559,7 @@ def main() -> None:
         "summary": blended_summary,             # blended across all accounts (the "All" view)
         "summary_by_account": per_account_summary,  # per-account KPI cards
         "statuses_by_account": combined_statuses,   # { <account_id>: { campaigns:{}, adsets:{}, ads:{} } }
+        "activities_by_account": combined_activities,  # budget/status change log, 14d
         # Row-level tables — every row has `account_id`, dashboard filters.
         "campaigns": combined_campaigns,
         "adsets":    combined_adsets,
