@@ -227,25 +227,33 @@ def main() -> None:
     )
     print(f"    {len(by_creative_daily)} creative-day rows")
 
-    # Per-country per-adgroup for Meta traffic, current and previous 7 days.
-    # Meta optimizes multi-country ad sets for the cheapest subscribe, so a
-    # country's share of installs says nothing about its share of revenue —
-    # only this split shows which countries inside an ad set actually pay.
+    # Per-country per-adgroup for Meta traffic, in the same 8 rolling 7-day
+    # buckets as refresh_meta_ads.py (56 days), so spend and revenue join
+    # week for week. Meta optimizes multi-country ad sets for the cheapest
+    # subscribe, so only this split shows which countries actually pay.
     # Informational: a failure here must never block the core refresh.
     meta_networks = {"network__in": "Facebook Installs,Instagram Installs,Facebook (Ad Spend)"}
-    by_adgroup_country = {}
-    for key, since, until in (("last_7d", d(6), d(0)), ("prev_7d", d(13), d(7))):
-        print(f"  Fetching per-adgroup per-country, {key} (Meta networks only)…")
+    by_adgroup_country = []
+    for week in range(8):
+        since, until = d(55 - 7 * week), d(49 - 7 * week)
+        print(f"  Fetching per-adgroup per-country {since}..{until} (Meta networks only)…")
         try:
-            by_adgroup_country[key] = fetch_report(
-                since, until,
-                ["network", "campaign", "adgroup", "country_code", "country"],
-                extra=meta_networks,
-            )
-            print(f"    {len(by_adgroup_country[key])} adgroup-country rows")
+            rows = fetch_report(since, until, ["network", "campaign", "adgroup", "country_code"],
+                                extra=meta_networks)
         except Exception as exc:
             print(f"    ⚠️ per-country report unavailable: {exc}")
-            by_adgroup_country[key] = []
+            continue
+        for r in rows:
+            by_adgroup_country.append({
+                "week_start":   since,
+                "campaign":     r.get("campaign"),
+                "adgroup":      r.get("adgroup"),
+                "country_code": r.get("country_code"),
+                "installs":     r.get("installs"),
+                "events":       r.get("events"),
+                "all_revenue":  r.get("all_revenue"),
+            })
+        print(f"    {len(rows)} rows")
 
     payload = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -256,7 +264,7 @@ def main() -> None:
         "by_adgroup": by_adgroup,
         "by_creative": by_creative,
         "by_creative_daily": by_creative_daily,
-        "by_adgroup_country": by_adgroup_country,  # {last_7d:[...], prev_7d:[...]}
+        "by_adgroup_country": by_adgroup_country,  # per-adgroup per-country per-week rows, 56d
     }
 
     with open(OUTPUT_FILE, "w") as f:
