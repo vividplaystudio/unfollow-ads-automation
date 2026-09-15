@@ -186,7 +186,8 @@ def meta_paginated(path: str, params: dict) -> list:
 # Insights fetchers
 # ══════════════════════════════════════════════════════════════════
 
-def fetch_insights(account_id: str, level: str, since: str, until: str, time_increment: Union[str, int] = "all_days") -> list:
+def fetch_insights(account_id: str, level: str, since: str, until: str, time_increment: Union[str, int] = "all_days",
+                   breakdowns: str = "") -> list:
     """Fetch insights at the given level and date range for one ad account.
     Use the unified attribution setting + the same windows Ads Manager UI shows
     (7-day click + 1-day view) so 'Results' / 'in-app subscribes' line up with
@@ -201,6 +202,8 @@ def fetch_insights(account_id: str, level: str, since: str, until: str, time_inc
         "action_attribution_windows": json.dumps(["7d_click", "1d_view"]),
         "action_report_time": "conversion",
     }
+    if breakdowns:
+        params["breakdowns"] = breakdowns
     return meta_paginated(f"act_{account_id}/insights", params)
 
 
@@ -245,6 +248,8 @@ def normalize_row(row: dict) -> dict:
         "inline_link_click_ctr": float(row.get("inline_link_click_ctr", 0) or 0),
         "cost_per_inline_link_click": float(row.get("cost_per_inline_link_click", 0) or 0),
     }
+    if row.get("country"):
+        out["country"] = row["country"]
     out.update(normalize_actions(row))
     return out
 
@@ -437,6 +442,7 @@ def main() -> None:
     combined_ads: list = []
     combined_statuses: dict = {}  # { <account_id>: {campaigns:{}, adsets:{}, ads:{}} }
     combined_activities: dict = {}  # { <account_id>: [change events] }
+    combined_adset_country: dict = {}  # { last_7d: [...], prev_7d: [...] }
     per_account_summary: dict = {}  # { <account_id>: {today, yesterday, ...} }
 
     print(f"▶ Meta Ads refresh for {len(META_AD_ACCOUNT_IDS)} account(s): {META_AD_ACCOUNT_IDS}")
@@ -465,6 +471,22 @@ def main() -> None:
         for r in adset_rows:
             r["account_id"] = aid
         combined_adsets.extend(adset_rows)
+
+        # Spend / installs per country inside each ad set. Meta pushes budget
+        # toward the cheapest countries in a multi-country ad set, so the ad
+        # set total can hide a country that eats spend without paying back.
+        for key, since, until in (("last_7d", d(6), d(0)), ("prev_7d", d(13), d(7))):
+            print(f"  Fetching per-adset per-country, {key}…")
+            try:
+                rows = [normalize_row(r) for r in
+                        fetch_insights(aid, "adset", since, until, breakdowns="country")]
+                for r in rows:
+                    r["account_id"] = aid
+                combined_adset_country.setdefault(key, []).extend(rows)
+                print(f"    {len(rows)} adset-country rows")
+            except Exception as exc:  # informational only — never fail the refresh over it
+                print(f"    ⚠️ per-country breakdown unavailable ({key}): {exc}")
+                combined_adset_country.setdefault(key, [])
 
         print("  Fetching per-campaign 30d totals…")
         campaign_rows = [normalize_row(r) for r in fetch_insights(aid, "campaign", d(29), d(0))]
@@ -560,6 +582,7 @@ def main() -> None:
         "summary_by_account": per_account_summary,  # per-account KPI cards
         "statuses_by_account": combined_statuses,   # { <account_id>: { campaigns:{}, adsets:{}, ads:{} } }
         "activities_by_account": combined_activities,  # budget/status change log, 14d
+        "adsets_by_country": combined_adset_country,  # per-country spend/installs, last 7d + prev 7d
         # Row-level tables — every row has `account_id`, dashboard filters.
         "campaigns": combined_campaigns,
         "adsets":    combined_adsets,
