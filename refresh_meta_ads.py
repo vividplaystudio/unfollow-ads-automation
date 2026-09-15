@@ -301,6 +301,12 @@ def fetch_statuses(account_id: str, level: str) -> dict:
     fields = "id,name,status,effective_status,updated_time,created_time"
     if level in ("campaigns", "adsets"):
         fields += ",daily_budget,lifetime_budget"
+    # Ad set names only hint at geography and ad names say nothing about
+    # which video runs, so read both from the objects themselves.
+    if level == "adsets":
+        fields += ",campaign_id,targeting{geo_locations,excluded_geo_locations}"
+    if level == "ads":
+        fields += ",adset_id,campaign_id,creative{id,name,video_id,object_type}"
     params = {
         "fields": fields,
         "limit": 500,
@@ -325,6 +331,22 @@ def fetch_statuses(account_id: str, level: str) -> dict:
         }
         entry["updated_time"] = r.get("updated_time")
         entry["created_time"] = r.get("created_time")
+        if level == "adsets":
+            geo = (r.get("targeting") or {}).get("geo_locations") or {}
+            excl = (r.get("targeting") or {}).get("excluded_geo_locations") or {}
+            entry["campaign_id"] = r.get("campaign_id")
+            entry["countries"] = geo.get("countries") or []
+            entry["excluded_countries"] = excl.get("countries") or []
+            # Regions/cities/country groups (e.g. "worldwide") are kept raw so
+            # an ad set targeted without a plain country list is still visible.
+            entry["geo_other"] = {k: v for k, v in geo.items() if k not in ("countries", "location_types")}
+        if level == "ads":
+            creative = r.get("creative") or {}
+            entry["adset_id"] = r.get("adset_id")
+            entry["campaign_id"] = r.get("campaign_id")
+            entry["creative_id"] = creative.get("id")
+            entry["creative_name"] = creative.get("name")
+            entry["video_id"] = creative.get("video_id")
         if level in ("campaigns", "adsets"):
             entry["daily_budget"] = _money(r.get("daily_budget"))
             entry["lifetime_budget"] = _money(r.get("lifetime_budget"))
