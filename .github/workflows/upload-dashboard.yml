@@ -12,6 +12,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # A syntax error in any endpoint would break it live (the RevenueCat
+      # webhook, health reports), so refuse to upload PHP that doesn't parse.
+      - name: Check PHP syntax
+        run: |
+          for f in dashboard/*.php; do php -l "$f" || exit 1; done
+
       - name: Upload dashboard files via FTP
         env:
           FTP_HOST: ${{ secrets.FTP_HOST }}
@@ -19,9 +25,12 @@ jobs:
           FTP_PASS: ${{ secrets.FTP_PASS }}
           FTP_PATH: ${{ secrets.FTP_PATH }}
           RC_WEBHOOK_SECRET: ${{ secrets.RC_WEBHOOK_SECRET }}
+          IG_ALERT_EMAIL: ${{ secrets.IG_ALERT_EMAIL }}
+          IG_ALERT_TELEGRAM_BOT_TOKEN: ${{ secrets.IG_ALERT_TELEGRAM_BOT_TOKEN }}
+          IG_ALERT_TELEGRAM_CHAT_ID: ${{ secrets.IG_ALERT_TELEGRAM_CHAT_ID }}
         run: |
           python3 << 'EOF'
-          import ftplib, ssl, os, io, time
+          import ftplib, ssl, os, io, json, time
           host = os.environ["FTP_HOST"]
           user = os.environ["FTP_USER"]
           pw = os.environ["FTP_PASS"]
@@ -87,6 +96,19 @@ jobs:
               ftp.storbinary("STOR .rc_webhook_secret", buf)
           else:
               print("RC_WEBHOOK_SECRET not set — skipping secret file upload")
+
+          # Alert channels for the Instagram health panel. Written only when at
+          # least one IG_ALERT_* secret is set; otherwise alerts show on the panel only.
+          alert_cfg = {
+              "email_to": os.environ.get("IG_ALERT_EMAIL", "").strip(),
+              "telegram_bot_token": os.environ.get("IG_ALERT_TELEGRAM_BOT_TOKEN", "").strip(),
+              "telegram_chat_id": os.environ.get("IG_ALERT_TELEGRAM_CHAT_ID", "").strip(),
+          }
+          if any(alert_cfg.values()):
+              print("Uploading .ig_health_config.json...")
+              ftp.storbinary("STOR .ig_health_config.json", io.BytesIO(json.dumps(alert_cfg).encode("utf-8")))
+          else:
+              print("No IG_ALERT_* secrets set — health alerts will show on the panel only")
 
           ftp.quit()
           print("All dashboard files uploaded")

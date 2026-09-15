@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Instagram Health — Unfollow Tracker</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --line: #262b36; --text: #e6e8ee; --muted: #8b93a7;
+    --ok: #2fb56a; --warn: #e0a23a; --bad: #e5484d; --none: #2a2f3a;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 1180px; margin: 0 auto; padding: 20px 16px 60px; }
+  header { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+  h1 { font-size: 20px; margin: 0; }
+  h2 { font-size: 15px; margin: 0 0 10px; }
+  .muted { color: var(--muted); }
+  .controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  select, button { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 8px; padding: 6px 10px; font: inherit; cursor: pointer; }
+  .banner { border-radius: 10px; padding: 12px 14px; margin-bottom: 16px; border: 1px solid var(--line); }
+  .banner.ok { background: rgba(47,181,106,.10); border-color: rgba(47,181,106,.35); }
+  .banner.bad { background: rgba(229,72,77,.10); border-color: rgba(229,72,77,.4); }
+  .banner.warn { background: rgba(224,162,58,.10); border-color: rgba(224,162,58,.4); }
+  .banner ul { margin: 6px 0 0; padding-left: 18px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px; margin-bottom: 16px; }
+  .scroll { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .pill { display: inline-block; min-width: 54px; text-align: center; border-radius: 999px; padding: 1px 8px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .pill.ok { background: rgba(47,181,106,.18); color: var(--ok); }
+  .pill.warn { background: rgba(224,162,58,.18); color: var(--warn); }
+  .pill.bad { background: rgba(229,72,77,.18); color: var(--bad); }
+  .pill.none { background: var(--none); color: var(--muted); }
+  .strip { display: flex; gap: 2px; }
+  .cell { width: 10px; height: 18px; border-radius: 2px; background: var(--none); }
+  .cell.ok { background: var(--ok); } .cell.warn { background: var(--warn); } .cell.bad { background: var(--bad); }
+  .kv { display: flex; flex-wrap: wrap; gap: 6px 14px; }
+  .kv span b { font-variant-numeric: tabular-nums; }
+  .reasons { color: var(--muted); font-size: 12px; white-space: normal; min-width: 220px; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <h1>Instagram Health</h1>
+      <div class="muted" id="meta">Loading…</div>
+    </div>
+    <div class="controls">
+      <select id="hours" aria-label="Time range">
+        <option value="6">Last 6 hours</option>
+        <option value="24" selected>Last 24 hours</option>
+        <option value="72">Last 3 days</option>
+      </select>
+      <button id="refresh" type="button">Refresh</button>
+      <button id="test" type="button">Send test alert</button>
+    </div>
+  </header>
+
+  <div id="banner" class="banner">Loading…</div>
+
+  <section>
+    <h2>Operations — share of scans where it worked</h2>
+    <div class="scroll"><table id="ops"></table></div>
+  </section>
+
+  <section>
+    <h2>Strategies — every request type and how it ended</h2>
+    <p class="muted" style="margin:0 0 8px">A strategy failing while its operation stays green means a backup is carrying it — fix the playbook before the backup breaks too.</p>
+    <div class="scroll"><table id="strategies"></table></div>
+  </section>
+
+  <div class="grid">
+    <section><h2>Scans</h2><div id="scans"></div></section>
+    <section><h2>Pre-login username lookup</h2><div id="prelogin"></div></section>
+  </div>
+
+  <div class="grid">
+    <section><h2>By app version</h2><div class="scroll"><table id="versions"></table></div></section>
+    <section><h2>Playbook versions in use</h2><div id="playbooks"></div></section>
+  </div>
+</main>
+
+<script>
+const KEY_OPS = ['viewer', 'followers', 'following', 'posts', 'likers', 'stories', 'story_viewers', 'profile_lookup', 'prelogin_profile'];
+const LABELS = {
+  viewer: 'Account profile (name, photo)', followers: 'Followers', following: 'Following', posts: 'Posts',
+  likers: 'Post likers (Top Fans, Ghosts)', stories: 'Stories', story_viewers: 'Story viewers',
+  profile_lookup: 'Blocker checks', prelogin_profile: 'Pre-login username lookup'
+};
+const SUCCESS = ['ok', 'empty', 'notFound'];
+
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const level = (rate) => rate === null ? 'none' : rate >= 0.9 ? 'ok' : rate >= 0.6 ? 'warn' : 'bad';
+const pill = (ok, n) => {
+  if (!n) return '<span class="pill none">—</span>';
+  const rate = ok / n;
+  return `<span class="pill ${level(rate)}" title="${ok} of ${n}">${Math.round(rate * 100)}%</span> <span class="muted">${n}</span>`;
+};
+const opOrder = (names) => [...KEY_OPS.filter((o) => names.includes(o)), ...names.filter((o) => !KEY_OPS.includes(o)).sort()];
+const ago = (iso) => {
+  if (!iso) return 'no reports yet';
+  const mins = Math.round((Date.now() - Date.parse(iso)) / 60000);
+  return mins < 1 ? 'just now' : mins < 60 ? `${mins} min ago` : `${Math.round(mins / 60)} h ago`;
+};
+const kv = (obj) => Object.entries(obj || {}).sort((a, b) => b[1] - a[1])
+  .map(([k, v]) => `<span>${esc(k)}: <b>${v}</b></span>`).join('') || '<span class="muted">none</span>';
+
+function render(d) {
+  $('meta').textContent = `Last report ${ago(d.last_report)} · ${d.scans.total} scans · ${d.prelogin.total} lookups in ${d.hours} h`;
+
+  const firing = Object.values((d.alerts && d.alerts.firing) || {});
+  const channels = d.channels || {};
+  const channelNote = channels.telegram || channels.email
+    ? `Alerts go to ${[channels.telegram && 'Telegram', channels.email && 'email'].filter(Boolean).join(' and ')}.`
+    : 'No alert channel configured yet — alerts show here only.';
+  const banner = $('banner');
+  if (!firing.length) {
+    banner.className = 'banner ok';
+    banner.innerHTML = `<b>All operations healthy.</b> <span class="muted">${esc(channelNote)}</span>`;
+  } else {
+    const critical = firing.some((a) => a.level === 'critical');
+    banner.className = `banner ${critical ? 'bad' : 'warn'}`;
+    banner.innerHTML = `<b>${firing.length} alert${firing.length > 1 ? 's' : ''} firing</b> <span class="muted">${esc(channelNote)}</span><ul>` +
+      firing.map((a) => `<li>${esc(a.message)} <span class="muted">since ${new Date(a.since * 1000).toLocaleString()}</span></li>`).join('') + '</ul>';
+  }
+
+  const hoursShown = Math.min(d.hours, 48);
+  const opNames = opOrder(Object.keys(d.ops));
+  $('ops').innerHTML = `<tr><th>Operation</th>${d.windows.map((w) => `<th>Last ${w} h</th>`).join('')}<th>Hourly (oldest → now)</th></tr>` +
+    (opNames.map((op) => {
+      const cells = [];
+      for (let h = hoursShown - 1; h >= 0; h--) {
+        const t = (d.timeline[op] || {})[h];
+        const cls = t ? level(t.ok / t.n) : 'none';
+        cells.push(`<div class="cell ${cls}" title="${h} h ago: ${t ? `${t.ok}/${t.n}` : 'no scans'}"></div>`);
+      }
+      return `<tr><td>${esc(LABELS[op] || op)}</td>${d.windows.map((w) => {
+        const x = (d.ops[op] || {})[w]; return `<td>${x ? pill(x.ok, x.n) : pill(0, 0)}</td>`;
+      }).join('')}<td><div class="strip">${cells.join('')}</div></td></tr>`;
+    }).join('') || `<tr><td colspan="${d.windows.length + 2}" class="muted">No reports in this range.</td></tr>`);
+
+  const rank = (op) => { const i = KEY_OPS.indexOf(op); return i === -1 ? KEY_OPS.length : i; };
+  const strategies = d.strategies.slice()
+    .sort((a, b) => rank(a.op) - rank(b.op) || a.op.localeCompare(b.op) || b.n - a.n);
+  $('strategies').innerHTML = '<tr><th>Operation</th><th>Strategy</th><th class="num">Attempts</th><th>Worked</th><th class="num">Avg ms</th><th>Failures</th></tr>' +
+    (strategies.map((s) => {
+      const tried = Object.entries(s.outcomes).filter(([o]) => o !== 'skipped').reduce((t, [, n]) => t + n, 0);
+      const ok = SUCCESS.reduce((t, o) => t + (s.outcomes[o] || 0), 0);
+      const failures = Object.entries(s.outcomes).filter(([o]) => !SUCCESS.includes(o) && o !== 'skipped')
+        .sort((a, b) => b[1] - a[1]).map(([o, n]) => `${o} ${n}`);
+      const statuses = Object.entries(s.statuses).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([st, n]) => `HTTP ${st} ×${n}`);
+      return `<tr><td>${esc(s.op)}</td><td>${esc(s.strategy)}</td><td class="num">${s.n}</td><td>${pill(ok, tried)}</td>` +
+        `<td class="num">${s.n ? Math.round(s.ms / s.n) : '—'}</td><td class="reasons">${esc([...failures, ...statuses].join(' · ') || '—')}${s.outcomes.skipped ? ` <span class="muted">(skipped ${s.outcomes.skipped})</span>` : ''}</td></tr>`;
+    }).join('') || '<tr><td colspan="6" class="muted">No reports in this range.</td></tr>');
+
+  const sc = d.scans;
+  const pct = (n) => sc.total ? `${Math.round((n / sc.total) * 100)}%` : '—';
+  $('scans').innerHTML = `<p class="kv"><span>Scans: <b>${sc.total}</b></span><span>Username missing: <b>${pct(sc.username_missing)}</b></span><span>Profile photo missing: <b>${pct(sc.profile_pic_missing)}</b></span></p>` +
+    `<p class="muted" style="margin:10px 0 4px">How scans ended</p><p class="kv">${kv(sc.outcome)}</p>` +
+    `<p class="muted" style="margin:10px 0 4px">Post likes (Top Fans / Ghost Followers)</p><p class="kv">${kv(sc.engagement)}</p>`;
+
+  $('prelogin').innerHTML = `<p class="kv"><span>Lookups: <b>${d.prelogin.total}</b></span></p><p class="kv">${kv(d.prelogin.outcome)}</p>`;
+
+  const vs = Object.entries(d.versions).sort((a, b) => b[1].scans - a[1].scans);
+  const vOps = ['viewer', 'followers', 'posts', 'likers'];
+  $('versions').innerHTML = `<tr><th>Version</th><th class="num">Scans</th>${vOps.map((o) => `<th>${esc(o)}</th>`).join('')}</tr>` +
+    (vs.map(([v, x]) => `<tr><td>${esc(v)}</td><td class="num">${x.scans}</td>${vOps.map((o) => `<td>${x.ops[o] ? pill(x.ops[o].ok, x.ops[o].n) : pill(0, 0)}</td>`).join('')}</tr>`).join('') ||
+      '<tr><td colspan="6" class="muted">No scans in this range.</td></tr>');
+
+  $('playbooks').innerHTML = `<p class="kv">${kv(d.playbooks)}</p>`;
+}
+
+async function load() {
+  try {
+    const res = await fetch(`ig_health.php?hours=${$('hours').value}`, { cache: 'no-store' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    render(await res.json());
+  } catch (e) {
+    $('banner').className = 'banner bad';
+    $('banner').textContent = `Could not load health data: ${e.message}`;
+  }
+}
+
+$('refresh').addEventListener('click', load);
+$('hours').addEventListener('change', load);
+$('test').addEventListener('click', async () => {
+  const button = $('test');
+  button.disabled = true;
+  try {
+    const r = await (await fetch('ig_health.php?action=test_alert', { cache: 'no-store' })).json();
+    const configured = r.channels.telegram || r.channels.email;
+    alert(!configured ? 'No alert channel configured yet. Add the IG_ALERT_* secrets in GitHub and re-run "Upload Dashboard".'
+      : r.sent ? 'Test alert sent.' : 'Sending failed — check the configured channel.');
+  } catch (e) {
+    alert(`Test failed: ${e.message}`);
+  } finally {
+    button.disabled = false;
+  }
+});
+
+load();
+setInterval(load, 60000);
+</script>
+</body>
+</html>

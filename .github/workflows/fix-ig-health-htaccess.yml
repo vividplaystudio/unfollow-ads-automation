@@ -1,0 +1,98 @@
+name: Open ig_ingest.php to the app (health reports)
+
+# One-shot: exempt ig_ingest.php from the dashboard folder's HTTP Basic Auth
+# so the app can post anonymous scan health reports. Only that one file is
+# opened; ig_health.php (the panel data) and everything else stay protected.
+# ig_ingest.php validates, size-limits and throttles every report itself.
+#
+# Mirrors fix-webhook-htaccess.yml: refuse if the file doesn't look
+# cPanel-managed, refuse to add the block twice, verify afterwards.
+
+on:
+  workflow_dispatch:
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Patch .htaccess to allow health report POSTs
+        env:
+          FTP_HOST: ${{ secrets.FTP_HOST }}
+          FTP_USER: ${{ secrets.FTP_USER }}
+          FTP_PASS: ${{ secrets.FTP_PASS }}
+          FTP_PATH: ${{ secrets.FTP_PATH }}
+        run: |
+          python3 << 'PYEOF'
+          import ftplib, ssl, os, io, re, sys, json, urllib.request, urllib.error
+
+          ctx = ssl.create_default_context()
+          ctx.check_hostname = False
+          ctx.verify_mode = ssl.CERT_NONE
+
+          ftp = ftplib.FTP_TLS(os.environ["FTP_HOST"], timeout=60, context=ctx)
+          ftp.login(os.environ["FTP_USER"], os.environ["FTP_PASS"])
+          ftp.prot_p()
+          path = os.environ["FTP_PATH"]
+          try:
+              ftp.cwd(path)
+          except ftplib.error_perm:
+              ftp.cwd(re.sub(r"^/home/[^/]+", "", path) or "/")
+          print(f"cwd: {ftp.pwd()}")
+
+          buf = io.BytesIO()
+          ftp.retrbinary("RETR .htaccess", buf.write)
+          current = buf.getvalue().decode("utf-8", errors="replace")
+
+          for marker in ("Section managed by cPanel: Password Protected Directories", "AuthType Basic", "Require valid-user"):
+              if marker not in current:
+                  print(f"ERROR: expected marker not found: {marker!r} — refusing to patch a customized file.")
+                  sys.exit(1)
+
+          begin = "# BEGIN: ig_ingest.php exemption"
+          if begin in current:
+              print("Exemption already present — nothing to change.")
+          else:
+              block = (
+                  "\n"
+                  f"{begin} (added by fix-ig-health-htaccess.yml)\n"
+                  "# The app posts anonymous scan health reports here and cannot send\n"
+                  "# Basic Auth credentials. ig_ingest.php validates and throttles itself.\n"
+                  "<Files \"ig_ingest.php\">\n"
+                  "    <RequireAny>\n"
+                  "        Require all granted\n"
+                  "    </RequireAny>\n"
+                  "    Satisfy Any\n"
+                  "    Order Allow,Deny\n"
+                  "    Allow from all\n"
+                  "</Files>\n"
+                  "# END: ig_ingest.php exemption\n"
+              )
+              new_content = current.rstrip() + "\n" + block
+              ftp.storbinary("STOR .htaccess", io.BytesIO(new_content.encode("utf-8")))
+              print("Uploaded patched .htaccess:")
+              print(new_content)
+          ftp.quit()
+
+          # Verify: an unauthenticated empty POST must reach PHP (400 "Empty body"),
+          # not be stopped by Basic Auth (401). ig_health.php must still be protected.
+          def status(url, data=None):
+              req = urllib.request.Request(url, data=data, method="POST" if data is not None else "GET")
+              try:
+                  with urllib.request.urlopen(req, timeout=20) as r:
+                      return r.status
+              except urllib.error.HTTPError as e:
+                  return e.code
+
+          ingest = status("https://genivox.com/ads-upload/ig_ingest.php", data=b"")
+          panel = status("https://genivox.com/ads-upload/ig_health.php")
+          print(f"ig_ingest.php unauthenticated POST → HTTP {ingest} (want 400)")
+          print(f"ig_health.php unauthenticated GET  → HTTP {panel} (want 401)")
+          if ingest == 401:
+              print("ERROR: ingest endpoint is still behind Basic Auth.")
+              sys.exit(1)
+          if ingest == 404:
+              print("ERROR: ig_ingest.php not found — run 'Upload Dashboard HTML/CSS/JS' first.")
+              sys.exit(1)
+          if panel != 401:
+              print("WARNING: ig_health.php is reachable without auth — check the folder protection.")
+          PYEOF
