@@ -48,16 +48,28 @@ jobs:
                   print(f"ERROR: expected marker not found: {marker!r} — refusing to patch a customized file.")
                   sys.exit(1)
 
-          begin = "# BEGIN: ig_ingest.php exemption"
-          if begin in current:
-              print("Exemption already present — nothing to change.")
-          else:
-              block = (
+          # Each of these guards itself, so the folder password would only get
+          # in the way: ig_ingest.php validates and throttles every report,
+          # ig_prelogin_check.php requires the same shared secret as the webhook.
+          exempt = {
+              "ig_ingest.php":
+                  "The app posts anonymous scan health reports here and cannot send\n"
+                  "# Basic Auth credentials. ig_ingest.php validates and throttles itself.",
+              "ig_prelogin_check.php":
+                  "Checks the username screen from this server on a schedule. It answers\n"
+                  "# only to the shared secret in .rc_webhook_secret.",
+          }
+          new_content = current
+          added = []
+          for name, why in exempt.items():
+              begin = f"# BEGIN: {name} exemption"
+              if begin in new_content:
+                  continue
+              new_content = new_content.rstrip() + "\n" + (
                   "\n"
                   f"{begin} (added by fix-ig-health-htaccess.yml)\n"
-                  "# The app posts anonymous scan health reports here and cannot send\n"
-                  "# Basic Auth credentials. ig_ingest.php validates and throttles itself.\n"
-                  "<Files \"ig_ingest.php\">\n"
+                  f"# {why}\n"
+                  f"<Files \"{name}\">\n"
                   "    <RequireAny>\n"
                   "        Require all granted\n"
                   "    </RequireAny>\n"
@@ -65,11 +77,14 @@ jobs:
                   "    Order Allow,Deny\n"
                   "    Allow from all\n"
                   "</Files>\n"
-                  "# END: ig_ingest.php exemption\n"
+                  f"# END: {name} exemption\n"
               )
-              new_content = current.rstrip() + "\n" + block
+              added.append(name)
+          if not added:
+              print("Every exemption already present — nothing to change.")
+          else:
               ftp.storbinary("STOR .htaccess", io.BytesIO(new_content.encode("utf-8")))
-              print("Uploaded patched .htaccess:")
+              print("Added exemptions for: " + ", ".join(added))
               print(new_content)
           ftp.quit()
 
@@ -95,4 +110,17 @@ jobs:
               sys.exit(1)
           if panel != 401:
               print("WARNING: ig_health.php is reachable without auth — check the folder protection.")
+
+          # The prelogin check must get past the folder password and then refuse
+          # us itself (403), proving its own secret is what guards it.
+          check = status("https://genivox.com/ads-upload/ig_prelogin_check.php")
+          print(f"ig_prelogin_check.php GET with no secret → HTTP {check} (want 403)")
+          if check == 401:
+              print("ERROR: the prelogin check is still behind Basic Auth.")
+              sys.exit(1)
+          if check == 404:
+              print("ERROR: ig_prelogin_check.php not found — run 'Upload Dashboard HTML/CSS/JS' first.")
+              sys.exit(1)
+          if check != 403:
+              print(f"WARNING: expected 403 from the prelogin check, got {check}.")
           PYEOF
