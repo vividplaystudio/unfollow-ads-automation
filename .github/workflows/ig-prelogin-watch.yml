@@ -1,0 +1,52 @@
+# Watches the one screen every new user reaches before they pay.
+#
+# If the profile lookup stops working, nobody gets into the funnel and the ads
+# spend earns nothing — so this runs on its own and shouts on Telegram, even at
+# night when no real user is around to report the failure through the app.
+name: Instagram prelogin watch
+
+on:
+  schedule:
+    # every two hours; each run makes 3 public requests, so Instagram's
+    # rate limiter is never a problem
+    - cron: '17 */2 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: ig-prelogin-watch
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      # Alert on the first failure, then stay quiet until it recovers, so an
+      # outage lasting all night is one message and not twelve.
+      - name: Was the previous run already failing?
+        id: previous
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          previous=$(gh run list --workflow=ig-prelogin-watch.yml --status completed \
+                      --limit 1 --json conclusion -q '.[0].conclusion' || echo "")
+          echo "conclusion=$previous" >> "$GITHUB_OUTPUT"
+          echo "previous run: ${previous:-none}"
+
+      - name: Check the username screen
+        id: check
+        env:
+          IG_ALERT_TELEGRAM_BOT_TOKEN: ${{ secrets.IG_ALERT_TELEGRAM_BOT_TOKEN }}
+          IG_ALERT_TELEGRAM_CHAT_ID: ${{ secrets.IG_ALERT_TELEGRAM_CHAT_ID }}
+        run: |
+          # Already failing last time → check again but do not send another alert.
+          if [ "${{ steps.previous.outputs.conclusion }}" = "failure" ]; then
+            python3 ig-check/watch_prelogin.py --dry-run
+          else
+            python3 ig-check/watch_prelogin.py
+          fi

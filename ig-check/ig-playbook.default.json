@@ -1,0 +1,612 @@
+{
+  "schema": 1,
+  "version": "bundled-2026-09-17m",
+  "headers": {
+    "X-IG-App-ID": "936619743392459",
+    "X-Requested-With": "XMLHttpRequest",
+    "X-CSRFToken": "{csrf}",
+    "Accept": "application/json"
+  },
+  "page_tokens": {
+    "lsd": "\"LSD\",\\[\\],\\{\"token\":\"([^\"]+)\"",
+    "fb_dtsg": "\"DTSGInitialData\",\\[\\],\\{\"token\":\"([^\"]+)\""
+  },
+  "retry": {
+    "attempts": 2,
+    "delay_ms": 1200,
+    "rate_limit_waits_ms": [
+      15000,
+      30000,
+      60000
+    ]
+  },
+  "limits": {
+    "followers_max": 50000,
+    "following_max": 50000,
+    "list_max_pages": 6000,
+    "page_delay_ms": 0,
+    "likers_posts": 30,
+    "likers_delay_ms": 0,
+    "story_viewer_delay_ms": 0,
+    "blocker_delay_ms": 0,
+    "unfollower_lookups": 20,
+    "photo_warm_max": 180,
+    "request_interval_ms": 1000,
+    "posts_max": 30,
+    "likers_refresh_posts": 3,
+    "known_run_to_stop": 10,
+    "unfollower_confirm_run": 25,
+    "full_list_check_days": 7,
+    "engagement_retry_delay_ms": 8000,
+    "http_connect_timeout_ms": 5000,
+    "http_reply_timeout_ms": 5000,
+    "http_read_timeout_ms": 10000,
+    "list_resume_hours": 72,
+    "list_resume_overlap": 50,
+    "list_progress_save_pages": 25,
+    "unfollower_checks_max": 50,
+    "big_list_notice_min": 3000,
+    "people_per_page_estimate": 22,
+    "big_list_daily_people": 0,
+    "big_account_min": 50000,
+    "list_gap_min": 100,
+    "list_gap_percent": 5,
+    "fading_recent_posts": 5,
+    "fading_min_older_likes": 3,
+    "fading_skip_days": 2,
+    "fading_min_posts": 10
+  },
+  "ops": {
+    "viewer": {
+      "strategies": [
+        {
+          "id": "user_info_v1",
+          "url": "https://www.instagram.com/api/v1/users/{user_id}/info/",
+          "needs": [
+            "user_id"
+          ],
+          "object_path": "user",
+          "require": [
+            "username"
+          ],
+          "fields": {
+            "user_id": {
+              "path": "pk|pk_id|id",
+              "transform": "string"
+            },
+            "username": "username",
+            "full_name": "full_name",
+            "profile_pic_url": "hd_profile_pic_url_info.url|profile_pic_url",
+            "follower_count": {
+              "path": "follower_count",
+              "transform": "int"
+            },
+            "following_count": {
+              "path": "following_count",
+              "transform": "int"
+            },
+            "media_count": {
+              "path": "media_count",
+              "transform": "int"
+            }
+          }
+        },
+        {
+          "id": "web_profile_info_v1",
+          "url": "https://www.instagram.com/api/v1/users/web_profile_info/?username={username}",
+          "needs": [
+            "username"
+          ],
+          "object_path": "data.user",
+          "require": [
+            "username"
+          ],
+          "fields": {
+            "user_id": {
+              "path": "id",
+              "transform": "string"
+            },
+            "username": "username",
+            "full_name": "full_name",
+            "profile_pic_url": "profile_pic_url_hd|profile_pic_url",
+            "follower_count": {
+              "path": "edge_followed_by.count",
+              "transform": "int"
+            },
+            "following_count": {
+              "path": "edge_follow.count",
+              "transform": "int"
+            },
+            "media_count": {
+              "path": "edge_owner_to_timeline_media.count",
+              "transform": "int"
+            }
+          }
+        }
+      ]
+    },
+    "followers": {
+      "strategies": [
+        {
+          "id": "friendships_followers_v1",
+          "url": "https://www.instagram.com/api/v1/friendships/{user_id}/followers/?count=100",
+          "needs": [
+            "user_id"
+          ],
+          "list_path": "users",
+          "cursor_path": "next_max_id",
+          "cursor_param": "max_id",
+          "require": [
+            "username"
+          ],
+          "fields": {
+            "user_id": {
+              "path": "pk|pk_id|id",
+              "transform": "string"
+            },
+            "username": "username",
+            "full_name": "full_name",
+            "profile_pic_url": "profile_pic_url",
+            "is_private": {
+              "path": "is_private",
+              "transform": "bool"
+            },
+            "is_verified": {
+              "path": "is_verified",
+              "transform": "bool"
+            }
+          }
+        }
+      ]
+    },
+    "following": {
+      "strategies": [
+        {
+          "id": "friendships_following_v1",
+          "url": "https://www.instagram.com/api/v1/friendships/{user_id}/following/?count=100",
+          "needs": [
+            "user_id"
+          ],
+          "list_path": "users",
+          "cursor_path": "next_max_id",
+          "cursor_param": "max_id",
+          "require": [
+            "username"
+          ],
+          "fields": {
+            "user_id": {
+              "path": "pk|pk_id|id",
+              "transform": "string"
+            },
+            "username": "username",
+            "full_name": "full_name",
+            "profile_pic_url": "profile_pic_url",
+            "is_private": {
+              "path": "is_private",
+              "transform": "bool"
+            },
+            "is_verified": {
+              "path": "is_verified",
+              "transform": "bool"
+            }
+          }
+        }
+      ]
+    },
+    "posts": {
+      "rate_limit_waits_ms": [
+        5000
+      ],
+      "max_pages": 3,
+      "strategies": [
+        {
+          "id": "graphql_profile_posts_v1",
+          "url": "https://www.instagram.com/graphql/query",
+          "method": "POST",
+          "headers": {
+            "Accept": "*/*",
+            "Content-Type": "application/x-www-form-urlencoded",
+            "X-FB-Friendly-Name": "PolarisProfilePostsTabContentQuery_connection"
+          },
+          "body": "doc_id=28648141034875162&variables={\"after\":{cursor:json_form},\"before\":null,\"data\":{\"count\":12,\"include_reel_media_seen_timestamp\":true,\"include_relationship_info\":true,\"latest_besties_reel_media\":true,\"latest_reel_media\":true},\"first\":12,\"include_multi_captions\":true,\"last\":null,\"username\":{username:json_form},\"__relay_internal__pv__PolarisMultiCaptionCarouselEnabledrelayprovider\":true,\"__relay_internal__pv__PolarisShortDramaEnabledrelayprovider\":false,\"__relay_internal__pv__PolarisReelsRecoDebugOverlayEnabledrelayprovider\":false}",
+          "first_page": {
+            "headers": {
+              "X-FB-Friendly-Name": "PolarisProfilePostsQuery"
+            },
+            "body": "doc_id=28322872020710458&variables={\"data\":{\"count\":12,\"include_reel_media_seen_timestamp\":true,\"include_relationship_info\":true,\"latest_besties_reel_media\":true,\"latest_reel_media\":true},\"username\":{username:json_form},\"__relay_internal__pv__PolarisMultiCaptionCarouselEnabledrelayprovider\":true,\"__relay_internal__pv__PolarisShortDramaEnabledrelayprovider\":false,\"__relay_internal__pv__PolarisReelsRecoDebugOverlayEnabledrelayprovider\":false}"
+          },
+          "needs": [
+            "username"
+          ],
+          "list_path": "data.xdt_api__v1__feed__user_timeline_graphql_connection.edges",
+          "item_path": "node",
+          "require": [
+            "media_id"
+          ],
+          "fields": {
+            "media_id": {
+              "path": "pk|id",
+              "transform": "before_underscore"
+            },
+            "shortcode": "code",
+            "like_count": {
+              "path": "like_count",
+              "transform": "int"
+            },
+            "comment_count": {
+              "path": "comment_count",
+              "transform": "int"
+            },
+            "image_url": "image_versions2.candidates.0.url|carousel_media.0.image_versions2.candidates.0.url|display_uri",
+            "media_type": {
+              "path": "media_type",
+              "transform": "int"
+            },
+            "taken_at": {
+              "path": "taken_at",
+              "transform": "int"
+            }
+          },
+          "cursor_path": "data.xdt_api__v1__feed__user_timeline_graphql_connection.page_info.end_cursor",
+          "has_more_path": "data.xdt_api__v1__feed__user_timeline_graphql_connection.page_info.has_next_page"
+        },
+        {
+          "id": "web_profile_info_media_v1",
+          "url": "https://www.instagram.com/api/v1/users/web_profile_info/?username={username}",
+          "needs": [
+            "username"
+          ],
+          "list_path": "data.user.edge_owner_to_timeline_media.edges",
+          "item_path": "node",
+          "require": [
+            "media_id"
+          ],
+          "fields": {
+            "media_id": {
+              "path": "id",
+              "transform": "string"
+            },
+            "shortcode": "shortcode",
+            "like_count": {
+              "path": "edge_liked_by.count|edge_media_preview_like.count",
+              "transform": "int"
+            },
+            "comment_count": {
+              "path": "edge_media_to_comment.count",
+              "transform": "int"
+            },
+            "image_url": "display_url|thumbnail_src",
+            "media_type": {
+              "path": "is_video",
+              "transform": "video_flag"
+            },
+            "taken_at": {
+              "path": "taken_at_timestamp",
+              "transform": "int"
+            }
+          }
+        }
+      ]
+    },
+    "likers": {
+      "rate_limit_waits_ms": [
+        5000
+      ],
+      "max_pages": 1,
+      "strategies": [
+        {
+          "id": "media_likers_v1",
+          "url": "https://www.instagram.com/api/v1/media/{media_id}/likers/",
+          "needs": [
+            "media_id"
+          ],
+          "list_path": "users",
+          "require": [
+            "username"
+          ],
+          "fields": {
+            "username": "username",
+            "user_id": {
+              "path": "pk|pk_id|id",
+              "transform": "string"
+            },
+            "full_name": "full_name",
+            "profile_pic_url": "profile_pic_url",
+            "is_private": {
+              "path": "is_private",
+              "transform": "bool"
+            },
+            "is_verified": {
+              "path": "is_verified",
+              "transform": "bool"
+            }
+          }
+        }
+      ]
+    },
+    "stories": {
+      "rate_limit_waits_ms": [
+        5000
+      ],
+      "max_pages": 1,
+      "strategies": [
+        {
+          "id": "feed_story_v1",
+          "url": "https://www.instagram.com/api/v1/feed/user/{user_id}/story/",
+          "needs": [
+            "user_id"
+          ],
+          "list_path": "reel.items",
+          "missing_list_is_empty": true,
+          "require": [
+            "media_id"
+          ],
+          "fields": {
+            "media_id": {
+              "path": "pk|id",
+              "transform": "before_underscore"
+            },
+            "viewer_count": {
+              "path": "viewer_count",
+              "transform": "int"
+            },
+            "taken_at": {
+              "path": "taken_at",
+              "transform": "int"
+            }
+          }
+        }
+      ]
+    },
+    "story_viewers": {
+      "rate_limit_waits_ms": [
+        5000
+      ],
+      "max_pages": 1,
+      "strategies": [
+        {
+          "id": "reel_media_viewers_v1",
+          "url": "https://www.instagram.com/api/v1/media/{media_id}/list_reel_media_viewer/",
+          "needs": [
+            "media_id"
+          ],
+          "list_path": "users",
+          "require": [
+            "username"
+          ],
+          "fields": {
+            "username": "username",
+            "full_name": "full_name",
+            "profile_pic_url": "profile_pic_url",
+            "user_id": {
+              "path": "pk|pk_id|id",
+              "transform": "string"
+            }
+          }
+        }
+      ]
+    },
+    "profile_lookup": {
+      "rate_limit_waits_ms": [
+        5000
+      ],
+      "strategies": [
+        {
+          "id": "graphql_profile_page_v1",
+          "url": "https://www.instagram.com/api/graphql",
+          "method": "POST",
+          "headers": {
+            "Accept": "*/*",
+            "Content-Type": "application/x-www-form-urlencoded",
+            "X-FB-Friendly-Name": "PolarisProfilePageContentQuery",
+            "X-FB-LSD": "{token:lsd}"
+          },
+          "body": "doc_id=28036671149327607&lsd={token:lsd}&fb_dtsg={token:fb_dtsg}&variables={\"enable_integrity_filters\":true,\"id\":{user_id:json_form},\"__relay_internal__pv__PolarisCannesGuardianExperienceEnabledrelayprovider\":true,\"__relay_internal__pv__PolarisCASB976ProfileEnabledrelayprovider\":false,\"__relay_internal__pv__PolarisWebSchoolsEnabledrelayprovider\":false,\"__relay_internal__pv__PolarisRepostsConsumptionEnabledrelayprovider\":true,\"__relay_internal__pv__PolarisShortDramaEnabledrelayprovider\":false}",
+          "needs": [
+            "user_id"
+          ],
+          "object_path": "data.user",
+          "not_found_messages": [
+            "field_exception"
+          ],
+          "require": [
+            "username"
+          ],
+          "fields": {
+            "user_id": {
+              "path": "pk|id",
+              "transform": "string"
+            },
+            "username": "username",
+            "is_private": {
+              "path": "is_private",
+              "transform": "bool"
+            },
+            "profile_pic_url": "hd_profile_pic_url_info.url|profile_pic_url"
+          }
+        },
+        {
+          "id": "web_profile_info_lookup_v1",
+          "url": "https://www.instagram.com/api/v1/users/web_profile_info/?username={username}",
+          "needs": [
+            "username"
+          ],
+          "object_path": "data.user",
+          "not_found_status": [
+            404
+          ],
+          "missing_object_is_not_found": true,
+          "require": [
+            "username"
+          ],
+          "fields": {
+            "username": "username",
+            "is_private": {
+              "path": "is_private",
+              "transform": "bool"
+            },
+            "profile_pic_url": "profile_pic_url_hd|profile_pic_url"
+          }
+        }
+      ]
+    },
+    "prelogin_profile": {
+      "rate_limit_waits_ms": [],
+      "retry_attempts": 0,
+      "strategies": [
+        {
+          "id": "mobile_api",
+          "transport": "http",
+          "url": "https://i.instagram.com/api/v1/users/web_profile_info/?username={username}",
+          "headers": {
+            "User-Agent": "Instagram 275.0.0.27.98 Android",
+            "X-IG-App-ID": "936619743392459"
+          },
+          "needs": [
+            "username"
+          ],
+          "object_path": "data.user",
+          "require": [
+            "username",
+            "profile_pic_url"
+          ],
+          "fields": {
+            "user_id": {
+              "path": "id",
+              "transform": "string"
+            },
+            "username": "username",
+            "full_name": "full_name",
+            "profile_pic_url": "profile_pic_url_hd|profile_pic_url",
+            "follower_count": {
+              "path": "edge_followed_by.count",
+              "transform": "int"
+            },
+            "following_count": {
+              "path": "edge_follow.count",
+              "transform": "int"
+            },
+            "post_count": {
+              "path": "edge_owner_to_timeline_media.count",
+              "transform": "int"
+            },
+            "is_verified": {
+              "path": "is_verified",
+              "transform": "bool"
+            }
+          }
+        },
+        {
+          "id": "web_api",
+          "transport": "http",
+          "url": "https://www.instagram.com/api/v1/users/web_profile_info/?username={username}",
+          "headers": {
+            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15",
+            "X-IG-App-ID": "936619743392459"
+          },
+          "needs": [
+            "username"
+          ],
+          "object_path": "data.user",
+          "require": [
+            "username",
+            "profile_pic_url"
+          ],
+          "fields": {
+            "user_id": {
+              "path": "id",
+              "transform": "string"
+            },
+            "username": "username",
+            "full_name": "full_name",
+            "profile_pic_url": "profile_pic_url_hd|profile_pic_url",
+            "follower_count": {
+              "path": "edge_followed_by.count",
+              "transform": "int"
+            },
+            "following_count": {
+              "path": "edge_follow.count",
+              "transform": "int"
+            },
+            "post_count": {
+              "path": "edge_owner_to_timeline_media.count",
+              "transform": "int"
+            },
+            "is_verified": {
+              "path": "is_verified",
+              "transform": "bool"
+            }
+          }
+        },
+        {
+          "id": "html_og",
+          "transport": "http",
+          "reply": "html",
+          "url": "https://www.instagram.com/{username}/",
+          "headers": {
+            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15"
+          },
+          "needs": [
+            "username"
+          ],
+          "require": [
+            "profile_pic_url"
+          ],
+          "fields": {
+            "profile_pic_url": {
+              "pattern": "<meta property=\"og:image\" content=\"([^\"]+)\"",
+              "transform": "html_unescape"
+            },
+            "follower_count": {
+              "pattern": "<meta property=\"og:description\" content=\"[^\"]*?([\\d,\\.]+[KMkm]?)\\s*Followers",
+              "transform": "count"
+            },
+            "following_count": {
+              "pattern": "<meta property=\"og:description\" content=\"[^\"]*?([\\d,\\.]+[KMkm]?)\\s*Following",
+              "transform": "count"
+            },
+            "post_count": {
+              "pattern": "<meta property=\"og:description\" content=\"[^\"]*?([\\d,\\.]+[KMkm]?)\\s*Posts",
+              "transform": "count"
+            }
+          }
+        }
+      ]
+    },
+    "friendship_status": {
+      "rate_limit_waits_ms": [],
+      "retry_attempts": 0,
+      "strategies": [
+        {
+          "id": "friendships_show_v1",
+          "url": "https://www.instagram.com/api/v1/friendships/show/{user_id}/",
+          "needs": [
+            "user_id"
+          ],
+          "not_found_status": [
+            404
+          ],
+          "require": [
+            "followed_by",
+            "following"
+          ],
+          "fields": {
+            "followed_by": {
+              "path": "followed_by",
+              "transform": "bool"
+            },
+            "following": {
+              "path": "following",
+              "transform": "bool"
+            }
+          }
+        }
+      ]
+    }
+  },
+  "messages": {
+    "engagement_failed_title": "We couldn't load your post likes",
+    "engagement_failed_body": "Instagram didn't return your post likes during your last sync, so this can't be calculated yet. Sync again to refresh it.",
+    "sync_again": "Sync again"
+  }
+}
