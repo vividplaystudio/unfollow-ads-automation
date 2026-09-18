@@ -28,15 +28,27 @@ HERE = Path(__file__).resolve().parent
 ACCOUNT = os.environ.get('IG_CHECK_ACCOUNT', 'instagram')  # a public account, never the user's
 
 
-def run_check() -> tuple[bool, str]:
-    """(everything failed?, the report to show)"""
+def run_check() -> tuple[str, str]:
+    """(verdict, the report to show) — verdict is up / down / unknown.
+
+    Rate limiting is NOT a failure. Instagram throttles datacenter addresses
+    hard, so a run from a CI machine can see 401/429 on every way while real
+    users on phone networks are fine. That is "unknown", and waking someone
+    for it would teach them to ignore the alerts.
+    """
     result = subprocess.run(
         [sys.executable, str(HERE / 'check_prelogin.py'), ACCOUNT],
         capture_output=True, text=True, timeout=180)
-    report = (result.stdout or '') + (result.stderr or '')
+    report = ((result.stdout or '') + (result.stderr or '')).strip()
     ways = [l for l in report.splitlines() if l.startswith(('✅', '❌'))]
-    all_failed = bool(ways) and all(l.startswith('❌') for l in ways)
-    return all_failed, report.strip()
+    if not ways:
+        return 'unknown', report
+    if any(l.startswith('✅') for l in ways):
+        return 'up', report
+    throttled = [l for l in ways if 'rateLimited' in l or ' 429' in l or ' 401' in l]
+    if len(throttled) == len(ways):
+        return 'unknown', report
+    return 'down', report
 
 
 def tell_telegram(text: str) -> bool:
@@ -60,13 +72,17 @@ def tell_telegram(text: str) -> bool:
 def main() -> int:
     dry_run = '--dry-run' in sys.argv
     try:
-        all_failed, report = run_check()
+        verdict, report = run_check()
     except subprocess.TimeoutExpired:
-        all_failed, report = True, 'The check itself timed out after 3 minutes.'
+        verdict, report = 'unknown', 'The check itself timed out after 3 minutes.'
 
     print(report)
-    if not all_failed:
+    if verdict == 'up':
         print('\nat least one way works — the funnel is fine, saying nothing')
+        return 0
+    if verdict == 'unknown':
+        print('\nevery way was rate-limited — this machine is throttled, not '
+              'Instagram broken. Saying nothing.')
         return 0
 
     message = (
@@ -77,7 +93,7 @@ def main() -> int:
         'The fix is usually a new recipe in Firebase Remote Config '
         '(key: ig_playbook) — no App Store update needed.'
     )
-    print('\nALL WAYS FAILED' + (' — dry run, not sending' if dry_run else ' — alerting'))
+    print('\nEVERY WAY FAILED FOR REAL' + (' — dry run, not sending' if dry_run else ' — alerting'))
     if dry_run:
         return 1
     tell_telegram(message)
