@@ -22,6 +22,9 @@ define('IGH_BASELINE_MIN_SAMPLE', 30);
 define('IGH_EVAL_EVERY', 300);
 define('IGH_RENOTIFY_EVERY', 6 * 3600);
 define('IGH_PANEL_URL', 'https://genivox.com/ads-upload/ig-health.html');
+// Telegram already delivers every alert; the e-mail copy only repeated it.
+// Set to true to get both again.
+define('IGH_EMAIL_ALERTS', false);
 
 function igh_dir()
 {
@@ -408,6 +411,7 @@ function igh_evaluate_alerts(array $state)
         if ($rate < 0.3 || ($rate < 0.5 && ($baseRate === null || $baseRate - $rate >= 0.2))) {
             $firing[$key] = [
                 'level'   => 'critical',
+                'what'    => $op,
                 'message' => sprintf('%s is failing: %d%% of %d scans succeeded in the last 30 min%s.',
                     $op, round($rate * 100), $w['n'],
                     $baseRate === null ? '' : sprintf(' (normally %d%%)', round($baseRate * 100))),
@@ -440,6 +444,7 @@ function igh_evaluate_alerts(array $state)
             arsort($reasons);
             $firing[$key] = [
                 'level'   => 'warning',
+                'what'    => $op . ' → ' . $strategy,
                 'message' => sprintf('%s → %s fails %d%% of %d attempts (mostly "%s").',
                     $op, $strategy, round($failRate * 100), $w['n'], (string) key($reasons)),
             ];
@@ -473,7 +478,9 @@ function igh_evaluate_alerts(array $state)
             $firing[$key] = $alert;
             continue;
         }
-        $messages[] = '✅ Recovered: ' . $alert['message'];
+        $messages[] = isset($alert['what'])
+            ? '✅ Recovered: ' . $alert['what'] . ' is working again.'
+            : '✅ Recovered: ' . $alert['message'];
     }
 
     @file_put_contents(igh_dir() . '/alerts.json', json_encode(['evaluated_at' => $now, 'firing' => $firing]), LOCK_EX);
@@ -512,7 +519,7 @@ function igh_notify($text)
         ]);
         $sent = igh_http_post($url, $body) || $sent;
     }
-    if (!empty($config['email_to'])) {
+    if (IGH_EMAIL_ALERTS && !empty($config['email_to'])) {
         $sent = @mail($config['email_to'], 'Unfollow Tracker: Instagram health alert', $text,
             "Content-Type: text/plain; charset=UTF-8\r\n") || $sent;
     }
