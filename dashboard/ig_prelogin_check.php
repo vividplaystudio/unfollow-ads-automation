@@ -138,8 +138,25 @@ function igpc_check($username)
 
 [$verdict, $ways] = igpc_check(IGPC_ACCOUNT);
 
+/**
+ * Whether a 'down' verdict messages you, or is only recorded.
+ *
+ * Off since 2026-09-19. This check runs from a datacenter and can only ever
+ * see what a datacenter sees, which is not what a phone sees: on that day it
+ * reported the username screen DOWN while the funnel was working perfectly
+ * from username to paywall. A signal that cannot see the thing it is
+ * guarding should not be the one that wakes you.
+ *
+ * What to trust instead: the health reports from real devices, which come
+ * from the addresses that actually matter.
+ *
+ * Turn this back on only if the check is ever moved somewhere Instagram
+ * treats like a normal visitor.
+ */
+const IGPC_NOTIFY = false;
+
 $alerted = false;
-if ($verdict === 'down') {
+if ($verdict === 'down' && IGPC_NOTIFY) {
     $text = "Unfollow Tracker — the username screen is DOWN\n\n"
           . "Every way of looking up a profile failed, and not because of rate limiting. "
           . "New users cannot get past the first screen, so the ads are spending for nothing.\n\n"
@@ -150,8 +167,11 @@ if ($verdict === 'down') {
 }
 
 echo json_encode([
-    'verdict' => $verdict,
-    'ways'    => $ways,
-    'alerted' => $alerted,
-    'checked' => gmdate('c'),
+    'verdict'   => $verdict,
+    'ways'      => $ways,
+    'alerted'   => $alerted,
+    // Stated plainly so a 'down' in the dashboard is never mistaken for
+    // something nobody was told about by accident.
+    'notifying' => IGPC_NOTIFY,
+    'checked'   => gmdate('c'),
 ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
