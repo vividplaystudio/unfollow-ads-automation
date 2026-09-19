@@ -54,6 +54,26 @@ function igpc_get($url, $headers)
     return [$code, $body === false ? '' : $body, $err];
 }
 
+/**
+ * Whether a 200 is Instagram's login wall rather than a profile.
+ *
+ * It is served to addresses Instagram does not trust — this server among
+ * them — and it is why the check reported the username screen DOWN on
+ * 2026-09-19 while every phone was working normally.
+ */
+function igpc_is_login_wall($body)
+{
+    if ($body === '' || $body === null) return false;
+    if (stripos($body, '"require_login"') !== false) return true;
+    // A profile page always carries og:image. Without it, a page that talks
+    // about logging in is the wall rather than a broken profile.
+    if (stripos($body, 'og:image') !== false) return false;
+    foreach (['accounts/login', 'loginForm', 'Log in to Instagram', 'LoginAndSignupPage'] as $sign) {
+        if (stripos($body, $sign) !== false) return true;
+    }
+    return false;
+}
+
 /** up | down | unknown, with a line per way. */
 function igpc_check($username)
 {
@@ -78,7 +98,15 @@ function igpc_check($username)
             continue;
         }
         if ($code === 401 || $code === 429) {
-            $ways[] = "SKIP $name: $code rate limited";   // throttled, tells us nothing
+            $ways[] = "SKIP $name: $code blocked from this server";  // tells us nothing
+            continue;
+        }
+        // Instagram answers a blocked address with a login wall as well as a
+        // 401 — a real page, 200, just not a profile. From a datacenter it
+        // says nothing about what a phone sees, so it is a skip like the 401
+        // and must never raise the alarm on its own.
+        if (igpc_is_login_wall($body)) {
+            $ways[] = "SKIP $name: login wall (this server is blocked)";
             continue;
         }
         if ($code !== 200) {
