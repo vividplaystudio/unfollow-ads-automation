@@ -1,0 +1,129 @@
+name: Fetch Instagram health totals
+
+# Reads the raw health records over FTP and prints day-level totals, because
+# ig_health.php sits behind the dashboard's Basic Auth on purpose. Aggregates
+# only — the records themselves hold nothing identifying, and none are printed.
+
+on:
+  workflow_dispatch:
+    inputs:
+      hours:
+        description: How many hours back to total
+        required: false
+        default: "24"
+
+jobs:
+  totals:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch and total via FTPS
+        env:
+          FTP_HOST: ${{ secrets.FTP_HOST }}
+          FTP_USER: ${{ secrets.FTP_USER }}
+          FTP_PASS: ${{ secrets.FTP_PASS }}
+          HOURS: ${{ github.event.inputs.hours }}
+        run: |
+          python3 << 'PYEOF'
+          import ftplib, ssl, os, io, json, time, collections
+
+          SUCCESS = {"ok", "empty", "notFound"}
+          hours = int(os.environ.get("HOURS") or 24)
+          since = time.time() - hours * 3600
+
+          ctx = ssl.create_default_context()
+          ctx.check_hostname = False
+          ctx.verify_mode = ssl.CERT_NONE
+          ftp = ftplib.FTP_TLS(os.environ["FTP_HOST"], timeout=60, context=ctx)
+          ftp.login(os.environ["FTP_USER"], os.environ["FTP_PASS"])
+          ftp.prot_p()
+
+          def navigate(path):
+              parts = path.strip("/").split("/")
+              last = None
+              for i in range(len(parts)):
+                  try:
+                      ftp.cwd("/" + "/".join(parts[i:]))
+                      return ftp.pwd()
+                  except ftplib.error_perm as e:
+                      last = e
+              raise RuntimeError(f"could not reach {path}: {last}")
+
+          print("working dir:", navigate("/home/coinvohy/genivox.com/ads-upload/ig_health_data"))
+
+          names = []
+          ftp.retrlines("NLST", names.append)
+          days = sorted(n for n in names if n.endswith(".jsonl"))[-3:]
+          print("files:", ", ".join(days) or "none")
+
+          records = []
+          for name in days:
+              buf = io.BytesIO()
+              ftp.retrbinary("RETR " + name, buf.write)
+              for line in buf.getvalue().decode("utf-8", "replace").splitlines():
+                  try:
+                      r = json.loads(line)
+                  except Exception:
+                      continue
+                  if isinstance(r, dict) and r.get("t", 0) >= since and isinstance(r.get("ev"), list):
+                      records.append(r)
+          ftp.quit()
+
+          print()
+          print(f"==== last {hours} h · {len(records)} reports ====")
+
+          prelogin = collections.Counter()
+          scans = collections.Counter()
+          ops = collections.defaultdict(lambda: [0, 0])          # op -> [total, ok]
+          strat = collections.defaultdict(collections.Counter)   # op|strategy -> outcome counts
+
+          for r in records:
+              seen = {}
+              for e in r["ev"]:
+                  if e.get("o") == "skipped":
+                      continue
+                  op = e.get("op", "?")
+                  seen.setdefault(op, False)
+                  if e.get("o") in SUCCESS:
+                      seen[op] = True
+                  key = f"{op}|{e.get('s','?')}"
+                  label = e.get("o", "?")
+                  if label not in SUCCESS and e.get("st"):
+                      label = f"{label} {e['st']}"
+                  strat[key][label] += e.get("n", 1)
+              for op, ok in seen.items():
+                  ops[op][0] += 1
+                  ops[op][1] += 1 if ok else 0
+              summary = r.get("sum") or {}
+              target = prelogin if r.get("ctx") == "prelogin" else scans
+              target[str(summary.get("outcome", "unknown"))] += 1
+
+          print()
+          print("---- USERNAME SCREEN: what real people got ----")
+          total = sum(prelogin.values())
+          print(f"  lookups: {total}")
+          for name, count in prelogin.most_common():
+              share = f"{count / total * 100:4.1f}%" if total else "   —"
+              print(f"    {name:<14} {count:>6}  {share}")
+
+          print()
+          print("---- AFTER LOGIN: sync outcomes ----")
+          total_scans = sum(scans.values())
+          print(f"  scans: {total_scans}")
+          for name, count in scans.most_common():
+              print(f"    {name:<14} {count:>6}")
+
+          print()
+          print("---- EACH OPERATION ----")
+          for op in sorted(ops):
+              n, ok = ops[op]
+              print(f"  {op:<20} {ok:>6} / {n:<6} worked  ({ok / n * 100:.1f}%)")
+
+          print()
+          print("---- EACH ROUTE, AND WHY IT FAILED ----")
+          for key in sorted(strat):
+              counts = strat[key]
+              tried = sum(counts.values())
+              ok = sum(v for k, v in counts.items() if k in SUCCESS)
+              reasons = ", ".join(f"{k} x{v}" for k, v in counts.most_common() if k not in SUCCESS)
+              print(f"  {key:<42} {ok:>6} / {tried:<6} worked   {reasons or '-'}")
+          PYEOF
