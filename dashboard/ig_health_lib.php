@@ -16,9 +16,17 @@ define('IGH_KEEP_DAYS', 30);
 define('IGH_SUCCESS', ['ok', 'empty', 'notFound']);
 
 // Alerting: a 30-minute window compared with the 24 hours before it.
-define('IGH_ALERT_WINDOW', 1800);
-define('IGH_ALERT_MIN_SAMPLE', 15);
-define('IGH_BASELINE_MIN_SAMPLE', 30);
+// Two hours, not thirty minutes: a quiet night hour held 23 scans, enough to
+// call an operation broken and clear it again twenty minutes later. The panel
+// still records everything; these numbers only decide what is worth a message.
+define('IGH_ALERT_WINDOW', 7200);
+define('IGH_ALERT_MIN_SAMPLE', 100);
+define('IGH_BASELINE_MIN_SAMPLE', 200);
+
+// One route failing while a backup carries the operation is the design
+// working, not news — every orange alert so far was that. They stay on the
+// panel, where they explain a red one; they no longer reach anyone's phone.
+define('IGH_STRATEGY_ALERTS', false);
 define('IGH_EVAL_EVERY', 300);
 define('IGH_RENOTIFY_EVERY', 6 * 3600);
 define('IGH_PANEL_URL', 'https://genivox.com/ads-upload/ig-health.html');
@@ -421,7 +429,7 @@ function igh_evaluate_alerts(array $state)
 
     // Warning: one strategy broke while a backup still carries the operation —
     // fix it before the backup breaks too.
-    foreach ($winStrategy as $k => $w) {
+    foreach (IGH_STRATEGY_ALERTS ? $winStrategy : [] as $k => $w) {
         if ($w['n'] < IGH_ALERT_MIN_SAMPLE) {
             continue;
         }
@@ -452,6 +460,13 @@ function igh_evaluate_alerts(array $state)
     }
 
     $previous = isset($state['firing']) && is_array($state['firing']) ? $state['firing'] : [];
+    if (!IGH_STRATEGY_ALERTS) {
+        foreach (array_keys($previous) as $key) {
+            if (strpos($key, 'strategy:') === 0) {
+                unset($previous[$key]);
+            }
+        }
+    }
     $messages = [];
     foreach ($firing as $key => $alert) {
         if (!isset($previous[$key])) {
