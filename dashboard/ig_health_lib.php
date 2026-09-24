@@ -27,6 +27,12 @@ define('IGH_BASELINE_MIN_SAMPLE', 200);
 // working, not news — every orange alert so far was that. They stay on the
 // panel, where they explain a red one; they no longer reach anyone's phone.
 define('IGH_STRATEGY_ALERTS', false);
+
+// One message each morning with the numbers that matter, so nobody has to open
+// the panel to know the day went fine -- and nobody finds out from a customer's
+// screenshot. Local time, because it is read over breakfast.
+define('IGH_DIGEST_TZ', 'Asia/Bangkok');
+define('IGH_DIGEST_HOUR', 9);
 define('IGH_EVAL_EVERY', 300);
 define('IGH_RENOTIFY_EVERY', 6 * 3600);
 define('IGH_PANEL_URL', 'https://genivox.com/ads-upload/ig-health.html');
@@ -359,9 +365,67 @@ function igh_maybe_evaluate_alerts()
         if (time() - $lastEvaluated >= IGH_EVAL_EVERY) {
             igh_evaluate_alerts($state);
         }
+        igh_maybe_send_digest();
         flock($fp, LOCK_UN);
     }
     fclose($fp);
+}
+
+/** Once a day, after IGH_DIGEST_HOUR local time. Caller holds the lock. */
+function igh_maybe_send_digest()
+{
+    $path = igh_dir() . '/digest.json';
+    $state = is_readable($path) ? json_decode(file_get_contents($path), true) : null;
+    $last = (is_array($state) && isset($state['day'])) ? (string) $state['day'] : '';
+
+    $now = new DateTime('now', new DateTimeZone(IGH_DIGEST_TZ));
+    $today = $now->format('Y-m-d');
+    if ($today === $last || (int) $now->format('G') < IGH_DIGEST_HOUR) {
+        return;
+    }
+    // Written before sending: a failed send must not retry all day.
+    @file_put_contents($path, json_encode(['day' => $today]), LOCK_EX);
+
+    $s = igh_summary(24);
+    $share = function ($part, $whole) {
+        return $whole > 0 ? round($part / $whole * 100) . '%' : '-';
+    };
+    $lookups = (int) $s['prelogin']['total'];
+    $found = isset($s['prelogin']['outcome']['found']) ? (int) $s['prelogin']['outcome']['found'] : 0;
+    $scans = (int) $s['scans']['total'];
+    $done = isset($s['scans']['outcome']['completed']) ? (int) $s['scans']['outcome']['completed'] : 0;
+    $noPhoto = (int) $s['scans']['profile_pic_missing'];
+
+    $weak = [];
+    foreach ($s['ops'] as $op => $windows) {
+        if (!isset($windows[24]) || $windows[24]['n'] < 30) {
+            continue;
+        }
+        $rate = $windows[24]['ok'] / $windows[24]['n'];
+        if ($rate < 0.7) {
+            $weak[$op] = round($rate * 100);
+        }
+    }
+    asort($weak);
+
+    $lines = [
+        'Unfollow Tracker - the last 24 hours',
+        '',
+        "Username screen: {$lookups} lookups, " . $share($found, $lookups) . ' found their profile',
+        "After login: {$scans} scans, {$done} finished",
+        "No profile photo: {$noPhoto} of {$scans} (" . $share($noPhoto, $scans) . ')',
+    ];
+    if ($weak) {
+        $parts = [];
+        foreach ($weak as $op => $rate) {
+            $parts[] = "{$op} {$rate}%";
+        }
+        $lines[] = '';
+        $lines[] = 'Working less than 70%: ' . implode(' · ', $parts);
+    }
+    $lines[] = '';
+    $lines[] = 'Panel: ' . IGH_PANEL_URL;
+    igh_notify(implode("\n", $lines));
 }
 
 function igh_evaluate_alerts(array $state)
