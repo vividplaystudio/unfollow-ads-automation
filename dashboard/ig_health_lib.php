@@ -484,8 +484,8 @@ function igh_evaluate_alerts(array $state)
             $firing[$key] = [
                 'level'   => 'critical',
                 'what'    => $op,
-                'message' => sprintf('%s is failing: %d%% of %d scans succeeded in the last 30 min%s.',
-                    $op, round($rate * 100), $w['n'],
+                'message' => sprintf('%s is failing: %d%% of %d scans succeeded in the last %d min%s.',
+                    $op, round($rate * 100), $w['n'], IGH_ALERT_WINDOW / 60,
                     $baseRate === null ? '' : sprintf(' (normally %d%%)', round($baseRate * 100))),
             ];
         }
