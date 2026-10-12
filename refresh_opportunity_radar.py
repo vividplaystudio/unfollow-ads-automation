@@ -289,12 +289,17 @@ def classify(m: dict) -> tuple:
     sub-genre instead, matching how apps sit in their category. The genre list
     mixes in app genres (Candy Crush is also "Entertainment"), so take the
     first 70xx entry, not the second element.
+
+    Name it from the ID, never from the `genres` text. That list is localised
+    per storefront while primaryGenreName is not, so the first run split Role
+    Playing six ways — "Rollenspiel", "Jeux de rôle", "Rol", "RPG" — depending
+    on which country's lookup reached the game first.
     """
     if str(m.get("primaryGenreId")) != "6014":
         return "app", m.get("primaryGenreName")
     for gid, name in zip(m.get("genreIds") or [], m.get("genres") or []):
         if str(gid).startswith("70"):
-            return "game", f"Games · {name}"
+            return "game", GAME_GENRE_NAMES.get(str(gid)) or f"Games · {name}"
     return "game", "Games"
 
 
