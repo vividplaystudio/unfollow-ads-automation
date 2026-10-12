@@ -22,7 +22,7 @@ on:
         required: false
         default: "180"
       genres:
-        description: "Apple genre IDs (blank = all non-game defaults)"
+        description: "Apple genre IDs (blank = all app categories + game sub-categories)"
         required: false
         default: ""
       charts:
@@ -33,9 +33,11 @@ on:
 jobs:
   radar:
     runs-on: ubuntu-latest
-    # 10 storefronts is ~630 throttled requests (~20 min). Headroom for Apple
-    # rate-limiting back off, which retries with exponential delay.
-    timeout-minutes: 45
+    # Apps alone ran ~33 min across 10 storefronts. Adding the 16 game
+    # sub-categories more than doubles the charts swept and roughly doubles the
+    # apps looked up, so expect ~60 min. Headroom for Apple rate-limiting back
+    # off, which retries with exponential delay.
+    timeout-minutes: 100
     steps:
       - uses: actions/checkout@v4
 

@@ -118,8 +118,7 @@ REFERENCE_COUNTRIES = [c.strip().lower() for c in (
     or "us,gb,ca,au,nz,ie,de,fr,jp,br,in,mx,sg,ph,za,kr,it,es"
 ).split(",") if c.strip()]
 
-# Games (6014) deliberately excluded — different business, different playbook.
-GENRE_NAMES = {
+APP_GENRE_NAMES = {
     "6000": "Business",
     "6002": "Utilities",
     "6003": "Travel",
@@ -135,6 +134,30 @@ GENRE_NAMES = {
     "6023": "Food & Drink",
     "6024": "Shopping",
 }
+# Games are swept by SUB-category, the same way apps are swept by category.
+# The parent Games chart (6014) adds no apps: anything in the overall top 100
+# also sits in the top 100 of its own sub-category. 7007 Dice and 7008
+# Educational return empty feeds, and 7010 isn't a game genre at all — Apple
+# serves the Productivity chart for it.
+GAME_GENRE_NAMES = {
+    "7001": "Games · Action",
+    "7002": "Games · Adventure",
+    "7003": "Games · Casual",
+    "7004": "Games · Board",
+    "7005": "Games · Card",
+    "7006": "Games · Casino",
+    "7009": "Games · Family",
+    "7011": "Games · Music",
+    "7012": "Games · Puzzle",
+    "7013": "Games · Racing",
+    "7014": "Games · Roleplaying",
+    "7015": "Games · Simulation",
+    "7016": "Games · Sports",
+    "7017": "Games · Strategy",
+    "7018": "Games · Trivia",
+    "7019": "Games · Word",
+}
+GENRE_NAMES = {**APP_GENRE_NAMES, **GAME_GENRE_NAMES}
 GENRES = [g.strip() for g in (os.environ.get("RADAR_GENRES") or ",".join(GENRE_NAMES)).split(",") if g.strip()]
 
 # top-grossing is the money signal; top-free catches paid-UA pushes that
@@ -258,6 +281,24 @@ def lookup_batch(app_ids: list, country: str) -> dict:
     return out
 
 
+def classify(m: dict) -> tuple:
+    """(kind, category) for a lookup record.
+
+    A game's primaryGenreName is just "Games" — on its own that lumps Candy
+    Crush in with a casino slot machine, so games are categorised by their
+    sub-genre instead, matching how apps sit in their category. The genre list
+    mixes in app genres (Candy Crush is also "Entertainment"), so take the
+    first 70xx entry, not the second element.
+    """
+    if str(m.get("primaryGenreId")) != "6014":
+        return "app", m.get("primaryGenreName")
+    for gid, name in zip(m.get("genreIds") or [], m.get("genres") or []):
+        if str(gid).startswith("70"):
+            return "game", f"Games · {name}"
+    return "game", "Games"
+
+
+
 # ══════════════════════════════════════════════════════════════════
 # Step 3 — previous run (for ratings velocity + first_seen)
 # ══════════════════════════════════════════════════════════════════
@@ -297,7 +338,8 @@ NICHE_STOPWORDS = set((os.environ.get("RADAR_STOPWORDS") or (
     "app,apps,free,pro,plus,premium,lite,the,and,for,with,your,you,my,our,all,new,best,top,easy,"
     "simple,quick,fast,smart,super,ultra,max,mini,hd,now,one,two,get,make,made,use,using,ios,"
     "iphone,ipad,mobile,phone,universal,official,daily,real,true,live,plus,and,its,que,para,con,"
-    "der,die,das,und,fur,mit,von,dem,les,des,une,pour,avec,sur,por,com,que,dos,das,edition,version"
+    "der,die,das,und,fur,mit,von,dem,les,des,une,pour,avec,sur,por,com,que,dos,das,edition,version,"
+    "game,games"
 )).split(","))
 NICHE_STOPWORDS = {w.strip() for w in NICHE_STOPWORDS if w.strip()}
 
@@ -309,7 +351,7 @@ NICHE_SEARCH_TOP = int(os.environ.get("RADAR_NICHE_SEARCH_TOP") or 40)
 SEARCH_COUNTRY = (os.environ.get("RADAR_SEARCH_COUNTRY") or "us").lower()
 
 
-def probe_niche_entrants(term: str, now) -> dict:
+def probe_niche_entrants(term: str, kind: str, now) -> dict:
     """Find apps that ENTERED a niche recently, charting or not.
 
     The chart sweep only sees the top 100 per category, so a newcomer sitting
@@ -325,6 +367,10 @@ def probe_niche_entrants(term: str, now) -> dict:
     launch as a failure. Ratings/day catches traction regardless of HOW it was
     acquired, which is the only fair read when the winning strategy is ads
     rather than ASO.
+
+    Search mixes apps and games under one keyword ("merge" returns both), so
+    only entrants of the niche's own kind count — a puzzle game is not a
+    competitor in an app niche, nor a utility in a game one.
     """
     url = (f"https://itunes.apple.com/search?term={urllib.parse.quote_plus(term)}"
            f"&country={SEARCH_COUNTRY}&entity=software&limit=200")
@@ -335,6 +381,8 @@ def probe_niche_entrants(term: str, now) -> dict:
 
     entrants = []
     for r in data.get("results", []):
+        if classify(r)[0] != kind:
+            continue
         rel = r.get("releaseDate")
         if not rel:
             continue
@@ -399,10 +447,10 @@ def build_niches(all_charting: dict, new_ids: set) -> list:
         # Bigrams as well as single words: "screen mirroring" is a niche,
         # "screen" and "mirroring" separately are much weaker terms.
         terms = set(words) | {f"{x} {y}" for x, y in zip(words, words[1:])}
-        genre = a["primary_genre"] or "Unknown"
+        genre = a["category"] or "Unknown"
         for t in terms:
             c = clusters.setdefault((genre, t), {
-                "term": t, "category": genre, "apps": [], "publishers": set(),
+                "term": t, "category": genre, "kind": a["kind"], "apps": [], "publishers": set(),
             })
             c["apps"].append(a)
             if a["publisher"]:
@@ -459,6 +507,7 @@ def build_niches(all_charting: dict, new_ids: set) -> list:
             "term": term,
             "aliases": sorted(set(c["_aliases"]))[:6],
             "category": genre,
+            "kind": c["kind"],
             "app_count": len(apps),
             "publisher_count": len(c["publishers"]),
             "new_entrant_count": len(new_entrants),
@@ -507,16 +556,18 @@ def fetch_published(url: str, label: str) -> dict:
                            f"rebuild from empty and overwrite history") from e
 
 
-def load_previous() -> dict:
-    """{app_id: prev_record} from the last published run. Empty on first run.
+def load_previous() -> tuple:
+    """({app_id: prev_record}, {genre ids it swept}) from the last published
+    run. Both empty on first run.
 
     Unlike the discovery watchlist, an EMPTY result here is legitimate — a sweep
     can genuinely find no new-and-charting apps — so only a read failure aborts.
     """
     data = fetch_published(PREV_URL, "previous radar run")
     prev = {a["app_id"]: a for a in data.get("apps", [])}
-    print(f"  loaded {len(prev)} apps from previous run")
-    return prev
+    swept = set((data.get("config") or {}).get("genres") or {})
+    print(f"  loaded {len(prev)} apps from previous run ({len(swept)} genres swept)")
+    return prev, swept
 
 
 # ══════════════════════════════════════════════════════════════════
@@ -531,7 +582,7 @@ def main() -> None:
     print(f"  window:    apps released in the last {MAX_AGE_DAYS} days")
 
     print("\n▶ Loading previous run")
-    prev = load_previous()
+    prev, prev_genres = load_previous()
 
     print("\n▶ Sweeping charts")
     charts_by_country = sweep_charts()
@@ -561,11 +612,14 @@ def main() -> None:
             # previously discarded at the age filter, so keeping it costs zero
             # extra API calls. A niche's depth is measured across incumbents,
             # which are by definition the old apps.
+            kind, category = classify(m)
             ch = all_charting.setdefault(app_id, {
                 "app_id": app_id,
                 "name": m.get("trackName"),
                 "publisher": m.get("sellerName") or m.get("artistName"),
                 "primary_genre": m.get("primaryGenreName"),
+                "kind": kind,
+                "category": category,
                 "icon": m.get("artworkUrl100"),
                 "url": m.get("trackViewUrl"),
                 "ratings_count": 0,
@@ -605,6 +659,8 @@ def main() -> None:
                 "publisher": m.get("sellerName") or m.get("artistName"),
                 "bundle_id": m.get("bundleId"),
                 "primary_genre": m.get("primaryGenreName"),
+                "kind": kind,
+                "category": category,
                 "genres": m.get("genres", []),
                 "price": m.get("formattedPrice"),
                 "icon": m.get("artworkUrl100"),
@@ -709,7 +765,12 @@ def main() -> None:
                 rec[field] = (was - cur) if (cur and was) else None
         else:
             rec["first_seen"] = now.date().isoformat()
-            rec["is_new"] = True
+            # Only NEW if the last run swept a chart this app sits in. When a
+            # category joins the sweep (games did on 2026-10-13), everything in
+            # it is missing from the last run without having just arrived, and
+            # flagging all of it NEW would bury the real arrivals for a day.
+            rec["is_new"] = not prev_genres or any(
+                p["genre_id"] in prev_genres for p in rec["placements"])
             rec["grossing_rank_delta"] = None
             rec["free_rank_delta"] = None
             rec["ratings_delta"] = None
@@ -742,7 +803,7 @@ def main() -> None:
         ({"publisher": p,
           "app_count": len(recs),
           "artist_url": next((r["artist_url"] for r in recs if r.get("artist_url")), None),
-          "apps": [{"name": r["name"], "url": r["url"], "icon": r["icon"],
+          "apps": [{"name": r["name"], "url": r["url"], "icon": r["icon"], "kind": r["kind"],
                     "grossing_rank": r["best_grossing_rank"], "score": r["score"],
                     "days": r["days_since_launch"]}
                    for r in sorted(recs, key=lambda r: -r["score"])]}
@@ -762,6 +823,7 @@ def main() -> None:
         },
         "counts": {
             "total": len(ranked),
+            "games": sum(1 for a in ranked if a["kind"] == "game"),
             "grossing_ranked": sum(1 for a in ranked if a["best_grossing_rank"]),
             "under_90_days": sum(1 for a in ranked if a["days_since_launch"] <= 90),
             "under_30_days": sum(1 for a in ranked if a["days_since_launch"] <= 30),
@@ -925,11 +987,14 @@ def main() -> None:
           f"(incumbents included — costs no extra API calls)")
     niches = build_niches(all_charting, set(apps.keys()))
 
-    # Probe the top niches for recent entrants the charts can't see.
-    top = niches[:NICHE_SEARCH_TOP]
+    # Probe the top niches for recent entrants the charts can't see. The budget
+    # is per kind: game niches carry far more grossing money and would
+    # otherwise take most of the slots the app niches had before games joined.
+    top = ([n for n in niches if n["kind"] == "app"][:NICHE_SEARCH_TOP]
+           + [n for n in niches if n["kind"] == "game"][:NICHE_SEARCH_TOP])
     print(f"  probing {len(top)} niches for off-chart entrants ({SEARCH_COUNTRY.upper()})")
     for n in top:
-        n["entrant_probe"] = probe_niche_entrants(n["term"], now)
+        n["entrant_probe"] = probe_niche_entrants(n["term"], n["kind"], now)
         time.sleep(THROTTLE)
     probed = [n for n in top if n["entrant_probe"].get("searched")]
     print(f"  probed {len(probed)}: "

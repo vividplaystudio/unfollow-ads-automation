@@ -94,6 +94,11 @@ td.app{white-space:normal;min-width:200px}
 
   <div class="toolbar">
     <input id="q" placeholder="Search app or publisher…">
+    <select id="kind">
+      <option value="all">Apps + games</option>
+      <option value="app">Apps only</option>
+      <option value="game">Games only</option>
+    </select>
     <select id="age">
       <option value="9999">Any age</option>
       <option value="30">Launched &lt; 30 days</option>
@@ -101,7 +106,7 @@ td.app{white-space:normal;min-width:200px}
       <option value="90">Launched &lt; 90 days</option>
     </select>
     <select id="chart">
-      <option value="all">All apps</option>
+      <option value="all">Any chart</option>
       <option value="grossing">Grossing-ranked only</option>
     </select>
     <select id="expansion">
@@ -129,7 +134,7 @@ td.app{white-space:normal;min-width:200px}
         <th data-k="best_free_rank">Free #</th>
         <th data-k="name">App</th>
         <th data-k="publisher">Publisher</th>
-        <th data-k="primary_genre">Category</th>
+        <th data-k="category">Category</th>
         <th data-k="days_since_launch">Age</th>
         <th data-k="first_market">Launched</th>
         <th data-k="ratings_count">Ratings</th>
@@ -152,8 +157,60 @@ const nn = v => (v === null || v === undefined) ? Infinity : v;
 
 function ageClass(d){ return d <= 30 ? "hot" : d <= 90 ? "warm" : "cool"; }
 
+let PUBS = [];
+
+// Cards, publishers and the category list all follow the Apps/Games switch,
+// so the numbers at the top always describe what the table can show.
+function renderScope(){
+  const kind = document.getElementById("kind").value;
+  const scoped = APPS.filter(a => kind === "all" || a.kind === kind);
+
+  document.getElementById("cards").innerHTML = [
+    ["New &amp; charting", scoped.length],
+    ["Grossing-ranked", scoped.filter(a => a.best_grossing_rank !== null).length],
+    ["Launched &lt; 30d", scoped.filter(a => a.days_since_launch <= 30).length],
+    ["New since last run", scoped.filter(a => a.is_new).length],
+    ["Climbing", scoped.filter(a => (a.grossing_rank_delta || 0) > 0).length],
+  ].map(([l,n]) => `<div class="card"><div class="n">${n}</div><div class="l">${l}</div></div>`).join("");
+
+  const sel = document.getElementById("genre"), was = sel.value;
+  const group = (label, k) => {
+    const cats = [...new Set(APPS.filter(a => a.kind === k).map(a => a.category).filter(Boolean))].sort();
+    return cats.length && (kind === "all" || kind === k)
+      ? `<optgroup label="${label}">${cats.map(g => `<option>${esc(g)}</option>`).join("")}</optgroup>` : "";
+  };
+  sel.innerHTML = `<option value="all">All categories</option>` + group("Apps", "app") + group("Games", "game");
+  sel.value = [...sel.options].some(o => o.value === was) ? was : "all";
+
+  const pubs = PUBS
+    .map(p => ({...p, apps: p.apps.filter(x => kind === "all" || (x.kind || "app") === kind)}))
+    .filter(p => p.apps.length > 1);
+  const box = document.getElementById("pubs");
+  box.hidden = !pubs.length;
+  box.innerHTML = !pubs.length ? "" :
+    `<h2>Publishers with more than one app charting — repeatable formula, worth studying.
+         Click the name to open their App Store account and see everything they've shipped.</h2>` +
+    pubs.slice(0,12).map(p => `
+      <div class="pubrow">
+        <div class="pubcount">${p.apps.length}×</div>
+        <div class="pubmain">
+          <div class="pubname">${p.artist_url
+            ? `<a href="${esc(p.artist_url)}" target="_blank" rel="noopener">${esc(p.publisher)} ↗</a>`
+            : esc(p.publisher)}</div>
+          <div class="pubapps">${p.apps.map(x => `
+            <a class="chip" href="${esc(x.url)}" target="_blank" rel="noopener">
+              ${x.icon ? `<img src="${esc(x.icon)}" alt="" loading="lazy">` : ""}
+              ${esc(x.name)}
+              ${x.grossing_rank ? `<span class="r">#${x.grossing_rank}</span>` : ""}
+              <span class="muted">${x.days}d</span>
+            </a>`).join("")}</div>
+        </div>
+      </div>`).join("");
+}
+
 function render(){
   const q = document.getElementById("q").value.toLowerCase().trim();
+  const kind = document.getElementById("kind").value;
   const maxAge = +document.getElementById("age").value;
   const chart = document.getElementById("chart").value;
   const genre = document.getElementById("genre").value;
@@ -161,10 +218,11 @@ function render(){
   const wn = document.getElementById("whatsnew").value;
 
   let rows = APPS.filter(a =>
+    (kind === "all" || a.kind === kind) &&
     (!q || (a.name||"").toLowerCase().includes(q) || (a.publisher||"").toLowerCase().includes(q)) &&
     a.days_since_launch <= maxAge &&
     (chart === "all" || a.best_grossing_rank !== null) &&
-    (genre === "all" || a.primary_genre === genre) &&
+    (genre === "all" || a.category === genre) &&
     (exp === "all" || (exp === "geo" ? !!a.geo_expansion : !a.geo_expansion)) &&
     (wn === "all" || (wn === "new" ? !!a.is_new : (a.grossing_rank_delta || 0) > 0))
   );
@@ -177,7 +235,8 @@ function render(){
     return (a < b ? -1 : a > b ? 1 : 0) * (sortDir === "asc" ? 1 : -1);
   });
 
-  document.getElementById("count").textContent = `${rows.length} of ${APPS.length} apps`;
+  document.getElementById("count").textContent =
+    `${rows.length} of ${APPS.length} ${kind === "game" ? "games" : kind === "app" ? "apps" : "apps + games"}`;
   document.getElementById("rows").innerHTML = rows.length ? rows.map(a => {
     const d = a.grossing_rank_delta;
     const move = d > 0 ? `<span class="up">▲ ${d}</span>`
@@ -199,7 +258,7 @@ function render(){
           : esc(a.publisher || "")}
         ${a.publisher_app_count > 1
           ? `<span class="pill warm" title="This publisher has ${a.publisher_app_count} apps charting">×${a.publisher_app_count}</span>` : ""}</td>
-      <td>${esc(a.primary_genre || "")}</td>
+      <td>${esc(a.category)}</td>
       <td><span class="pill ${ageClass(a.days_since_launch)}" title="Global launch ${a.released}">${a.days_since_launch}d</span></td>
       <td>${a.first_market === "global"
             ? '<span class="muted">global</span>'
@@ -234,50 +293,26 @@ document.querySelectorAll("th[data-k]").forEach(th => {
 });
 ["q","age","chart","genre","expansion","whatsnew"].forEach(id =>
   document.getElementById(id).addEventListener("input", render));
+document.getElementById("kind").addEventListener("input", () => { renderScope(); render(); });
 
 fetch("opportunity_radar.json?v=" + Date.now())
   .then(r => { if (!r.ok) throw new Error("HTTP " + r.status); return r.json(); })
   .then(d => {
     APPS = d.apps || [];
-    const c = d.counts || {};
+    // Runs published before games were swept carry neither field, so derive
+    // them from what they do have: primary_genre is "Games" for any game.
+    APPS.forEach(a => {
+      a.kind = a.kind || (a.primary_genre === "Games" ? "game" : "app");
+      a.category = a.category || a.primary_genre || "";
+    });
+    PUBS = d.multi_app_publishers || [];
+    const nGames = APPS.filter(a => a.kind === "game").length;
     document.getElementById("meta").textContent =
       `Generated ${new Date(d.generated_at).toLocaleString()} · ` +
       `${(d.config?.countries||[]).join(", ").toUpperCase()} · ` +
-      `released within ${d.config?.max_age_days}d`;
-    document.getElementById("cards").innerHTML = [
-      ["New &amp; charting", c.total], ["Grossing-ranked", c.grossing_ranked],
-      ["Launched &lt; 30d", c.under_30_days], ["New since last run", c.new_since_last_run],
-      ["Climbing", c.climbing],
-    ].map(([l,n]) => `<div class="card"><div class="n">${n ?? 0}</div><div class="l">${l}</div></div>`).join("");
-
-    const pubs = d.multi_app_publishers || [];
-    if (pubs.length) {
-      document.getElementById("pubs").hidden = false;
-      document.getElementById("pubs").innerHTML =
-        `<h2>Publishers with more than one app charting — repeatable formula, worth studying.
-             Click the name to open their App Store account and see everything they've shipped.</h2>` +
-        pubs.slice(0,12).map(p => `
-          <div class="pubrow">
-            <div class="pubcount">${p.app_count}×</div>
-            <div class="pubmain">
-              <div class="pubname">${p.artist_url
-                ? `<a href="${esc(p.artist_url)}" target="_blank" rel="noopener">${esc(p.publisher)} ↗</a>`
-                : esc(p.publisher)}</div>
-              <div class="pubapps">${p.apps.map(x => `
-                <a class="chip" href="${esc(x.url)}" target="_blank" rel="noopener">
-                  ${x.icon ? `<img src="${esc(x.icon)}" alt="" loading="lazy">` : ""}
-                  ${esc(x.name)}
-                  ${x.grossing_rank ? `<span class="r">#${x.grossing_rank}</span>` : ""}
-                  <span class="muted">${x.days}d</span>
-                </a>`).join("")}</div>
-            </div>
-          </div>`).join("");
-    }
-
-    const genres = [...new Set(APPS.map(a => a.primary_genre).filter(Boolean))].sort();
-    document.getElementById("genre").innerHTML =
-      `<option value="all">All categories</option>` +
-      genres.map(g => `<option>${esc(g)}</option>`).join("");
+      `released within ${d.config?.max_age_days}d · ` +
+      `${APPS.length - nGames} apps, ${nGames} games`;
+    renderScope();
 
     document.querySelector('th[data-k="score"]').setAttribute("data-dir","desc");
     render();
