@@ -46,8 +46,14 @@ jobs:
           RC_WEBHOOK_SECRET: ${{ secrets.RC_WEBHOOK_SECRET }}
         run: python3 refresh_dashboard_json.py
 
+      # Off switch for when the Meta token is dead and can't be replaced yet.
+      # On 2026-10-12 Meta deleted the app behind META_ACCESS_TOKEN (developer
+      # account disabled), so every run failed and sent an email, ~5 a day.
+      #   off: gh variable set META_ENABLED --body false
+      #   on:  gh variable delete META_ENABLED   (after setting a new token)
+      # Skipped shows as skipped, not green — meta_ads.json stays frozen.
       - name: Run Meta Ads refresher (JSON + FTP)
-        if: always()
+        if: always() && vars.META_ENABLED != 'false'
         env:
           META_ACCESS_TOKEN: ${{ secrets.META_ACCESS_TOKEN }}
           META_AD_ACCOUNT_ID: ${{ secrets.META_AD_ACCOUNT_ID }}
